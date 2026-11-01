@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "crossfeed_map.h"
 
 static int failures = 0;
@@ -100,6 +101,43 @@ int main(void) {
     // Default pairs never split.
     for (int p = 0; p < 4; p++)
         CHECK(crossfeed_pair_owner((uint8_t)(2 * p), (uint8_t)(2 * p + 1), 2, 7) != XF_OWNER_SPLIT);
+
+    // Preset slot round trip through the former tube_reserved_f bytes
+    // (flash_storage.c collect_live_state / apply_slot_to_live).
+    {
+        uint8_t field[4];
+        // Upstream V38/V39 firmware writes 0.0f there: the default map.
+        float zero = 0.0f;
+        memcpy(field, &zero, sizeof field);
+        CHECK(crossfeed_map_load(field, 38, 4) == 0);
+        CHECK(crossfeed_map_load(field, 39, 2) == 0);
+        // Default map saves as four zero bytes (byte-identical to upstream).
+        crossfeed_map_to_bytes(0, field);
+        CHECK(field[0] == 0 && field[1] == 0 && field[2] == 0 && field[3] == 0);
+        CHECK(memcmp(field, &zero, 4) == 0);
+        CHECK(crossfeed_map_load(field, 39, 4) == 0);
+        // K340 map saves as 02 13 00 00 and loads back on both platforms.
+        crossfeed_map_to_bytes(k340, field);
+        CHECK(field[0] == 0x02 && field[1] == 0x13 && field[2] == 0 && field[3] == 0);
+        CHECK(crossfeed_map_from_bytes(field) == k340);
+        CHECK(crossfeed_map_load(field, 39, 4) == k340);
+        CHECK(crossfeed_map_load(field, 39, 2) == k340);
+        CHECK(crossfeed_map_load(field, 38, 4) == k340);
+        // Slots older than V38 have no such field: default, whatever the bytes.
+        CHECK(crossfeed_map_load(field, 37, 4) == 0);
+        CHECK(crossfeed_map_load(field, 21, 4) == 0);
+        // Erased / garbage / invalid bytes: default.
+        uint8_t ff[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+        CHECK(crossfeed_map_load(ff, 39, 4) == 0);
+        uint8_t dup[4] = {0x02, 0x00, 0x00, 0x00};
+        CHECK(crossfeed_map_load(dup, 39, 4) == 0);
+        uint8_t wide[4] = {0x00, 0x00, 0x45, 0x00};   // RP2350-only pair (5,4) on RP2040
+        CHECK(crossfeed_map_load(wide, 39, 2) == 0);
+        CHECK(crossfeed_map_load(wide, 39, 4) == map4(0, 0, 0x45, 0));
+        // Explicit default bytes load normalized.
+        uint8_t expl[4] = {0x10, 0x32, 0x54, 0x76};
+        CHECK(crossfeed_map_load(expl, 39, 4) == 0);
+    }
 
     if (failures) {
         fprintf(stderr, "test_crossfeed_map: %d failure(s)\n", failures);

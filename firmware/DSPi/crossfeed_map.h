@@ -94,6 +94,33 @@ static inline uint32_t crossfeed_map_normalize(uint32_t map) {
     return out;
 }
 
+// Preset slot storage (flash_storage.c).  The map lives in the 4 bytes that
+// were PresetSlot.tube_reserved_f (V38+, always written as 0.0f = four zero
+// bytes, never read by upstream firmware), so SLOT_DATA_VERSION stays 39 and
+// presets stay loadable by upstream firmware, which just ignores the map.
+// Zero there (every upstream-saved V38/V39 slot) = default map.  Slots older
+// than V38 do not contain the field (the bytes are erased flash or stale), so
+// they load the default; an invalid map also loads the default.
+#define CROSSFEED_MAP_SLOT_MIN_VERSION  38
+
+static inline void crossfeed_map_to_bytes(uint32_t map, uint8_t b[CROSSFEED_MAP_PAIRS]) {
+    for (int p = 0; p < CROSSFEED_MAP_PAIRS; p++) b[p] = crossfeed_map_byte(map, p);
+}
+
+static inline uint32_t crossfeed_map_from_bytes(const uint8_t b[CROSSFEED_MAP_PAIRS]) {
+    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+}
+
+// The live map for a stored/received 4-byte map: normalized when valid,
+// otherwise the default (0).  slot_version gates the preset-slot field
+// (pass CROSSFEED_MAP_SLOT_MIN_VERSION or higher for non-slot sources).
+static inline uint32_t crossfeed_map_load(const uint8_t b[CROSSFEED_MAP_PAIRS],
+                                          unsigned slot_version, int num_pairs) {
+    if (slot_version < CROSSFEED_MAP_SLOT_MIN_VERSION) return 0;
+    uint32_t map = crossfeed_map_from_bytes(b);
+    return crossfeed_map_valid(map, num_pairs) ? crossfeed_map_normalize(map) : 0;
+}
+
 // Which core runs a pair in the dual-core (Core 1 EQ worker) pipeline.
 // Core 1 owns outputs [core1_first, core1_last], Core 0 the outputs below.
 //   CORE0: both outputs on Core 0 -> processed by Core 0 after the dispatch
