@@ -53,6 +53,7 @@
 #include "audio_pipeline.h"  // output-ring stall bracket around the flash window
 #include "output_latency.h"  // option IDs for the V23 latency block sanitize
 #include "input_source_names.h"
+#include "core_vreg.h"       // CORE_VREG_FLOOR/CAP/FLAG_* for the same block's vreg bytes
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -660,10 +661,15 @@ _Static_assert(NUM_OUTPUT_CHANNELS <= FLASH_LIMITER_OUTPUTS, "limiter directory 
 
 // Output latency option, device-global and never carried by a preset.  Stored
 // as requested; the source and rate decide what runs (output_latency_resolve).
+// The two former reserved bytes carry the core voltage selection (core_vreg.h)
+// since the vreg-calibration work: both were zeroed by every earlier sanitize
+// pass, and 0 reads as "build default", so no directory version bump is
+// needed (same move as V34 claiming the upmix reserved byte).
 typedef struct __attribute__((packed)) {
     uint8_t  version;                        // 0 = never saved (default), 1 = current
     uint8_t  option_id;                      // OutputLatencyId; 0 / unknown = default
-    uint8_t  reserved[2];
+    uint8_t  core_vreg;                      // 0 = build default, else vreg enum (1.15..1.30 V)
+    uint8_t  core_vreg_flags;                // CORE_VREG_FLAG_*
 } FlashOutputLatencyConfig;                  // 4 bytes
 #define FLASH_OUTPUT_LATENCY_CONFIG_VERSION 1
 
@@ -2989,7 +2995,12 @@ static void dir_sanitize_output_latency(void) {
         c->option_id = OUTPUT_LATENCY_DEFAULT;
         return;
     }
-    c->reserved[0] = c->reserved[1] = 0;
+    // Core voltage: 0 or a value inside the hard window; anything else (a
+    // corrupted byte, or a build whose window shrank) falls back to default
+    // rather than being clamped, so a bad byte can never pin an overvolt.
+    if (c->core_vreg != 0 && (c->core_vreg < CORE_VREG_FLOOR || c->core_vreg > CORE_VREG_CAP))
+        c->core_vreg = 0;
+    c->core_vreg_flags &= (CORE_VREG_FLAG_AUTO_RAISED | CORE_VREG_FLAG_AUTO_DISABLED);
 }
 
 // Corruption guard: no entry may reach a reader unterminated.
@@ -4759,6 +4770,24 @@ uint8_t preset_set_input_source_names(uint8_t mask,
         dir_cache.device_name[DEVICE_NAME_LEN - 1] = '\0';
     }
     return dir_flush() == 0 ? PRESET_OK : PRESET_ERR_FLASH_WRITE;
+}
+
+// Core voltage selection (core_vreg.h).  Shares the latency block's bytes; the
+// getter is safe before the system clock is raised (XIP reads plus at most one
+// migration flush), which core_vreg_boot_apply() relies on.
+void preset_set_core_vreg(uint8_t sel, uint8_t flags) {
+    dir_ensure();
+    dir_cache.output_latency.version = FLASH_OUTPUT_LATENCY_CONFIG_VERSION;
+    dir_cache.output_latency.core_vreg = sel;
+    dir_cache.output_latency.core_vreg_flags = flags;
+    dir_sanitize_output_latency();
+    (void)dir_flush();
+}
+
+void preset_get_core_vreg(uint8_t *sel, uint8_t *flags) {
+    dir_ensure();
+    if (sel)   *sel   = dir_cache.output_latency.core_vreg;
+    if (flags) *flags = dir_cache.output_latency.core_vreg_flags;
 }
 
 // Control-interface (UART/I2C) persistence.  Mirrors preset_set_dac_hw_mute:

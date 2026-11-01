@@ -46,6 +46,7 @@
 #include "adat_input.h"
 #include "input_source_names.h"
 #include "loopback.h"   // DSPI_LOOPBACK glitch counters (self-guarded; empty otherwise)
+#include "core_vreg.h"
 #include "usb_descriptors.h"
 #include "tusb.h"
 #include "pico/audio_spdif.h"
@@ -1181,6 +1182,22 @@ static bool vendor_handle_set_body(tusb_control_request_t const *req) {
                                    sizeof(float), &val);
             }
             break;
+
+        case REQ_SET_CORE_VREG: {
+            // Payload {op, value} (core_vreg.h).  Out-of-window voltages
+            // STALL: the window (1.15..1.30 V) is a hard limit, not a clamp.
+            // Deferred to the main loop, which owns the flash bracket.
+            if (buffer->data_len < 2 ||
+                !core_vreg_request_valid(vendor_rx_buf[0], vendor_rx_buf[1])) {
+                handled = false;
+                break;
+            }
+            core_vreg_req_op = vendor_rx_buf[0];
+            core_vreg_req_value = vendor_rx_buf[1];
+            __dmb();
+            core_vreg_req_pending = true;
+            break;
+        }
 
         case REQ_SET_LEVELLER_MASKS:
             if (buffer->data_len >= 2) {
@@ -2734,6 +2751,14 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
             case REQ_GET_SERIAL: {
                 memcpy(resp_buf, usb_descriptor_str_serial, 16);
                 vendor_send_response(resp_buf, 16);
+                return true;
+            }
+
+            case REQ_GET_CORE_VREG: {
+                CoreVregStatus st;
+                core_vreg_get_status(&st);
+                memcpy(resp_buf, &st, sizeof(st));
+                vendor_send_response(resp_buf, sizeof(st));
                 return true;
             }
 

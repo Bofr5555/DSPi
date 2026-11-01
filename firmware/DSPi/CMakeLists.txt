@@ -82,6 +82,8 @@ add_executable(DSPi
     pdm_generator.h
     psybass.c
     psybass.h
+    core_vreg.c
+    core_vreg.h
     subharm.c
     subharm.h
     tube.c
@@ -131,6 +133,14 @@ if (DSPI_LOOPBACK)
     set_source_files_properties(loopback.c PROPERTIES COMPILE_FLAGS "-O3")
     target_compile_definitions(DSPi PRIVATE DSPI_LOOPBACK)
 endif()
+
+# Default core voltage at the 307.2 MHz clock (core_vreg.h).  A per-device
+# selection stored in the flash directory overrides it; this is only the value
+# a fresh or reset device starts from.  Some RP2350 parts hang at 1.15 V
+# (upstream issue #83).
+set(DSPI_VREG_MV 1150 CACHE STRING "Default core voltage in mV: 1150, 1200, 1250 or 1300")
+set_property(CACHE DSPI_VREG_MV PROPERTY STRINGS 1150 1200 1250 1300)
+target_compile_definitions(DSPi PRIVATE DSPI_VREG_MV=${DSPI_VREG_MV})
 
 # DSPI_CLOCK_DIAG (bench instrumentation): clock/servo/ring diagnostics and
 # the REQ_GET_CLOCK_DIAG (0x82) snapshot read by tools/clkdiag_poll.py.

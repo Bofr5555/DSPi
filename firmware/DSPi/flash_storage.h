@@ -120,6 +120,11 @@ uint8_t preset_set_input_source_names(uint8_t mask,
                                       const char *device_name);
 const char *preset_stored_device_name(void);
 
+// Core voltage selection (core_vreg.h): sel 0 = build default, else a vreg
+// enum; flags = CORE_VREG_FLAG_*.  Device-global, never carried by a preset.
+void preset_set_core_vreg(uint8_t sel, uint8_t flags);
+void preset_get_core_vreg(uint8_t *sel, uint8_t *flags);
+
 // External control-interface config (UART/I2C, board-level, directory-stored,
 // V6+).  Setter is synchronous and main-loop only; a NULL pointer leaves that
 // interface's stored config unchanged.  Getter copies out; either may be NULL.
