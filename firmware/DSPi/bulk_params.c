@@ -144,6 +144,11 @@ void bulk_params_collect(WireBulkParams *out) {
     out->crossfeed.output_pair_mask = crossfeed_config.output_pair_mask;
     out->crossfeed.custom_fc = crossfeed_config.custom_fc;
     out->crossfeed.custom_feed_db = crossfeed_config.custom_feed_db;
+    {
+        uint32_t map = crossfeed_config.pair_map;
+        for (int p = 0; p < CROSSFEED_MAP_PAIRS; p++)
+            out->crossfeed.pair_map[p] = crossfeed_map_byte(map, p);
+    }
 
     // Legacy channels
     for (int i = 0; i < 3; i++) {
@@ -439,6 +444,16 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     crossfeed_config.output_pair_mask = in->crossfeed.output_pair_mask & ((1u << NUM_SPDIF_INSTANCES) - 1);
     crossfeed_config.custom_fc = in->crossfeed.custom_fc;
     crossfeed_config.custom_feed_db = in->crossfeed.custom_feed_db;
+    {
+        // Pair map (former reserved2; zero from older hosts = default map).
+        // An invalid map falls back to the default pairing.
+        uint32_t map = (uint32_t)in->crossfeed.pair_map[0]
+                     | ((uint32_t)in->crossfeed.pair_map[1] << 8)
+                     | ((uint32_t)in->crossfeed.pair_map[2] << 16)
+                     | ((uint32_t)in->crossfeed.pair_map[3] << 24);
+        crossfeed_config.pair_map = crossfeed_map_valid(map, NUM_SPDIF_INSTANCES)
+                                  ? crossfeed_map_normalize(map) : 0;
+    }
     crossfeed_update_pending = true;
 
     // Legacy channels

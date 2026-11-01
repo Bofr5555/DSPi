@@ -569,12 +569,12 @@ static void __not_in_flash_func(eq_worker_loop)() {
             (const SubharmCoeffs *)core1_eq_work.subharm_coeffs;
         uint16_t sh_mask = core1_eq_work.subharm_mask;
 
-        // Crossfeed for Core 1's pairs, pre-EQ (Core 0 owns pair 0; snapshot
+        // Crossfeed for Core 1's own pairs, pre-EQ (Core 0 runs the rest; snapshot
         // comes from core1_eq_work so both cores apply the same view).
+        // Pairs spanning both cores were already run by Core 0 before the dispatch.
         crossfeed_process_pairs((const CrossfeedCoeffs *)core1_eq_work.xfeed_coeffs,
-                                core1_eq_work.xfeed_mask,
-                                CORE1_EQ_FIRST_OUTPUT / 2, CORE1_EQ_LAST_OUTPUT / 2,
-                                buf_out, sample_count);
+                                core1_eq_work.xfeed_mask, core1_eq_work.xfeed_map,
+                                XF_OWNER_CORE1, buf_out, sample_count);
 
         // Subharmonic synthesizer for Core 1's outputs, pre-crossover and
         // ahead of psybass (snapshot comes from core1_eq_work so both cores
@@ -783,12 +783,12 @@ static void __not_in_flash_func(eq_worker_loop)() {
             (const SubharmCoeffs *)core1_eq_work.subharm_coeffs;
         uint16_t sh_mask = core1_eq_work.subharm_mask;
 
-        // Crossfeed for Core 1's pair, pre-EQ (Core 0 owns pair 0; snapshot
+        // Crossfeed for Core 1's own pairs, pre-EQ (Core 0 runs the rest; snapshot
         // comes from core1_eq_work so both cores apply the same view).
+        // Pairs spanning both cores were already run by Core 0 before the dispatch.
         crossfeed_process_pairs((const CrossfeedCoeffs *)core1_eq_work.xfeed_coeffs,
-                                core1_eq_work.xfeed_mask,
-                                CORE1_EQ_FIRST_OUTPUT / 2, CORE1_EQ_LAST_OUTPUT / 2,
-                                buf_out, sample_count);
+                                core1_eq_work.xfeed_mask, core1_eq_work.xfeed_map,
+                                XF_OWNER_CORE1, buf_out, sample_count);
 
         // Subharmonic synthesizer for Core 1's outputs, pre-crossover and
         // ahead of psybass (snapshot comes from core1_eq_work so both cores

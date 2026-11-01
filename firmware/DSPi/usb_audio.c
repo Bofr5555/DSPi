@@ -257,7 +257,8 @@ volatile CrossfeedConfig crossfeed_config = {
     .preset = CROSSFEED_PRESET_DEFAULT,
     .custom_fc = 700.0f,
     .custom_feed_db = 4.5f,
-    .output_pair_mask = 0x01  // Default: pair 1 only (outputs 0/1)
+    .output_pair_mask = 0x01, // Default: pair 1 only (outputs 0/1)
+    .pair_map = 0             // Default pairing (2p, 2p+1); see crossfeed_map.h
 };
 volatile bool crossfeed_update_pending = false;
 

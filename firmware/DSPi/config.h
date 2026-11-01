@@ -139,7 +139,7 @@ extern volatile uint32_t nominal_feedback_10_14;
 // Documentation/Features/control_surfaces_aux_spec.md.  wValue is the binding
 // slot holding the aux component.  0x01 is MS_VENDOR_CODE above, intercepted
 // in tud_vendor_control_xfer_cb before the application dispatcher sees it;
-// 0x00, 0x02 and 0x03 stay unallocated.
+// 0x00 and 0x03 stay unallocated; 0x02 is REQ_CROSSFEED_PAIR_MAP (K340 fork).
 #define REQ_SET_CS_AUX_STATE        0x04  // wValue = slot, 1 byte 0/1; immediate, runtime
                                           // only; STALL unless the slot is an aux output
 #define REQ_GET_CS_AUX_STATE        0x05  // wValue = slot: 1 byte (STALL if not an aux);
@@ -594,6 +594,16 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_SET_CROSSFEED_OUTPUTS   0xFC  // payload = uint8 pair mask
 #define REQ_GET_CROSSFEED_OUTPUTS   0xFD  // returns uint8 pair mask
 
+// Crossfeed output pair map (K340 fork; which two outputs each pair
+// processes, see crossfeed_map.h for the encoding).  One opcode for both
+// directions, like REQ_LIMITER: OUT sets, IN gets.  Payload / reply = 4
+// bytes, byte p = pair p: 0x00 = default (2p, 2p+1), else (right << 4) |
+// left.  OUT ignores an invalid map; IN returns the normalized live map.
+// Same bytes as WireCrossfeedParams.pair_map.  0x02 is unallocated on every
+// upstream branch (v1.1.6-beta5, release/v1.1.6, main; 0x40/0x41 are taken
+// by the overclock branch, 0x03 by release/v1.1.6's REQ_OUTPUT_LATENCY).
+#define REQ_CROSSFEED_PAIR_MAP      0x02  // OUT: uint8[4] map; IN: returns uint8[4] map
+
 // UART control interface configuration.  Fixed 8N1 framing (the wire CRC16
 // covers integrity, so parity adds nothing); only the baud rate is
 // configurable.  Persisted device-level in the preset directory (V6+).
@@ -922,6 +932,7 @@ typedef struct {
     // Crossfeed snapshot for THIS packet; same single-view rationale.
     const void       *xfeed_coeffs;    // CrossfeedCoeffs or NULL = off
     uint8_t           xfeed_mask;      // Bit p = crossfeed output pair p
+    uint32_t          xfeed_map;       // Crossfeed pair map (crossfeed_map.h)
     // Psychoacoustic bass snapshot for THIS packet; same single-view rationale.
     const void       *psybass_coeffs;  // PsybassCoeffs or NULL = off
     uint16_t          psybass_mask;    // Bit k = process output k
