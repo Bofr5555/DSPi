@@ -201,13 +201,16 @@
 //        release; 10 bytes x NUM_OUTPUT_CHANNELS).  Tail-append like V22..V38:
 //        older slots load with every limiter off at the defaults (apply is
 //        gated on version >= 39).
-//   V40: Crossfeed output pair map appended (crossfeed_pair_map, 4 bytes: byte
-//        p = outputs of pair p, 0 = default (2p, 2p+1); see crossfeed_map.h).
-//        Tail-append like V22..V39: older slots load the default pairing
-//        (apply is gated on version >= 40; an invalid map also loads the
-//        default).  K340 fork addition, not in upstream v1.1.6-beta5: firmware
-//        that does not know V40 rejects such slots (factory defaults).
-#define SLOT_DATA_VERSION       40
+//   (K340 fork, no version change) Crossfeed output pair map: claims the
+//        V38 tube_reserved_f bytes (crossfeed_pair_map[4]; same size and
+//        offset, CRC range unchanged), like V34 claimed the upmix reserved
+//        byte.  Upstream V38/V39 firmware always writes 0.0f there (= default
+//        map) and never reads it, so fork-saved presets stay loadable by
+//        upstream firmware (map ignored) and upstream-saved presets load the
+//        default map here.  Read only from version >= 38 slots; an invalid
+//        map loads the default.  CONFLICT RISK: if upstream ever gives
+//        tube_reserved_f a meaning, these bytes must move (bump the version).
+#define SLOT_DATA_VERSION       39
 
 // ============================================================================
 // ON-FLASH STRUCTURES
@@ -1511,7 +1514,9 @@ typedef struct __attribute__((packed)) {
     float    tube_xfmr_res_hz;
     float    tube_mix_pct;
     float    tube_trim_db;
-    float    tube_reserved_f;
+    // K340 fork: was `float tube_reserved_f` (always 0.0f).  Crossfeed output
+    // pair map, byte p = pair p (crossfeed_map.h); see the version notes above.
+    uint8_t  crossfeed_pair_map[4];
 
     // V39: output limiter, one entry per output (see limiter.h).  Gated on
     // version >= 39 in apply_output_config_from_mode(); values are sanitized on apply.
@@ -1519,11 +1524,14 @@ typedef struct __attribute__((packed)) {
     uint8_t  limiter_link_group[NUM_OUTPUT_CHANNELS];
     float    limiter_threshold_db[NUM_OUTPUT_CHANNELS];
     float    limiter_release_ms[NUM_OUTPUT_CHANNELS];
-
-    // V40: crossfeed output pair map (crossfeed_map.h; byte p = pair p,
-    // little-endian).  Gated on version >= 40 in apply_slot_to_live().
-    uint8_t  crossfeed_pair_map[4];
 } PresetSlot;
+
+// The pair map must sit exactly where tube_reserved_f was (between
+// tube_trim_db and the V39 limiter block) so the slot layout is unchanged.
+_Static_assert(offsetof(PresetSlot, crossfeed_pair_map) == offsetof(PresetSlot, tube_trim_db) + 4,
+               "crossfeed_pair_map replaces tube_reserved_f in place");
+_Static_assert(offsetof(PresetSlot, limiter_enabled) == offsetof(PresetSlot, crossfeed_pair_map) + 4,
+               "crossfeed_pair_map is the 4 bytes tube_reserved_f was");
 
 // The whole slot must fit its 2-sector (8 KB) flash allocation.
 _Static_assert(sizeof(PresetSlot) <= SLOT_BYTES,
@@ -3617,8 +3625,8 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     slot->crossfeed_output_pair_mask = crossfeed_config.output_pair_mask;
     slot->crossfeed_custom_fc = crossfeed_config.custom_fc;
     slot->crossfeed_custom_feed_db = crossfeed_config.custom_feed_db;
-    for (int p = 0; p < 4; p++)   // V40
-        slot->crossfeed_pair_map[p] = crossfeed_map_byte(crossfeed_config.pair_map, p);
+    // Pair map in the former tube_reserved_f bytes (K340 fork; crossfeed_map.h)
+    crossfeed_map_to_bytes(crossfeed_config.pair_map, slot->crossfeed_pair_map);
 
     // Matrix mixer — all inputs, direct.
     for (int in = 0; in < NUM_INPUT_CHANNELS; in++) {
@@ -3722,7 +3730,7 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     slot->tube_xfmr_res_hz  = tube_config.xfmr_res_hz;
     slot->tube_mix_pct      = tube_config.mix_pct;
     slot->tube_trim_db      = tube_config.trim_db;
-    slot->tube_reserved_f   = 0.0f;
+    // (tube_reserved_f is now crossfeed_pair_map, written with crossfeed above)
 
     // Output limiter (V39): one entry per output.
     for (int k = 0; k < NUM_OUTPUT_CHANNELS; k++) {
@@ -3973,18 +3981,10 @@ static void apply_slot_to_live(const PresetSlot *slot) {
         : 0x01;
     crossfeed_config.custom_fc = slot->crossfeed_custom_fc;
     crossfeed_config.custom_feed_db = slot->crossfeed_custom_feed_db;
-    {
-        // V40 pair map; older slots (and an invalid map) load the default pairing.
-        uint32_t map = 0;
-        if (slot->version >= 40) {
-            map = (uint32_t)slot->crossfeed_pair_map[0]
-                | ((uint32_t)slot->crossfeed_pair_map[1] << 8)
-                | ((uint32_t)slot->crossfeed_pair_map[2] << 16)
-                | ((uint32_t)slot->crossfeed_pair_map[3] << 24);
-            map = crossfeed_map_valid(map, NUM_SPDIF_INSTANCES) ? crossfeed_map_normalize(map) : 0;
-        }
-        crossfeed_config.pair_map = map;
-    }
+    // Pair map (K340 fork) from the former tube_reserved_f bytes: zero in
+    // upstream-saved V38/V39 slots and absent before V38 -> default pairing.
+    crossfeed_config.pair_map = crossfeed_map_load(slot->crossfeed_pair_map, slot->version,
+                                                   NUM_SPDIF_INSTANCES);
     crossfeed_update_pending = true;
 
     // Psychoacoustic bass (V31): older slots have no psybass data, so restore
@@ -4335,8 +4335,6 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 #define SLOT_DATA_SIZE_V38 \
     (offsetof(PresetSlot, limiter_enabled) - offsetof(PresetSlot, filter_recipes))
 #define SLOT_DATA_SIZE_V39 \
-    (offsetof(PresetSlot, crossfeed_pair_map) - offsetof(PresetSlot, filter_recipes))
-#define SLOT_DATA_SIZE_V40 \
     (sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes))
 
 // V21 broke compatibility (unified channel model); V22 (I2S multichannel input),
@@ -4346,15 +4344,13 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 // Transform per-band target Q), V31 (psychoacoustic bass), V32 (ADAT input) and
 // V33 (stereo upmixer), V35 (SPDIF input 4 pin), V36 (subharmonic synthesizer)
 // V37 (subharm third band / selectivity / ceiling / link), V38 (tube preamp)
-// V39 (output limiter) and V40 (crossfeed pair map) are backward-compatible tail-appends; V34 (upmix
+// and V39 (output limiter) are backward-compatible tail-appends; V34 (upmix
 // presence) claims a reserved byte with no size change.  V21..V38 slots are all
 // accepted (an older slot loads with the newer fields defaulted to unset) while
 // older/unknown versions are invalidated and the slot loads factory defaults.
 static size_t slot_data_size_for_version(uint8_t version) {
     switch (version) {
-        case SLOT_DATA_VERSION:   // 40
-            return SLOT_DATA_SIZE_V40;
-        case 39:
+        case SLOT_DATA_VERSION:   // 39
             return SLOT_DATA_SIZE_V39;
         case 38:
             return SLOT_DATA_SIZE_V38;
