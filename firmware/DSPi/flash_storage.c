@@ -203,7 +203,13 @@
 //        release; 10 bytes x NUM_OUTPUT_CHANNELS).  Tail-append like V22..V38:
 //        older slots load with every limiter off at the defaults (apply is
 //        gated on version >= 39).
-#define SLOT_DATA_VERSION       39
+//   V40: Crossfeed output pair map appended (crossfeed_pair_map, 4 bytes: byte
+//        p = outputs of pair p, 0 = default (2p, 2p+1); see crossfeed_map.h).
+//        Tail-append like V22..V39: older slots load the default pairing
+//        (apply is gated on version >= 40; an invalid map also loads the
+//        default).  K340 fork addition, not in upstream v1.1.6-beta5: firmware
+//        that does not know V40 rejects such slots (factory defaults).
+#define SLOT_DATA_VERSION       40
 
 // ============================================================================
 // ON-FLASH STRUCTURES
@@ -1547,6 +1553,10 @@ typedef struct __attribute__((packed)) {
     uint8_t  limiter_link_group[NUM_OUTPUT_CHANNELS];
     float    limiter_threshold_db[NUM_OUTPUT_CHANNELS];
     float    limiter_release_ms[NUM_OUTPUT_CHANNELS];
+
+    // V40: crossfeed output pair map (crossfeed_map.h; byte p = pair p,
+    // little-endian).  Gated on version >= 40 in apply_slot_to_live().
+    uint8_t  crossfeed_pair_map[4];
 } PresetSlot;
 
 // The whole slot must fit its 2-sector (8 KB) flash allocation.
@@ -3699,6 +3709,8 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     slot->crossfeed_output_pair_mask = crossfeed_config.output_pair_mask;
     slot->crossfeed_custom_fc = crossfeed_config.custom_fc;
     slot->crossfeed_custom_feed_db = crossfeed_config.custom_feed_db;
+    for (int p = 0; p < 4; p++)   // V40
+        slot->crossfeed_pair_map[p] = crossfeed_map_byte(crossfeed_config.pair_map, p);
 
     // Matrix mixer — all inputs, direct.
     for (int in = 0; in < NUM_INPUT_CHANNELS; in++) {
@@ -4045,6 +4057,18 @@ static void apply_slot_to_live(const PresetSlot *slot) {
         : 0x01;
     crossfeed_config.custom_fc = slot->crossfeed_custom_fc;
     crossfeed_config.custom_feed_db = slot->crossfeed_custom_feed_db;
+    {
+        // V40 pair map; older slots (and an invalid map) load the default pairing.
+        uint32_t map = 0;
+        if (slot->version >= 40) {
+            map = (uint32_t)slot->crossfeed_pair_map[0]
+                | ((uint32_t)slot->crossfeed_pair_map[1] << 8)
+                | ((uint32_t)slot->crossfeed_pair_map[2] << 16)
+                | ((uint32_t)slot->crossfeed_pair_map[3] << 24);
+            map = crossfeed_map_valid(map, NUM_SPDIF_INSTANCES) ? crossfeed_map_normalize(map) : 0;
+        }
+        crossfeed_config.pair_map = map;
+    }
     crossfeed_update_pending = true;
 
     // Psychoacoustic bass (V31): older slots have no psybass data, so restore
@@ -4395,6 +4419,8 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 #define SLOT_DATA_SIZE_V38 \
     (offsetof(PresetSlot, limiter_enabled) - offsetof(PresetSlot, filter_recipes))
 #define SLOT_DATA_SIZE_V39 \
+    (offsetof(PresetSlot, crossfeed_pair_map) - offsetof(PresetSlot, filter_recipes))
+#define SLOT_DATA_SIZE_V40 \
     (sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes))
 
 // V21 broke compatibility (unified channel model); V22 (I2S multichannel input),
@@ -4404,13 +4430,15 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 // Transform per-band target Q), V31 (psychoacoustic bass), V32 (ADAT input) and
 // V33 (stereo upmixer), V35 (SPDIF input 4 pin), V36 (subharmonic synthesizer)
 // V37 (subharm third band / selectivity / ceiling / link), V38 (tube preamp)
-// and V39 (output limiter) are backward-compatible tail-appends; V34 (upmix
+// V39 (output limiter) and V40 (crossfeed pair map) are backward-compatible tail-appends; V34 (upmix
 // presence) claims a reserved byte with no size change.  V21..V38 slots are all
 // accepted (an older slot loads with the newer fields defaulted to unset) while
 // older/unknown versions are invalidated and the slot loads factory defaults.
 static size_t slot_data_size_for_version(uint8_t version) {
     switch (version) {
-        case SLOT_DATA_VERSION:   // 39
+        case SLOT_DATA_VERSION:   // 40
+            return SLOT_DATA_SIZE_V40;
+        case 39:
             return SLOT_DATA_SIZE_V39;
         case 38:
             return SLOT_DATA_SIZE_V38;
@@ -5075,6 +5103,7 @@ static void apply_factory_defaults(void) {
     crossfeed_config.itd_enabled = true;
     crossfeed_config.preset = CROSSFEED_PRESET_DEFAULT;
     crossfeed_config.output_pair_mask = 0x01;
+    crossfeed_config.pair_map = 0;   // default pairing (2p, 2p+1)
     crossfeed_config.custom_fc = 700.0f;
     crossfeed_config.custom_feed_db = 4.5f;
     crossfeed_update_pending = true;

@@ -230,34 +230,50 @@ void crossfeed_process_pair_block(const CrossfeedCoeffs *coeffs, CrossfeedPairSt
 }
 #endif
 
+// Map byte each pair's filter state was last run with.  A pair whose map
+// byte changed starts from clean state (its state belongs to other outputs).
+// Each pair is processed by exactly one core per packet, and the Core 0 /
+// Core 1 handshake orders packets, so this needs no further locking.
+static uint8_t xf_pair_tag[NUM_SPDIF_INSTANCES];
+
 // Per-pair dispatch: run crossfeed on selected pairs, reset the state of
 // skipped ones so a re-enabled pair starts clean.  A pair runs when coeffs
-// are published, its mask bit is set, neither channel carries a RAW test
-// signal, and BOTH channels are matrix-enabled.  Requiring both matters:
+// are published, its mask bit is set, neither of its outputs carries a RAW
+// test signal, and BOTH outputs are matrix-enabled.  Requiring both matters:
 // a disabled output's buffer is zeroed at matrix time and must stay silent,
 // but crossfeed writes both channels, so running on a half-enabled pair
 // would leak the enabled channel's bleed into the disabled (never re-zeroed)
 // buffer.  A half pair gets no crossfeed; disabled pairs also skip, saving
-// the cycles.
+// the cycles.  The pair's outputs come from the (validated) pair map; with
+// the default map they are 2p / 2p+1.
 DSP_TIME_CRITICAL
 #if PICO_RP2350
 void crossfeed_process_pairs(const CrossfeedCoeffs *coeffs, uint32_t pair_mask,
-                             int first_pair, int last_pair,
+                             uint32_t pair_map, CrossfeedPairOwner owner,
                              float (*buf_out)[AUDIO_BUFFER_SAMPLES], uint32_t n) {
 #else
 void crossfeed_process_pairs(const CrossfeedCoeffs *coeffs, uint32_t pair_mask,
-                             int first_pair, int last_pair,
+                             uint32_t pair_map, CrossfeedPairOwner owner,
                              int32_t (*buf_out)[AUDIO_BUFFER_SAMPLES], uint32_t n) {
 #endif
-    for (int p = first_pair; p <= last_pair; p++) {
-        int l = 2 * p;
+    for (int p = 0; p < NUM_SPDIF_INSTANCES; p++) {
+        uint8_t l, r;
+        crossfeed_map_pair(pair_map, p, &l, &r);
+        if (owner != XF_OWNER_ALL
+            && crossfeed_pair_owner(l, r, CORE1_EQ_FIRST_OUTPUT, CORE1_EQ_LAST_OUTPUT) != owner)
+            continue;   // another owner class handles this pair this packet
+        uint8_t tag = crossfeed_map_byte(pair_map, p);
+        if (xf_pair_tag[p] != tag) {
+            xf_pair_tag[p] = tag;
+            crossfeed_reset_pair_state(&crossfeed_pair_state[p]);
+        }
         bool run = coeffs && ((pair_mask >> p) & 1u)
-                && !(siggen_raw_mask & (3u << l))
+                && !(siggen_raw_mask & ((1u << l) | (1u << r)))
                 && matrix_mixer.outputs[l].enabled
-                && matrix_mixer.outputs[l + 1].enabled;
+                && matrix_mixer.outputs[r].enabled;
         if (run)
             crossfeed_process_pair_block(coeffs, &crossfeed_pair_state[p],
-                                         buf_out[l], buf_out[l + 1], n);
+                                         buf_out[l], buf_out[r], n);
         else
             crossfeed_reset_pair_state(&crossfeed_pair_state[p]);
     }

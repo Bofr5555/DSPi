@@ -874,6 +874,29 @@ static bool vendor_handle_set_body(tusb_control_request_t const *req) {
             }
             break;
 
+        case REQ_CROSSFEED_PAIR_MAP:   // OUT: set the map
+            // Whole map in one write (pairs must stay disjoint, so a single
+            // pair cannot be validated alone).  Invalid maps are ignored,
+            // like an out-of-range crossfeed preset; GET shows the result.
+            if (buffer->data_len >= CROSSFEED_MAP_PAIRS) {
+                uint32_t map = (uint32_t)vendor_rx_buf[0]
+                             | ((uint32_t)vendor_rx_buf[1] << 8)
+                             | ((uint32_t)vendor_rx_buf[2] << 16)
+                             | ((uint32_t)vendor_rx_buf[3] << 24);
+                if (crossfeed_map_valid(map, NUM_SPDIF_INSTANCES)) {
+                    map = crossfeed_map_normalize(map);
+                    // One 32-bit store; the pipeline snapshots it per packet and
+                    // resets the state of any pair whose outputs changed, so no
+                    // coefficient recompute is needed.
+                    crossfeed_config.pair_map = map;
+                    uint8_t b[CROSSFEED_MAP_PAIRS];
+                    for (int p = 0; p < CROSSFEED_MAP_PAIRS; p++) b[p] = crossfeed_map_byte(map, p);
+                    notify_param_write(offsetof(WireBulkParams, crossfeed.pair_map),
+                                       CROSSFEED_MAP_PAIRS, b);
+                }
+            }
+            break;
+
         // Psychoacoustic Bass Commands
         case REQ_SET_PSYBASS:
             if (buffer->data_len >= 1) {
@@ -2149,6 +2172,13 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
             case REQ_GET_CROSSFEED_OUTPUTS: {
                 resp_buf[0] = crossfeed_config.output_pair_mask;
                 vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_CROSSFEED_PAIR_MAP: {   // IN: get the map
+                uint32_t map = crossfeed_config.pair_map;
+                for (int p = 0; p < CROSSFEED_MAP_PAIRS; p++) resp_buf[p] = crossfeed_map_byte(map, p);
+                vendor_send_response(resp_buf, CROSSFEED_MAP_PAIRS);
                 return true;
             }
 
