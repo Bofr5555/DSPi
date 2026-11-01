@@ -32,6 +32,7 @@
 #include "dsp_pipeline.h"
 #include "crossover.h"
 #include "flash_clkdiv.h"
+#include "core_vreg.h"
 #include "flash_storage.h"
 #include "pico/audio_i2s_multi.h"
 #include "adat_output.h"
@@ -1690,9 +1691,10 @@ void core0_init() {
         __asm__ volatile("vmsr fpscr, %0" : : "r"(fpscr));
     }
 
-    // RP2350: 307.2MHz (VCO 1536 / 5 / 1) — integer SPDIF/I2S dividers at 48kHz
-    vreg_set_voltage(VREG_VOLTAGE_1_15);
-    busy_wait_ms(10);
+    // RP2350: 307.2MHz (VCO 1536 / 5 / 1) — integer SPDIF/I2S dividers at 48kHz.
+    // Core voltage: build default, persisted selection, or one step up after
+    // repeated watchdog hangs (core_vreg.h).  Raised before the PLL moves.
+    core_vreg_boot_apply();
 
     if (!set_sys_clock_hz(307200000, false)) {
         set_sys_clock_hz(150000000, false);
@@ -1703,8 +1705,7 @@ void core0_init() {
     // in flash_clkdiv.c which restore this after each erase/program.
     dspi_flash_apply_clkdiv();
 #else
-    vreg_set_voltage(VREG_VOLTAGE_1_15);
-    busy_wait_ms(10);
+    core_vreg_boot_apply();   // same selection logic as RP2350; see core_vreg.h
     // 307.2MHz -> VCO 1536 MHz / 5 / 1 — integer SPDIF/I2S dividers at 48kHz
     set_sys_clock_pll(1536000000, 5, 1);
 #endif
@@ -2153,6 +2154,7 @@ int main(void) {
     while (1) {
         // Update watchdog
         watchdog_update();
+        core_vreg_tick();   // uptime breadcrumb for the next boot's hang accounting
         LOOP_PROF(LP_HEAD);
 
         // Bench diagnostics: cheap per-iteration sampling (fc0 service, loop
@@ -2291,6 +2293,26 @@ int main(void) {
                 uint32_t f = save_and_disable_interrupts();
                 if (flash_set_output_latency_id == id) flash_set_output_latency_pending = false;
                 restore_interrupts(f);
+            }
+
+            // Core voltage: the regulator step itself is glitch-free at a
+            // fixed PLL and happens immediately; only the directory write
+            // (explicit SET / AUTO flag, or a boot-time escalation that is
+            // still unpersisted) takes the flash bracket.
+            {
+                bool persist = core_vreg_persist_due();
+                if (core_vreg_req_pending) {
+                    uint32_t f = save_and_disable_interrupts();
+                    uint8_t op = core_vreg_req_op, val = core_vreg_req_value;
+                    core_vreg_req_pending = false;
+                    restore_interrupts(f);
+                    persist |= core_vreg_apply_request(op, val);
+                }
+                if (persist) {
+                    prepare_flash_write_operation();
+                    core_vreg_persist();
+                    complete_flash_write_operation_full();
+                }
             }
 
             extern volatile bool flash_set_output_config_mode_pending;

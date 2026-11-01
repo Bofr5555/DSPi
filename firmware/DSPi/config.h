@@ -232,6 +232,12 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_SET_PSYBASS_MASK        0x3C
 #define REQ_GET_PSYBASS_MASK        0x3D
 
+// Core voltage at the fixed 307.2 MHz clock (core_vreg.h).  The two spare
+// codes in otherwise-full blocks; 0x40/0x41 are left for the selectable
+// sys-clock branch's REQ_SET/GET_SYS_CLOCK, which would subsume these.
+#define REQ_SET_CORE_VREG           0x4F  // payload = {op, value}; see CORE_VREG_OP_*; STALL on invalid
+#define REQ_GET_CORE_VREG           0x6F  // returns CoreVregStatus (16 B)
+
 // Tube preamp emulation (indexed parameter access; tube.h).  One SET/GET pair
 // covers every parameter, so adding one must not add an opcode here.
 #define REQ_SET_TUBE_PARAM          0x3E  // wValue low byte = index (tube.h TUBE_PARAM_*), 4-byte float32 LE

@@ -109,6 +109,11 @@ void preset_get_dac_hw_mute(DacHwMuteConfig *out);
 void preset_set_output_latency(uint8_t id);
 uint8_t preset_get_output_latency(void);
 
+// Core voltage selection (core_vreg.h): sel 0 = build default, else a vreg
+// enum; flags = CORE_VREG_FLAG_*.  Device-global, never carried by a preset.
+void preset_set_core_vreg(uint8_t sel, uint8_t flags);
+void preset_get_core_vreg(uint8_t *sel, uint8_t *flags);
+
 // External control-interface config (UART/I2C, board-level, directory-stored,
 // V6+).  Setter is synchronous and main-loop only; a NULL pointer leaves that
 // interface's stored config unchanged.  Getter copies out; either may be NULL.
