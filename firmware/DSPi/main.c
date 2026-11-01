@@ -54,6 +54,20 @@
 #include "bulk_params.h"
 #include "pico/audio_spdif.h"
 #include "usb_feedback_controller.h"
+#include "reset_info.h"
+
+// Core voltage for the 307.2 MHz overclock, from the DSPI_VREG_MV build option.
+#if !defined(DSPI_VREG_MV) || DSPI_VREG_MV == 1150
+#define DSPI_CORE_VREG VREG_VOLTAGE_1_15
+#elif DSPI_VREG_MV == 1200
+#define DSPI_CORE_VREG VREG_VOLTAGE_1_20
+#elif DSPI_VREG_MV == 1250
+#define DSPI_CORE_VREG VREG_VOLTAGE_1_25
+#elif DSPI_VREG_MV == 1300
+#define DSPI_CORE_VREG VREG_VOLTAGE_1_30
+#else
+#error "DSPI_VREG_MV must be 1150, 1200, 1250 or 1300"
+#endif
 #include "usb_descriptors.h"
 #include "tusb.h"
 #include "pico/binary_info.h"
@@ -1691,7 +1705,7 @@ void core0_init() {
     }
 
     // RP2350: 307.2MHz (VCO 1536 / 5 / 1) — integer SPDIF/I2S dividers at 48kHz
-    vreg_set_voltage(VREG_VOLTAGE_1_15);
+    vreg_set_voltage(DSPI_CORE_VREG);
     busy_wait_ms(10);
 
     if (!set_sys_clock_hz(307200000, false)) {
@@ -1703,7 +1717,7 @@ void core0_init() {
     // in flash_clkdiv.c which restore this after each erase/program.
     dspi_flash_apply_clkdiv();
 #else
-    vreg_set_voltage(VREG_VOLTAGE_1_15);
+    vreg_set_voltage(DSPI_CORE_VREG);
     busy_wait_ms(10);
     // 307.2MHz -> VCO 1536 MHz / 5 / 1 — integer SPDIF/I2S dividers at 48kHz
     set_sys_clock_pll(1536000000, 5, 1);
@@ -2137,6 +2151,9 @@ static void input_service_servos(void) {
 }
 
 int main(void) {
+    // Latch why we reset before anything touches the watchdog/reset state.
+    reset_info_capture();
+
     // Initial LED on to show we're alive
     gpio_init(25); gpio_set_dir(25, GPIO_OUT);
     gpio_put(25, 1);
@@ -2154,6 +2171,7 @@ int main(void) {
         // Update watchdog
         watchdog_update();
         LOOP_PROF(LP_HEAD);
+        reset_info_tick();
 
         // Bench diagnostics: cheap per-iteration sampling (fc0 service, loop
         // gap, min consumer fill, PWM-pacer movement).  No-op when the flag

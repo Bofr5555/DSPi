@@ -86,6 +86,8 @@ add_executable(DSPi
     tube.h
     limiter.c
     limiter.h
+    reset_info.c
+    reset_info.h
     siggen.c
     siggen.h
     rta_bass.c
@@ -137,6 +139,11 @@ option(DSPI_CLOCK_DIAG "Build the clock/audio-path diagnostics (vendor GET 0x82)
 if (DSPI_CLOCK_DIAG)
     target_compile_definitions(DSPi PRIVATE DSPI_CLOCK_DIAG=1)
 endif()
+# Core voltage at the 307.2 MHz overclock.  Some RP2350 parts need more than
+# the stock 1.15 V to run stable (upstream issue #83; K340 PCB unit).
+set(DSPI_VREG_MV 1150 CACHE STRING "Core voltage in mV: 1150, 1200, 1250 or 1300")
+set_property(CACHE DSPI_VREG_MV PROPERTY STRINGS 1150 1200 1250 1300)
+target_compile_definitions(DSPi PRIVATE DSPI_VREG_MV=${DSPI_VREG_MV})
 
 # DSPI_LOOP_PROF (bench instrumentation): worst time per main-loop section,
 # read through REQ_GET_STATUS 64+ (loop_prof.h). Release builds leave it OFF.

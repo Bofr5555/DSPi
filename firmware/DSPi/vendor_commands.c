@@ -46,6 +46,7 @@
 #include "adat_input.h"
 #include "loopback.h"   // DSPI_LOOPBACK glitch counters (self-guarded; empty otherwise)
 #include "usb_descriptors.h"
+#include "reset_info.h"
 #include "tusb.h"
 #include "pico/audio_spdif.h"
 #include "pico/audio_i2s_multi.h"
@@ -2466,6 +2467,12 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                     case 29: resp = input_delivery_worst_gap_us; break;  // worst input delivery gap, us
                     case 30: resp = usb_audio_worst_packet_gap_us; break;  // worst USB packet gap, us
                     case 31: resp = bg_over_budget_count; break;  // background steps over budget
+                    // Reset-cause diagnostics (reset_info.c); explicit cases win over the optional DSPI_LOOP_PROF fallback (64+), which release builds leave off.
+                    case 64: resp = reset_info_chip_reset(); break;     // raw CHIP_RESET at boot (HAD_* bits)
+                    case 65: resp = reset_info_watchdog(); break;       // WATCHDOG REASON | own-timeout<<8
+                    case 66: resp = reset_info_boot_count(); break;     // boots since last POR/BOR
+                    case 67: resp = reset_info_prev_uptime_s(); break;  // previous run's uptime, s
+                    case 68: resp = reset_info_uptime_s(); break;       // current uptime, s
 #ifdef DSPI_LOOP_PROF
                     default:
                         if (setup->wValue >= LOOP_PROF_BG_PACE_BASE &&
