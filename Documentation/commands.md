@@ -582,7 +582,7 @@ header counts to know how many entries are valid).
 |-------:|-----:|---------|----------|
 | 0 | 16 | `header` | see 13.4 |
 | 16 | 16 | `global` | f32 preamp_gain_db; u8 bypass; u8 loudness_enabled; u16 loudness_output_mask (V19+; reserved before V19); f32 loudness_ref_spl; f32 loudness_intensity_pct |
-| 32 | 16 | `crossfeed` | u8 enabled; u8 preset; u8 itd_enabled; u8 rsv; f32 custom_fc; f32 custom_feed_db; u32 rsv |
+| 32 | 16 | `crossfeed` | u8 enabled; u8 preset; u8 itd_enabled; u8 output_pair_mask; f32 custom_fc; f32 custom_feed_db; u8 pair_map[4] (byte p: 0 = default (2p,2p+1), else (right<<4)\|left; see crossfeed_map.h) |
 | 48 | 16 | `legacy` | f32 gain_db[3]; u8 mute[3]; u8 rsv |
 | 64 | 44 | `delays` | f32 delay_ms[11] (per channel, ms) |
 | 108 | 144 | `crosspoints` | `WireCrosspoint[2][9]` (input-major); each 8 bytes: u8 enabled; u8 phase_invert; u8[2] rsv; f32 gain_db |
@@ -1006,6 +1006,8 @@ with no OUT data, issued as an IN transfer (returns a status/echo byte).
 | 0x65 | GET_CROSSFEED_FEED | R | returns `crossfeed_config.custom_feed_db` |
 | 0x66 | SET_CROSSFEED_ITD | W | writes `crossfeed_config.itd_enabled`; `crossfeed_update_pending` -> compute |
 | 0x67 | GET_CROSSFEED_ITD | R | returns `crossfeed_config.itd_enabled` |
+| 0x02 | CROSSFEED_PAIR_MAP (OUT) | W | 4 bytes; validated (`crossfeed_map_valid`), normalized, written to `crossfeed_config.pair_map` in one store; invalid maps ignored; notify on write (K340 fork) |
+| 0x02 | CROSSFEED_PAIR_MAP (IN) | R | returns `crossfeed_config.pair_map` (4 bytes, normalized) (K340 fork) |
 | 0x70 | SET_MATRIX_ROUTE | W | writes `matrix_mixer.crosspoints[in][out]` (enabled/phase/gain) immediately |
 | 0x71 | GET_MATRIX_ROUTE | R | wValue=in<<8\|out; returns `MatrixRoutePacket` from crosspoints |
 | 0x72 | SET_OUTPUT_ENABLE | W | PDM/EQ-worker interlock; writes `matrix_mixer.outputs[out].enabled`; `derive_core1_mode()`, `pdm_set_enabled()`, `__sev()` immediately |

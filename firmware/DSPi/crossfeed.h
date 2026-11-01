@@ -3,6 +3,7 @@
 
 #include <string.h>
 #include "config.h"
+#include "crossfeed_map.h"
 
 // BS2B Crossfeed Presets
 #define CROSSFEED_PRESET_DEFAULT    0   // 700 Hz / 4.5 dB - Balanced, most popular
@@ -30,8 +31,13 @@ typedef struct {
     uint8_t preset;         // 0-3 (CROSSFEED_PRESET_*)
     float custom_fc;        // Custom cutoff frequency (500-2000 Hz)
     float custom_feed_db;   // Custom feed level (0-15 dB)
-    uint8_t output_pair_mask; // bit p runs crossfeed on output pair p (outputs 2p/2p+1); mono PDM sub is not a pair and is excluded
+    uint8_t output_pair_mask; // bit p runs crossfeed on output pair p; mono PDM sub is not a pair and is excluded
+    uint32_t pair_map;        // byte p = pair p's outputs, 0 = default (2p, 2p+1); see crossfeed_map.h.
+                              // Always valid + normalized; written with one 32-bit store so the
+                              // pipeline's per-packet snapshot is never torn.
 } CrossfeedConfig;
+
+_Static_assert(NUM_SPDIF_INSTANCES <= CROSSFEED_MAP_PAIRS, "crossfeed pair map is 4 bytes wide");
 
 // Filter coefficients and per-pair state (runtime only, not persisted)
 //
@@ -84,17 +90,19 @@ void crossfeed_process_pair_block(const CrossfeedCoeffs *coeffs, CrossfeedPairSt
 void crossfeed_process_pair_block(const CrossfeedCoeffs *coeffs, CrossfeedPairState *st, int32_t *left, int32_t *right, uint32_t n);
 #endif
 
-// Runs crossfeed on output pairs first_pair..last_pair of buf_out: selected
-// pairs are processed in place, skipped pairs get their state reset.  Called
-// once per packet by whichever core owns those pairs, with a per-packet
-// snapshot of coeffs/mask so both cores apply the same view.
+// Runs crossfeed on the output pairs of buf_out owned by `owner` (see
+// crossfeed_pair_owner() in crossfeed_map.h; XF_OWNER_ALL = every pair, the
+// single-core path): selected pairs are processed in place on the outputs the
+// pair map assigns them, skipped pairs get their state reset.  Called once per
+// packet per owner class, with a per-packet snapshot of coeffs/mask/map so
+// both cores apply the same view.
 #if PICO_RP2350
 void crossfeed_process_pairs(const CrossfeedCoeffs *coeffs, uint32_t pair_mask,
-                             int first_pair, int last_pair,
+                             uint32_t pair_map, CrossfeedPairOwner owner,
                              float (*buf_out)[AUDIO_BUFFER_SAMPLES], uint32_t n);
 #else
 void crossfeed_process_pairs(const CrossfeedCoeffs *coeffs, uint32_t pair_mask,
-                             int first_pair, int last_pair,
+                             uint32_t pair_map, CrossfeedPairOwner owner,
                              int32_t (*buf_out)[AUDIO_BUFFER_SAMPLES], uint32_t n);
 #endif
 

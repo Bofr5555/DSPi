@@ -383,6 +383,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // core1_eq_work.  Runs per output pair post-matrix (PASS 4.5).
     const CrossfeedCoeffs *xf_coeffs = (const CrossfeedCoeffs *)current_crossfeed_coeffs;
     uint8_t xf_mask = crossfeed_config.output_pair_mask;
+    uint32_t xf_map = crossfeed_config.pair_map;   // one 32-bit load: never torn
 
     // Psychoacoustic bass snapshot for this packet: published coefficient
     // pointer (NULL = disabled) + output mask, shared with Core 1 via
@@ -551,6 +552,14 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
     if (dual_core) {
         // --- Dual-core path: Core 1 handles EQ+delay+SPDIF for outputs 2-7 ---
 
+        // ========== PASS 4.5a: Crossfeed on pairs that span both cores ==========
+        // A remapped pair with one output on each core (e.g. K340 outputs
+        // 0 and 2) runs here, before the dispatch, so both of its outputs are
+        // final before either core's per-output chain reads them.  Default
+        // pairs never span (crossfeed_map.h), so this is a no-op for them.
+        crossfeed_process_pairs(xf_coeffs, xf_mask, xf_map, XF_OWNER_SPLIT,
+                                buf_out, sample_count);
+
         // Dispatch to Core 1 — both cores share the same vol ramp params so
         // outputs assigned to either core stay phase-aligned.
         core1_eq_work.finalize_s24 = finalize_s24;
@@ -562,6 +571,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         core1_eq_work.loud_mask = loud_mask;
         core1_eq_work.xfeed_coeffs = xf_coeffs;
         core1_eq_work.xfeed_mask = xf_mask;
+        core1_eq_work.xfeed_map = xf_map;
         core1_eq_work.psybass_coeffs = pb_coeffs;
         core1_eq_work.psybass_mask = pb_mask;
         core1_eq_work.tube_coeffs = tb_coeffs;
@@ -579,9 +589,11 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         __sev();
 
         // ========== PASS 4.5: Crossfeed (per output pair, pre-EQ) ==========
-        // Core 0 owns pair 0; Core 1 runs pairs 1-3 inside eq_worker_loop.
+        // Core 0 runs the pairs whose outputs are both its own (default:
+        // pair 0); Core 1 runs its own pairs inside eq_worker_loop.
         // Pre-EQ so per-output (headphone) EQ shapes the post-crossfeed signal.
-        crossfeed_process_pairs(xf_coeffs, xf_mask, 0, 0, buf_out, sample_count);
+        crossfeed_process_pairs(xf_coeffs, xf_mask, xf_map, XF_OWNER_CORE0,
+                                buf_out, sample_count);
 
         // Subharmonic synthesizer for Core 0's outputs, pre-crossover and
         // ahead of psybass so it divides the program bass rather than
@@ -739,7 +751,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // --- Single-core path: all outputs on Core 0 ---
 
         // ========== PASS 4.5: Crossfeed (per output pair, pre-EQ) ==========
-        crossfeed_process_pairs(xf_coeffs, xf_mask, 0, NUM_SPDIF_INSTANCES - 1,
+        crossfeed_process_pairs(xf_coeffs, xf_mask, xf_map, XF_OWNER_ALL,
                                 buf_out, sample_count);
 
         // Subharmonic synthesizer, pre-crossover (see dual-core branch above).
@@ -939,6 +951,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // output pair post-matrix, shared with Core 1 via core1_eq_work.
     const CrossfeedCoeffs *xf_coeffs = (const CrossfeedCoeffs *)current_crossfeed_coeffs;
     uint8_t xf_mask = crossfeed_config.output_pair_mask;
+    uint32_t xf_map = crossfeed_config.pair_map;   // one 32-bit load: never torn
 
     // Psychoacoustic bass snapshot for this packet (see RP2350 branch above):
     // runs per output pre-crossover, shared with Core 1 via core1_eq_work.
@@ -1028,6 +1041,14 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
     if (dual_core) {
         // --- Dual-core path: Core 0 handles pair 1, Core 1 handles pair 2 ---
 
+        // ========== PASS 4.5a: Crossfeed on pairs that span both cores ==========
+        // A remapped pair with one output on each core (e.g. K340 outputs
+        // 0 and 2) runs here, before the dispatch, so both of its outputs are
+        // final before either core's per-output chain reads them.  Default
+        // pairs never span (crossfeed_map.h), so this is a no-op for them.
+        crossfeed_process_pairs(xf_coeffs, xf_mask, xf_map, XF_OWNER_SPLIT,
+                                buf_out, sample_count);
+
         // Dispatch to Core 1 — both cores share the same vol ramp params so
         // outputs assigned to either core stay phase-aligned.
         core1_eq_work.sample_count = sample_count;
@@ -1038,6 +1059,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         core1_eq_work.loud_mask = loud_mask;
         core1_eq_work.xfeed_coeffs = xf_coeffs;
         core1_eq_work.xfeed_mask = xf_mask;
+        core1_eq_work.xfeed_map = xf_map;
         core1_eq_work.psybass_coeffs = pb_coeffs;
         core1_eq_work.psybass_mask = pb_mask;
         core1_eq_work.tube_coeffs = tb_coeffs;
@@ -1053,8 +1075,10 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         __sev();
 
         // ========== PASS 4.5: Crossfeed (per output pair, pre-EQ) ==========
-        // Core 0 owns pair 0; Core 1 runs pair 1 inside eq_worker_loop.
-        crossfeed_process_pairs(xf_coeffs, xf_mask, 0, 0, buf_out, sample_count);
+        // Core 0 runs its own pairs (default: pair 0); Core 1 runs its own
+        // (default: pair 1) inside eq_worker_loop; spanning pairs ran above.
+        crossfeed_process_pairs(xf_coeffs, xf_mask, xf_map, XF_OWNER_CORE0,
+                                buf_out, sample_count);
 
         // Subharmonic synthesizer for Core 0's outputs, pre-crossover and
         // ahead of psybass (see the RP2350 branch above).
@@ -1204,7 +1228,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         uint32_t saved_delay_write_idx = delay_write_idx;
 
         // ========== PASS 4.5: Crossfeed (per output pair, pre-EQ) ==========
-        crossfeed_process_pairs(xf_coeffs, xf_mask, 0, NUM_SPDIF_INSTANCES - 1,
+        crossfeed_process_pairs(xf_coeffs, xf_mask, xf_map, XF_OWNER_ALL,
                                 buf_out, sample_count);
 
         // Subharmonic synthesizer, pre-crossover (see dual-core branch above).
