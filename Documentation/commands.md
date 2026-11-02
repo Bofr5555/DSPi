@@ -847,6 +847,21 @@ readback reflect whether the interface actually came up: a stored config whose
 pins collide with the current output wiring at boot stays down even though its
 `enabled` byte is 1.
 
+### 17.2 USB MIDI control channel (optional build, `DSPI_USB_MIDI`)
+
+Firmware built with `-DDSPI_USB_MIDI=ON` adds a class-compliant USB MIDI function
+named "DSPi Control" (interfaces after the vendor interface, so interface 2 and the
+WinUSB binding are unchanged). It carries the same command surface as the UART
+transport for hosts that cannot send vendor control requests (CoreMIDI on iPhone):
+each SysEx message `F0 7D 'D' 'S' 'P' 01 <tag> <7-bit packed UART frame> F7` holds
+one UART frame without the `0xA5` sync byte, the device answers with the same tag,
+and v2 notifications arrive as tag-0 type-`0x40` frames whenever the function is
+configured. Changes made over MIDI carry `src` 10 (`PARAM_SRC_MIDI`). The USB-only
+rule of 17.1 applies: `0xF5` / `0xF7` and the chunked `0xA2` / `0xA3` are refused
+with `BLOCKED`; use `0xA0` / `0xA1`. Full wire format:
+`Documentation/Features/usb_midi_control_spec.md`; host tool: `tools/midi_ctrl/`.
+Default builds leave it off and are byte-identical to builds without it.
+
 ---
 
 ## 18. Asynchronous notifications (optional)
@@ -867,7 +882,8 @@ bytes:
 For `PARAM_CHANGED`, `off` is the **byte offset into `WireBulkParams`** of the
 changed field and `size` is its length; `value` is the new little-endian bytes.
 This lets a host dispatch on offset rather than a per-command switch. `src` is the
-origin (1=host SET, 2=bulk SET, 3=preset, 4=factory, 5=GPIO, 6=internal, 7=UAC1).
+origin (1=host SET, 2=bulk SET, 3=preset, 4=factory, 5=GPIO, 6=internal, 7=UAC1,
+8=UART, 9=I2C, 10=USB MIDI).
 On `BULK_INVALIDATED` or `PRESET_LOADED`, re-read `REQ_GET_ALL_PARAMS`.
 
 The same v2 packets can also be delivered over the **UART control transport** as
@@ -875,7 +891,8 @@ type-`0x40` frames when `UartCtrlConfig.notify_enable` is set (see section 17 an
 `control_interfaces_spec.md` 3.6); the v1 legacy master-volume packet is USB-only.
 A gap in the packet `seq` byte means events were dropped for that consumer; recover
 with `REQ_GET_ALL_PARAMS`. The I2C target is poll-only (it cannot initiate a
-transfer, so it has no notification channel).
+transfer, so it has no notification channel). On `DSPI_USB_MIDI` builds the USB MIDI
+control channel always receives them (17.2).
 
 ---
 

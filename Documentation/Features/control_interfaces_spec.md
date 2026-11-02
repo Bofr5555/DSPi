@@ -24,6 +24,10 @@ external transports through a transport-neutral orchestrator inside the firmware
 - **I2C target** (`CTRL_SOURCE_I2C`): the device acts as an I2C slave; an
   external controller is the bus master.
 
+(Builds with `DSPI_USB_MIDI` add a fourth, the USB MIDI SysEx tunnel
+(`CTRL_SOURCE_MIDI`), which carries the UART frame of section 3 inside SysEx;
+see `usb_midi_control_spec.md`.)
+
 Every transport parses its own wire framing into the same
 `bRequest` / `wValue` / `wIndex` / `wLength` shape and hands it to the same
 dispatcher (`vendor_dispatch_get` / `vendor_dispatch_set`). The consequence that
