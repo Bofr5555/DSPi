@@ -327,16 +327,23 @@ and coexistence with streaming audio are hardware tests (`tools/midi_ctrl/`
 
 ## 9. Cost
 
-Measured on the `usb-midi-control` branch, OFF vs ON (`arm-none-eabi-size`):
+Measured on the `usb-midi-control` branch, OFF vs ON, Arm GNU 14.2, release
+build (`DSPi.bin` size; `.data` / `.bss` and free RAM as reported by
+`scripts/check_ram_placement.py`):
 
-| Chip | Flash (text) | RAM (bss) |
-|---|---|---|
-| RP2040 | +6168 B | +1396 B |
-| RP2350 | +5848 B | +1396 B |
+| Chip | Flash image | `.data` (RAM code + data) | `.bss` | Free RAM |
+|---|---|---|---|---|
+| RP2040 | 283376 -> 289552 (+6176 B) | 71032 -> 72072 (+1040 B; budget 72704) | +1396 B | 58224 -> 55788 (-2436 B) |
+| RP2350 | 312612 -> 318468 (+5856 B) | 97656 -> 98592 (+936 B) | +1396 B | 119296 -> 116964 (-2332 B) |
 
-RAM is TinyUSB's MIDI FIFOs (768 B) and endpoint buffers (128 B), the module's
-state and buffers (payload 64 B, reply copy 132 B, notify 64 B, codec state),
-and one more notify-ring consumer.
+`.bss` is TinyUSB's MIDI FIFOs (768 B) and endpoint buffers (128 B), the
+module's state and buffers (payload 64 B, reply copy 132 B, notify 64 B, codec
+state) and one more notify-ring consumer. `.data` grows because the TinyUSB
+device core and FIFO helpers, which the build keeps in RAM, gain the MIDI
+driver's code paths. On RP2040 this leaves 632 B of the `.data` budget. On
+RP2350 the heap start moves by 9.6 KB, not 2.3 KB, because `.bss` starts at the
+next 8 KB boundary (`input_capture_arena` alignment) and the larger `.data`
+crosses one; that padding is a layout effect of the existing linker script.
 
 ## 10. Open decisions
 
