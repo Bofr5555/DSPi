@@ -34,7 +34,18 @@ extern "C" {
 #define CFG_TUD_CDC             0
 #define CFG_TUD_MSC             0
 #define CFG_TUD_HID             0
+#ifdef DSPI_USB_MIDI
+// USB MIDI control channel (midi_control.c): TinyUSB's built-in MIDI class
+// driver serves interfaces ITF_NUM_MIDI_AC/MS; the UAC1 and vendor
+// interfaces stay on the custom driver above.  FIFO sizes are bytes
+// (4 bytes per USB-MIDI event packet).
+#define CFG_TUD_MIDI            1
+#define CFG_TUD_MIDI_RX_BUFSIZE 256
+#define CFG_TUD_MIDI_TX_BUFSIZE 512
+#define CFG_TUD_MIDI_EP_BUFSIZE 64
+#else
 #define CFG_TUD_MIDI            0
+#endif
 #define CFG_TUD_VENDOR          0
 #define CFG_TUD_DFU_RUNTIME     0
 #define CFG_TUD_ECM_RNDIS       0

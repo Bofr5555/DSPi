@@ -4704,6 +4704,20 @@ static bool ctrl_cmd_usb_only(uint8_t bRequest) {
            bRequest == REQ_SET_ALL_PARAMS_CHUNK;
 }
 
+// notify source tag for an external dispatch source.  A macro, not a helper,
+// so a default (DSPI_USB_MIDI OFF) build preprocesses to the same tokens as
+// before the MIDI transport existed.
+#ifdef DSPI_USB_MIDI
+#define CTRL_SRC_MIDI_ARM(src) ((src) == CTRL_SOURCE_MIDI) ? PARAM_SRC_MIDI :
+#else
+#define CTRL_SRC_MIDI_ARM(src)
+#endif
+#define CTRL_PARAM_SOURCE(src) \
+    (((src) == CTRL_SOURCE_UART) ? PARAM_SRC_UART \
+   : ((src) == CTRL_SOURCE_I2C)  ? PARAM_SRC_I2C \
+   : CTRL_SRC_MIDI_ARM(src) \
+     PARAM_SRC_GPIO)   /* CTRL_SOURCE_GPIO (Control Surfaces) */
+
 CtrlDispatchResult vendor_dispatch_get(CtrlSource src, uint8_t bRequest,
                                        uint16_t wValue, uint16_t wIndex, uint16_t wLength,
                                        const uint8_t **resp_data, uint16_t *resp_len) {
@@ -4724,9 +4738,7 @@ CtrlDispatchResult vendor_dispatch_get(CtrlSource src, uint8_t bRequest,
     _active_source = src;
     _ext_resp_data = NULL;
     _ext_resp_len  = 0;
-    _dispatch_src  = (src == CTRL_SOURCE_UART) ? PARAM_SRC_UART
-                   : (src == CTRL_SOURCE_I2C)  ? PARAM_SRC_I2C
-                   : PARAM_SRC_GPIO;   // CTRL_SOURCE_GPIO (Control Surfaces)
+    _dispatch_src  = CTRL_PARAM_SOURCE(src);
     bool ok = vendor_handle_get(&req);
     notify_set_source(PARAM_SRC_UNKNOWN);
     _active_source = CTRL_SOURCE_USB;
@@ -4782,9 +4794,7 @@ CtrlDispatchResult vendor_dispatch_set(CtrlSource src, uint8_t bRequest,
         .wLength  = wLength,
     };
     _active_source = src;
-    _dispatch_src  = (src == CTRL_SOURCE_UART) ? PARAM_SRC_UART
-                   : (src == CTRL_SOURCE_I2C)  ? PARAM_SRC_I2C
-                   : PARAM_SRC_GPIO;   // CTRL_SOURCE_GPIO (Control Surfaces)
+    _dispatch_src  = CTRL_PARAM_SOURCE(src);
     bool handled = vendor_handle_set_data(&req);
     _active_source = CTRL_SOURCE_USB;
     _dispatch_src  = PARAM_SRC_HOST_SET;

@@ -35,7 +35,14 @@
 // 0x0202 → 0x0203 for the 4ch/6ch input alts + the unified channel model
 // (per-input EQ/metering, wire V16 / slot V21).
 // 0x0203 → 0x0204 adds RP2350 alt 6 (4ch / 24-bit / 48 kHz).
+#ifdef DSPI_USB_MIDI
+// The MIDI build adds a function, so it reports a different bcdDevice than
+// the default build of the same base (Windows keys its descriptor cache on
+// VID/PID/bcdDevice).  Default build value + 1; no console matches on it.
+#define USB_BCD_DEVICE  0x0205
+#else
 #define USB_BCD_DEVICE  0x0204
+#endif
 
 // ----------------------------------------------------------------------------
 // ENDPOINT ADDRESSES
@@ -69,6 +76,15 @@
 #define NOTIFY_EP_MAX_PKT       64U
 #define NOTIFY_EP_INTERVAL_MS   0U
 
+#ifdef DSPI_USB_MIDI
+// USB MIDI control function (midi_control.c): one bulk OUT + one bulk IN,
+// 64 bytes, on endpoint number 4 (1-3 are taken by audio OUT, feedback IN,
+// loopback IN and notify IN).
+#define MIDI_OUT_ENDPOINT       0x04U
+#define MIDI_IN_ENDPOINT        0x84U
+#define MIDI_EP_MAX_PKT         64U
+#endif
+
 // Notification event type constants are now defined in notify.h
 // (NOTIFY_EVT_IDLE, NOTIFY_EVT_MASTER_VOLUME, NOTIFY_EVT_PARAM_CHANGED, ...).
 // Legacy aliases retained for any code still using the old names.
@@ -88,9 +104,20 @@
 // numbers 0/1/2 are unchanged so normal-build descriptors are unaffected.
 #define ITF_NUM_LOOPBACK_AC     3   // capture AudioControl
 #define ITF_NUM_LOOPBACK_AS     4   // capture AudioStreaming
-#define ITF_NUM_TOTAL           5
+#define ITF_NUM_AFTER_LOOPBACK  5
 #else
-#define ITF_NUM_TOTAL           3
+#define ITF_NUM_AFTER_LOOPBACK  3
+#endif
+#ifdef DSPI_USB_MIDI
+// USB MIDI control function (AudioControl + MIDIStreaming under an IAD),
+// appended last so interfaces 0/1/2 (and loopback's 3/4) never move: every
+// console addresses the vendor interface as 2, and the MS OS 2.0 descriptor
+// set binds WinUSB to interface 2.
+#define ITF_NUM_MIDI_AC         (ITF_NUM_AFTER_LOOPBACK)
+#define ITF_NUM_MIDI_MS         (ITF_NUM_AFTER_LOOPBACK + 1)
+#define ITF_NUM_TOTAL           (ITF_NUM_AFTER_LOOPBACK + 2)
+#else
+#define ITF_NUM_TOTAL           ITF_NUM_AFTER_LOOPBACK
 #endif
 
 // ----------------------------------------------------------------------------
@@ -156,6 +183,9 @@
 #define STRID_MANUFACTURER  1
 #define STRID_PRODUCT       2
 #define STRID_SERIAL        3
+#ifdef DSPI_USB_MIDI
+#define STRID_MIDI          4   // "DSPi Control": MIDI function / port name
+#endif
 
 // Exported for main.c — populated from chip unique ID at boot.
 extern char usb_descriptor_str_serial[17];

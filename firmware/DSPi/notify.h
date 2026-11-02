@@ -106,6 +106,7 @@ typedef enum {
     PARAM_SRC_UAC1     = 7,  // UAC1 Feature Unit SET_CUR (OS volume slider, mute key)
     PARAM_SRC_UART     = 8,  // External UART control interface
     PARAM_SRC_I2C      = 9,  // External I2C target control interface
+    PARAM_SRC_MIDI     = 10, // USB MIDI SysEx control channel (DSPI_USB_MIDI)
 } ParamSource;
 
 // ---------------------------------------------------------------------------
@@ -191,6 +192,10 @@ typedef enum {
     NOTIFY_CONSUMER_USB  = 0,   // always active
     NOTIFY_CONSUMER_UART = 1,   // active while the UART transport is live
                                 // with notifications enabled
+#ifdef DSPI_USB_MIDI
+    NOTIFY_CONSUMER_MIDI = 2,   // active while the USB MIDI function is
+                                // configured (midi_control.c)
+#endif
     NOTIFY_CONSUMER_COUNT
 } NotifyConsumer;
 
