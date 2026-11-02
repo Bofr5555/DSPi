@@ -142,6 +142,21 @@ set(DSPI_VREG_MV 1150 CACHE STRING "Default core voltage in mV: 1150, 1200, 1250
 set_property(CACHE DSPI_VREG_MV PROPERTY STRINGS 1150 1200 1250 1300)
 target_compile_definitions(DSPi PRIVATE DSPI_VREG_MV=${DSPI_VREG_MV})
 
+# DSPI_USB_MIDI: append a class-compliant USB MIDI function ("DSPi Control")
+# that carries the vendor command surface as SysEx, for hosts without access
+# to vendor control requests (CoreMIDI on iPhone).  Interfaces 0/1/2 and the
+# MS OS 2.0 set are unchanged; bcdDevice is bumped.  OFF builds are
+# byte-identical to a build without this code.  DSPI_USB_MIDI_MFR_ID sets the
+# SysEx manufacturer ID (default 0x7D, the non-commercial/development ID; a
+# registered ID is 1 byte or 3 bytes "0x00,0xNN,0xNN").
+# See Documentation/Features/usb_midi_control_spec.md.
+option(DSPI_USB_MIDI "Build the USB MIDI control channel (SysEx tunnel)" OFF)
+set(DSPI_USB_MIDI_MFR_ID "0x7D" CACHE STRING "USB MIDI control SysEx manufacturer ID (1 or 3 comma-separated bytes)")
+if (DSPI_USB_MIDI)
+    target_sources(DSPi PRIVATE midi_control.c midi_control.h midi_frame.c midi_frame.h)
+    target_compile_definitions(DSPi PRIVATE DSPI_USB_MIDI DSPI_USB_MIDI_MFR_ID=${DSPI_USB_MIDI_MFR_ID})
+endif()
+
 # DSPI_CLOCK_DIAG (bench instrumentation): clock/servo/ring diagnostics and
 # the REQ_GET_CLOCK_DIAG (0x82) snapshot read by tools/clkdiag_poll.py.
 # Release builds leave it OFF; 0x82 then answers with zero bytes.

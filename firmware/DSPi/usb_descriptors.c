@@ -26,6 +26,9 @@ static const char *const string_table[] = {
     "GitHub.com/WeebLabs", // 1 — manufacturer
     "Weeb Labs DSPi",      // 2 — product
     usb_descriptor_str_serial, // 3 — serial (populated at boot)
+#ifdef DSPI_USB_MIDI
+    "DSPi Control",        // 4 — USB MIDI control function / port name
+#endif
 };
 
 // ----------------------------------------------------------------------------
@@ -163,9 +166,21 @@ static const tusb_desc_device_t device_descriptor = {
 //   + AS std alt0(9) + AS std alt1(9) + AS CS general(7) + format type I(14)
 //   + iso IN EP(9) + CS iso EP(7) = 102 bytes.
 #define LOOPBACK_DESC_LEN 102
-#define CONFIG_TOTAL_LEN  (CONFIG_BASE_LEN + LOOPBACK_DESC_LEN)
+#define CONFIG_LOOPBACK_LEN  (CONFIG_BASE_LEN + LOOPBACK_DESC_LEN)
 #else
-#define CONFIG_TOTAL_LEN  CONFIG_BASE_LEN
+#define CONFIG_LOOPBACK_LEN  CONFIG_BASE_LEN
+#endif
+
+#ifdef DSPI_USB_MIDI
+// USB MIDI control function appended last (after loopback, if built):
+//   IAD(8) + TinyUSB's one-cable MIDI function (TUD_MIDI_DESC_LEN = 92:
+//   AC std 9, AC CS header 9, MS std 9, MS CS header 7, 2 IN + 2 OUT jacks
+//   30, bulk OUT 9 + CS EP 5, bulk IN 9 + CS EP 5; TinyUSB's own "88 bytes"
+//   comment is stale) = 100 bytes.
+#define MIDI_FUNC_DESC_LEN   (8 + TUD_MIDI_DESC_LEN)
+#define CONFIG_TOTAL_LEN     (CONFIG_LOOPBACK_LEN + MIDI_FUNC_DESC_LEN)
+#else
+#define CONFIG_TOTAL_LEN     CONFIG_LOOPBACK_LEN
 #endif
 
 // Per-alt EP descriptor offsets, computed so they self-adjust to UAC1_FU_LEN
@@ -581,7 +596,42 @@ const uint8_t usb_config_descriptor[] = {
     0x00,                               // bLockDelayUnits
     U16_TO_U8S_LE(0x0000),              // wLockDelay
 #endif // DSPI_LOOPBACK
+
+#ifdef DSPI_USB_MIDI
+    // ========================================================================
+    // USB MIDI CONTROL FUNCTION (DSPI_USB_MIDI) — 100 bytes, appended last.
+    //
+    // A class-compliant USB MIDI 1.0 function carrying the vendor command
+    // surface as SysEx (midi_control.c, usb_midi_control_spec.md).  Served by
+    // TinyUSB's built-in MIDI driver (CFG_TUD_MIDI).  The IAD groups its
+    // AudioControl + MIDIStreaming pair into one function on composite hosts,
+    // as the UAC1 function's IAD does.  The body is TinyUSB's
+    // TUD_MIDI_DESCRIPTOR() expanded with the jack string set to "DSPi
+    // Control" (the template hard-codes jack iJack = 0), so hosts that name
+    // ports from jack strings show the same name as from the interface.
+    // ========================================================================
+    8,
+    TUSB_DESC_INTERFACE_ASSOCIATION,
+    ITF_NUM_MIDI_AC,                    // bFirstInterface
+    0x02,                               // bInterfaceCount (AC + MS)
+    TUSB_CLASS_AUDIO,                   // bFunctionClass
+    AUDIO_SUBCLASS_CONTROL,             // bFunctionSubClass
+    0x00,                               // bFunctionProtocol
+    STRID_MIDI,                         // iFunction
+
+    TUD_MIDI_DESC_HEAD(ITF_NUM_MIDI_AC, STRID_MIDI, 1),
+    TUD_MIDI_DESC_JACK_DESC(1, STRID_MIDI),
+    TUD_MIDI_DESC_EP(MIDI_OUT_ENDPOINT, MIDI_EP_MAX_PKT, 1),
+    TUD_MIDI_JACKID_IN_EMB(1),
+    TUD_MIDI_DESC_EP(MIDI_IN_ENDPOINT, MIDI_EP_MAX_PKT, 1),
+    TUD_MIDI_JACKID_OUT_EMB(1),
+#endif // DSPI_USB_MIDI
 };
+
+#ifdef DSPI_USB_MIDI
+_Static_assert(ITF_NUM_VENDOR == 2, "the vendor interface must stay interface 2");
+_Static_assert(TUD_MIDI_DESC_LEN == 92, "unexpected TinyUSB MIDI template length");
+#endif
 
 // Catch any miscount in the packed descriptor table at compile time (the array
 // is inferred-size; CONFIG_TOTAL_LEN drives wTotalLength + usb_config_descriptor_len).

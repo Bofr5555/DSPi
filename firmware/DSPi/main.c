@@ -49,6 +49,9 @@
 #include "notify.h"
 #include "uart_control.h"
 #include "i2c_control.h"
+#ifdef DSPI_USB_MIDI
+#include "midi_control.h"
+#endif
 #include "control_surfaces.h"
 #include "loudness.h"
 #include "crossfeed.h"
@@ -2184,6 +2187,9 @@ int main(void) {
         LOOP_PROF(LP_TRANSPORTS);
         uart_ctrl_poll();
         i2c_ctrl_poll();
+#ifdef DSPI_USB_MIDI
+        midi_ctrl_poll();   // USB MIDI SysEx control channel (same rules)
+#endif
 
         // LG Sound Sync detection tick — internally throttled and
         // gated on (feature enabled && SPDIF input && SPDIF locked).

@@ -25,7 +25,8 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
 // Transport-neutral dispatch (orchestrator)
 //
 // The vendor command surface is reachable from USB (TinyUSB EP0 path above)
-// and from the external control transports (UART, I2C target).  External
+// and from the external control transports (UART, I2C target, and the USB
+// MIDI SysEx tunnel on DSPI_USB_MIDI builds).  External
 // transports parse their wire frames into the same bRequest/wValue/wIndex/
 // wLength shape and call vendor_dispatch_get/set from MAIN-LOOP context only.
 // New commands added to the SET/GET switches are automatically reachable
@@ -40,6 +41,8 @@ typedef enum {
                             // wire transport.  The Control Surfaces tick dispatches
                             // through vendor_dispatch_get/set with this source so its
                             // writes are tagged PARAM_SRC_GPIO.
+    CTRL_SOURCE_MIDI = 4,   // USB MIDI SysEx tunnel (DSPI_USB_MIDI builds only;
+                            // midi_control.c).  Writes are tagged PARAM_SRC_MIDI.
 } CtrlSource;
 
 typedef enum {
