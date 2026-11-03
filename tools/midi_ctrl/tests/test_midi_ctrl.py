@@ -133,8 +133,21 @@ class ClientAgainstFake(unittest.TestCase):
 
     def test_status_codes(self):
         self.assertEqual(self.c.set(0x20, payload=bytes(65)).status, mc.ST_OVERSIZE)
-        self.assertEqual(self.c.set(0xF5, payload=bytes(8)).status, mc.ST_BLOCKED)
-        self.assertEqual(self.c.get(0x55).status, mc.ST_ERROR)
+        self.assertEqual(self.c.get(0x9F).status, mc.ST_ERROR)   # unassigned in v1.1.6
+
+    def test_usb_parity_opcodes(self):
+        # 0xF5 / 0xF7 are accepted over MIDI (fake only: never sent to a unit).
+        self.assertEqual(self.c.set(0xF5, payload=bytes(8)).status, mc.ST_OK)
+        self.assertEqual(self.dev.iface_config, [(0xF5, bytes(8))])
+        # RTA bands-all is not capped at 132 bytes.
+        self.assertEqual(len(self.c.get(0x0F).payload), 300)
+        # Chunked bulk read / write, 2048-byte chunks.
+        img = self.c.get(mc.REQ_GET_ALL_PARAMS).payload
+        self.assertEqual(mc.chunked_read(self.c), img)
+        new = bytes(b ^ 0xA5 for b in img)
+        self.assertEqual(mc.chunked_write(self.c, new), mc.ST_OK)
+        self.assertEqual(self.c.get(mc.REQ_GET_ALL_PARAMS).payload, new)
+        self.assertEqual(self.c.get(0xA2, 2048, 0, 2048).status, mc.ST_ERROR)   # no session
 
     def test_busy_retry(self):
         self.dev.inject = [mc.ST_BUSY, mc.ST_BULK_LOCKED]

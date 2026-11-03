@@ -6,6 +6,8 @@
   * SET 0xA1 (bulk write) wall time and bytes/s, only with --allow-bulk-set
     (writes back the image just read unless --bulk-in is given; live state
     only, nothing is saved to flash);
+  * GET 0xA2 chunked bulk read (2048-byte chunks, read-only) wall time and
+    equality with the 0xA0 image;
   * notification latency: SET master volume over MIDI, time to the echoed
     PARAM_CHANGED (src MIDI).  The volume only ever goes DOWN from the
     current value (current, current - step, current, ...) and is restored;
@@ -70,6 +72,7 @@ def main(argv=None) -> int:
     ap.add_argument("--bulk-set", type=int, default=5, help="SET 0xA1 repetitions")
     ap.add_argument("--allow-bulk-set", action="store_true", help="enable the SET 0xA1 test")
     ap.add_argument("--bulk-in", help="image for SET 0xA1 (default: the image just read)")
+    ap.add_argument("--chunked", type=int, default=3, help="0xA2 chunked read repetitions")
     ap.add_argument("--notify", type=int, default=20, help="notification latency samples (0 = skip)")
     ap.add_argument("--vol-step", type=float, default=0.5, help="dB below current for the notify test")
     ap.add_argument("--vendor", action="store_true", help="poll the vendor interface at 10 Hz meanwhile")
@@ -114,6 +117,19 @@ def main(argv=None) -> int:
             rows.append(("GET 0xA0 bulk read", f"n={len(times)}, {n} B payload, {wire} B SysEx",
                          f"median {med * 1e3:.1f} ms, max {max(times) * 1e3:.1f} ms, "
                          f"{n / med:.0f} payload B/s ({wire / med:.0f} wire B/s)"))
+
+        # --- chunked bulk GET (0xA2) -------------------------------------
+        if args.chunked:
+            times, same = [], True
+            for _ in range(args.chunked):
+                t0 = time.monotonic()
+                img = mc.chunked_read(c)
+                times.append(time.monotonic() - t0)
+                if image is not None and img != image:
+                    same = False
+            med = statistics.median(times)
+            rows.append(("GET 0xA2 chunked read (2048 B chunks)", f"n={len(times)}",
+                         f"median {med * 1e3:.1f} ms; equals the 0xA0 image: {'yes' if same else 'NO'}"))
 
         # --- bulk SET ------------------------------------------------------
         if args.allow_bulk_set and args.bulk_set:

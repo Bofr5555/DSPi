@@ -26,7 +26,8 @@ external transports through a transport-neutral orchestrator inside the firmware
 
 (Builds with `DSPI_USB_MIDI` add a fourth, the USB MIDI SysEx tunnel
 (`CTRL_SOURCE_MIDI`), which carries the UART frame of section 3 inside SysEx;
-see `usb_midi_control_spec.md`.)
+see `usb_midi_control_spec.md`. It rides on USB and follows the USB rules,
+so the refusals of 1.2 do not apply to it.)
 
 Every transport parses its own wire framing into the same
 `bRequest` / `wValue` / `wIndex` / `wLength` shape and hands it to the same

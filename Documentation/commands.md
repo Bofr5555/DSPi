@@ -861,9 +861,10 @@ transport for hosts that cannot send vendor control requests (CoreMIDI on iPhone
 each SysEx message `F0 7D 'D' 'S' 'P' 01 <tag> <7-bit packed UART frame> F7` holds
 one UART frame without the `0xA5` sync byte, the device answers with the same tag,
 and v2 notifications arrive as tag-0 type-`0x40` frames whenever the function is
-configured. Changes made over MIDI carry `src` 10 (`PARAM_SRC_MIDI`). The USB-only
-rule of 17.1 applies: `0xF5` / `0xF7` and the chunked `0xA2` / `0xA3` are refused
-with `BLOCKED`; use `0xA0` / `0xA1`. Full wire format:
+configured. Changes made over MIDI carry `src` 10 (`PARAM_SRC_MIDI`). The MIDI
+channel follows the USB vendor path, not UART/I2C: `0xF5` / `0xF7`, the chunked
+`0xA2` / `0xA3` and `0x0F` all work over it (the opcode table is in the spec). Full
+wire format:
 `Documentation/Features/usb_midi_control_spec.md`; host tool: `tools/midi_ctrl/`.
 Default builds leave it off and are byte-identical to builds without it.
 

@@ -26,5 +26,9 @@ DSPI_MIDI_DEV=/dev/snd/midiC2D0 ./run.sh midi_ctrl.py get 0x7F --port /dev/snd/m
 `run.sh` passes at most one rawmidi node (`DSPI_MIDI_DEV`) and optionally one
 USB node (`DSPI_USB_DEV`, for `--vendor`), no network. Nothing here plays
 audio: audio during `soak.py` comes from the coordinator's guarded player.
-`set 0xA1`, `measure.py --allow-bulk-set` and `enter-bootloader` change the
-device; use them only on a unit the owner designated.
+`set 0xA1` / `set 0xA3`, `measure.py --allow-bulk-set` and `enter-bootloader`
+change the device; use them only on a unit the owner designated. The MIDI
+channel follows the USB vendor path, so `set 0xF5` / `set 0xF7` (UART / I2C
+interface config, persisted to flash) are accepted too: never send them to a
+unit; their acceptance is covered by the firmware host test
+(`test_midi_control`) and the fake device.

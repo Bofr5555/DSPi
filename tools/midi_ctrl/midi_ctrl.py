@@ -475,6 +475,31 @@ class Client:
                 self._ingest(data)
 
 
+def chunked_read(c: Client, chunk: int = 2048) -> bytes:
+    """0xA2 chunked bulk read (the USB vendor path's WinUSB form)."""
+    out = bytearray()
+    while True:
+        rep = c.get(0xA2, len(out), 0, chunk, timeout=10.0)
+        if rep.status != ST_OK:
+            raise RuntimeError(f"0xA2 at {len(out)}: {rep.status_name}")
+        out += rep.payload
+        if len(rep.payload) < chunk or not rep.payload:
+            return bytes(out)
+        if len(out) >= 8 and len(out) >= struct.unpack_from("<H", out, 6)[0]:
+            return bytes(out)
+
+
+def chunked_write(c: Client, image: bytes, chunk: int = 2048) -> int:
+    """0xA3 chunked bulk write; returns the last status."""
+    status = ST_OK
+    for off in range(0, len(image), chunk):
+        rep = c.set(0xA3, off, 0, image[off:off + chunk], timeout=10.0)
+        status = rep.status
+        if status != ST_OK:
+            break
+    return status
+
+
 def open_client(args) -> Client:
     if getattr(args, "fake", False):
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
