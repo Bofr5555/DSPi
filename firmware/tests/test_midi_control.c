@@ -33,10 +33,16 @@ typedef enum {
 #define REQ_GET_ALL_PARAMS       0xA0
 #define REQ_SET_ALL_PARAMS       0xA1
 #define REQ_ENTER_BOOTLOADER     0xF0
+#define REQ_GET_ALL_PARAMS_CHUNK 0xA2
+#define REQ_SET_ALL_PARAMS_CHUNK 0xA3
+#define REQ_RTA_GET_BANDS_ALL    0x0F
+#define REQ_SET_UART_CONFIG      0xF5
+#define REQ_SET_I2C_CONFIG       0xF7
 #define MIDI_IN_ENDPOINT         0x84
 #define MIDI_TX_COPY_MAX         132
 #define NOTIFY_CONSUMER_MIDI     2
 #define BULK_SIZE                6136
+#define WIRE_BULK_PARAMS_SIZE    BULK_SIZE
 
 uint8_t bulk_param_buf[BULK_SIZE];
 
@@ -97,6 +103,15 @@ static CtrlDispatchResult vendor_dispatch_get(CtrlSource src, uint8_t bReq, uint
         *rl = BULK_SIZE;
         return CTRL_DISPATCH_OK;
     }
+    if (bReq == REQ_RTA_GET_BANDS_ALL) {   // CTRL_BULK_GET for MIDI: lock + bulk buffer
+        if (!vendor_bulk_try_acquire(src)) return CTRL_DISPATCH_BULK_LOCKED;
+        for (int i = 0; i < 300; i++) bulk_param_buf[i] = (uint8_t)(i ^ 0x5A);
+        *rd = bulk_param_buf;
+        *rl = 300;
+        return CTRL_DISPATCH_OK;
+    }
+    if (bReq == REQ_GET_ALL_PARAMS_CHUNK || bReq == REQ_SET_ALL_PARAMS_CHUNK)
+        return CTRL_DISPATCH_BLOCKED;      // must never reach the dispatcher
     if (bReq == 0x7F) { *rd = resp7; *rl = (wl && wl < 7) ? wl : 7; return CTRL_DISPATCH_OK; }
     if (bReq == 0x99) { *rd = resp132; *rl = 200; return CTRL_DISPATCH_OK; }   // over-long
     return CTRL_DISPATCH_ERROR;
@@ -110,7 +125,10 @@ static CtrlDispatchResult vendor_dispatch_set(CtrlSource src, uint8_t bReq, uint
     last_breq = bReq;
     if (busy_forever) return CTRL_DISPATCH_BUSY;
     if (busy_left > 0) { busy_left--; return CTRL_DISPATCH_BUSY; }
-    if (bReq == 0xF5) return CTRL_DISPATCH_BLOCKED;
+    // Real dispatcher (CTRL_CMD_REFUSED): 0xF5 / 0xF7 allowed for MIDI,
+    // chunked forms refused (midi_control.c serves them itself).
+    if (bReq == REQ_GET_ALL_PARAMS_CHUNK || bReq == REQ_SET_ALL_PARAMS_CHUNK)
+        return CTRL_DISPATCH_BLOCKED;
     if (bReq == REQ_SET_ALL_PARAMS) {
         if (bulk_owner != (int)src) return CTRL_DISPATCH_ERROR;
         bulk_owner = -1;          // handed to the apply
@@ -331,10 +349,12 @@ static void test_set_small(void) {
           replies[0].tag == 5 && replies[0].len == 0, "set reply");
     CHECK(last_set_len == 4 && memcmp(last_set_payload, vol, 4) == 0, "payload reached dispatcher");
 
-    // 0xF5 -> BLOCKED from the dispatcher (allow-list is the dispatcher's).
-    host_send(0x06, MF_TYPE_SET, 0xF5, 0, 8, vol);
+    // 0xF5 / 0xF7 reach the dispatcher over MIDI (USB-path parity).
+    const uint8_t ucfg[8] = { 0, 16, 17, 0, 0x00, 0xC2, 0x01, 0x00 };
+    host_send(0x06, MF_TYPE_SET, REQ_SET_UART_CONFIG, 0, 8, ucfg);
     run(5, 64, 100);
-    CHECK(n_replies == 2 && replies[1].status == CTRL_STATUS_BLOCKED, "0xF5 blocked");
+    CHECK(n_replies == 2 && replies[1].status == CTRL_STATUS_OK && last_breq == REQ_SET_UART_CONFIG &&
+          last_set_len == 8 && memcmp(last_set_payload, ucfg, 8) == 0, "0xF5 dispatched");
 
     // Non-bulk payload > 64 -> OVERSIZE, nothing dispatched.
     uint8_t big[100] = { 0 };
@@ -343,6 +363,98 @@ static void test_set_small(void) {
     run(10, 64, 100);
     CHECK(n_replies == 3 && replies[2].status == CTRL_STATUS_OVERSIZE && replies[2].tag == 7 &&
           set_calls == sc, "oversize");
+}
+
+static void test_rta_bands_all(void) {
+    reset_world();
+    host_send(0x08, MF_TYPE_GET, REQ_RTA_GET_BANDS_ALL, 0, 0, NULL);
+    int it = 0;
+    while (n_replies == 0 && it++ < 1000) step(8, 100);
+    CHECK(n_replies == 1 && replies[0].status == 0 && replies[0].len == 300 &&
+          replies[0].payload[299] == (uint8_t)(299 ^ 0x5A), "0x0F > 132 bytes, zero-copy");
+    CHECK(bulk_owner == -1, "0x0F releases the lock");
+}
+
+static void test_chunks(void) {
+    reset_world();
+    static uint8_t img[BULK_SIZE];
+    // GET 0xA2 in 2048-byte chunks.
+    static uint8_t got[BULK_SIZE];
+    size_t gl = 0;
+    for (int k = 0; k < 3; k++) {
+        int before = n_replies;
+        host_send((uint8_t)(0x40 + k), MF_TYPE_GET, REQ_GET_ALL_PARAMS_CHUNK, (uint16_t)(k * 2048), 2048, NULL);
+        int it = 0;
+        while (n_replies == before && it++ < 5000) step(16, 100);
+        CHECK(n_replies == before + 1 && replies[before].status == 0, "chunk %d ok", k);
+        memcpy(got + gl, replies[before].payload, replies[before].len);
+        gl += replies[before].len;
+        if (k < 2) CHECK(bulk_owner == CTRL_SOURCE_MIDI && replies[before].len == 2048, "held between chunks");
+    }
+    int ok = gl == BULK_SIZE;
+    for (int i = 0; ok && i < BULK_SIZE; i++) if (got[i] != (uint8_t)(i * 13 + 5)) ok = 0;
+    CHECK(ok, "chunked GET image (%zu bytes)", gl);
+    CHECK(bulk_owner == -1, "released after the final chunk");
+
+    // Offset != 0 without a session -> ERROR.
+    host_send(0x44, MF_TYPE_GET, REQ_GET_ALL_PARAMS_CHUNK, 2048, 2048, NULL);
+    run(20, 64, 100);
+    CHECK(replies[n_replies - 1].status == CTRL_STATUS_ERROR, "chunk GET without session");
+
+    // A non-chunk request ends an open GET session.
+    host_send(0x45, MF_TYPE_GET, REQ_GET_ALL_PARAMS_CHUNK, 0, 2048, NULL);
+    run(200, 64, 100);
+    CHECK(bulk_owner == CTRL_SOURCE_MIDI, "session open");
+    host_send(0x46, MF_TYPE_GET, 0x7F, 0, 0, NULL);
+    run(10, 64, 100);
+    CHECK(bulk_owner == -1 && replies[n_replies - 1].tag == 0x46, "non-chunk request closes it");
+
+    // Idle session reaped after 3 s.
+    host_send(0x47, MF_TYPE_GET, REQ_GET_ALL_PARAMS_CHUNK, 0, 2048, NULL);
+    run(200, 64, 100);
+    CHECK(bulk_owner == CTRL_SOURCE_MIDI, "session open again");
+    run(40, 64, 100000);
+    CHECK(bulk_owner == -1, "idle session reaped");
+
+    // SET 0xA3 in 2048-byte chunks, applied on the last byte.
+    for (int i = 0; i < BULK_SIZE; i++) img[i] = (uint8_t)(i * 7 + 1);
+    bulk_applied = false;
+    for (int k = 0; k < 3; k++) {
+        uint16_t off = (uint16_t)(k * 2048), n = (uint16_t)(k < 2 ? 2048 : BULK_SIZE - 4096);
+        int before = n_replies;
+        host_send((uint8_t)(0x50 + k), MF_TYPE_SET, REQ_SET_ALL_PARAMS_CHUNK, off, n, img + off);
+        int it = 0;
+        while (n_replies == before && it++ < 5000) step(64, 100);
+        CHECK(n_replies == before + 1 && replies[before].status == 0, "set chunk %d", k);
+        if (k < 2) CHECK(!bulk_applied && bulk_owner == CTRL_SOURCE_MIDI, "not applied yet");
+    }
+    CHECK(bulk_applied && memcmp(bulk_param_buf, img, BULK_SIZE) == 0 && bulk_owner == -1,
+          "chunked SET applied");
+
+    // Out of order -> ERROR; the session survives a restart at 0.
+    host_send(0x60, MF_TYPE_SET, REQ_SET_ALL_PARAMS_CHUNK, 0, 2048, img);
+    run(200, 64, 100);
+    host_send(0x61, MF_TYPE_SET, REQ_SET_ALL_PARAMS_CHUNK, 4096, 2040, img + 4096);
+    run(200, 64, 100);
+    CHECK(replies[n_replies - 1].tag == 0x61 && replies[n_replies - 1].status == CTRL_STATUS_ERROR,
+          "out-of-order chunk refused");
+    host_send(0x62, MF_TYPE_SET, REQ_SET_ALL_PARAMS_CHUNK, 0, 2048, img);
+    run(200, 64, 100);
+    CHECK(replies[n_replies - 1].status == 0, "restart at 0");
+    host_send(0x63, MF_TYPE_GET, 0x7F, 0, 0, NULL);
+    run(10, 64, 100);
+    CHECK(bulk_owner == -1, "non-chunk request ends SET session");
+
+    // Lock held by another transport -> BULK_LOCKED.
+    bulk_owner = CTRL_SOURCE_USB;
+    host_send(0x64, MF_TYPE_SET, REQ_SET_ALL_PARAMS_CHUNK, 0, 2048, img);
+    run(200, 64, 100);
+    CHECK(replies[n_replies - 1].status == CTRL_STATUS_BULK_LOCKED && bulk_owner == CTRL_SOURCE_USB,
+          "chunk SET bulk locked");
+    host_send(0x65, MF_TYPE_GET, REQ_GET_ALL_PARAMS_CHUNK, 0, 2048, NULL);
+    run(200, 64, 1000);
+    CHECK(replies[n_replies - 1].status == CTRL_STATUS_BULK_LOCKED, "chunk GET bulk locked");
+    bulk_owner = -1;
 }
 
 static void test_errors(void) {
@@ -549,6 +661,8 @@ int main(void) {
     test_mount();
     test_get_small();
     test_set_small();
+    test_rta_bands_all();
+    test_chunks();
     test_errors();
     test_bulk_set();
     test_bulk_get();

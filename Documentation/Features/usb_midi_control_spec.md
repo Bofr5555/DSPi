@@ -217,13 +217,25 @@ The pending request goes through `vendor_dispatch_get/set(CTRL_SOURCE_MIDI,
 internally for 50 ms before being reported. Status codes are the shared
 `CTRL_STATUS_*` set (`control_interfaces_spec.md` 3.4).
 
-**Allow-list.** Same as UART and I2C: `0xF5` (`SET_UART_CONFIG`), `0xF7`
-(`SET_I2C_CONFIG`) and the chunked `0xA2` / `0xA3` are refused with `BLOCKED`;
-everything else, including `0xF0` bootloader entry, works. The `0xF5`/`0xF7`
-refusal exists so an external controller cannot lock itself out of its own
-link; MIDI rides on USB and could not, so allowing them over MIDI is a
-possible later decision (section 10). Use `0xA0` / `0xA1`, never the chunked
-forms.
+**Command set: parity with the USB vendor path.** The MIDI channel rides on
+USB and is meant to behave like the normal USB vendor control channel, not like
+the external UART / I2C links. Every opcode that is source-dependent in the
+firmware is treated as follows:
+
+| Opcode | USB vendor path | UART / I2C | USB MIDI | Why |
+|---|---|---|---|---|
+| `0xF5` `SET_UART_CONFIG` | allowed | `BLOCKED` | **allowed** | The UART/I2C refusal stops a controller locking itself out of its own link. A MIDI host is on USB and cannot; an iPhone-only user needs `0xF5` to enable an ESP32 bridge. Applied deferred and persisted exactly as over USB; read the result with `0xF9`. |
+| `0xF7` `SET_I2C_CONFIG` | allowed | `BLOCKED` | **allowed** | Same reasoning as `0xF5`. |
+| `0xA2` `GET_ALL_PARAMS_CHUNK` | allowed | `BLOCKED` | **allowed** | Served by `midi_control.c` with the USB semantics of `bulk_params_chunking.md`: offset 0 snapshots the whole struct under the bulk lock, later offsets read that snapshot, the final chunk releases the lock. Offset > 0 without a session: `ERROR` (USB: STALL). |
+| `0xA3` `SET_ALL_PARAMS_CHUNK` | allowed | `BLOCKED` | **allowed** | Same: sequential chunks from offset 0 land in `bulk_param_buf`, the chunk completing the struct applies it like `0xA1`. Out of order or past the end: `ERROR`, restart at 0. A session ends with the first non-chunk request, after 3 s idle, or on unplug, as on USB. Lock held by another transport: `BULK_LOCKED` (USB: STALL). |
+| `0x0F` `RTA_GET_BANDS_ALL` | allowed | `ERROR` (over the 132-byte cap) | **allowed** | MIDI has no reply cap; answered zero-copy out of `bulk_param_buf` under the bulk lock, like `0xA0`. |
+| `0x82` `GET_CLOCK_DIAG` (`DSPI_CLOCK_DIAG` bench builds only) | full packet | zero bytes if over 132 | zero bytes if over 132 | The one remaining difference: the packet lives in a handler-local buffer the external copy path caps at 132 bytes. Bench-only; not worth a second large buffer. |
+| `0xF0` `ENTER_BOOTLOADER` | allowed | allowed (reply lost) | allowed, reply flushed first (4.5) | |
+| everything else | allowed | allowed | allowed | Same dispatcher. |
+
+`0xA0` / `0xA1` remain the recommended bulk commands over MIDI (no size cap, one
+message); the chunked forms exist so a client written against the USB vendor
+path works unchanged.
 
 Changes made over MIDI notify with source `PARAM_SRC_MIDI` (10), on every
 consumer: the USB notify endpoint `0x83`, UART notification frames and the
@@ -294,7 +306,7 @@ late. Use generous timeouts (hundreds of ms) and retry idempotent GETs.
 | `midi_control.{c,h}` | TinyUSB glue, pending slot, dispatch, TX pump, notifications, bootloader flush. |
 | `usb_descriptors.{c,h}` | Interface / endpoint numbers, IAD + MIDI template, string 4, `bcdDevice`. |
 | `tusb_config.h` | `CFG_TUD_MIDI 1`, RX FIFO 256 B, TX FIFO 512 B, EP buffer 64 B. |
-| `vendor_commands.{c,h}` | `CTRL_SOURCE_MIDI = 4`; notify source mapping. |
+| `vendor_commands.{c,h}` | `CTRL_SOURCE_MIDI = 4`; notify source mapping; USB-path command set for MIDI (`CTRL_CMD_REFUSED`, `CTRL_BULK_GET`, `0x0F` zero-copy). |
 | `notify.h` | `PARAM_SRC_MIDI = 10`; `NOTIFY_CONSUMER_MIDI`. |
 | `firmware/tests/test_midi_frame.c`, `test_midi_control.c` | Host tests (codec; glue against TinyUSB / dispatcher mocks). |
 
@@ -311,7 +323,9 @@ late. Use generous timeouts (hundreds of ms) and retry idempotent GETs.
   interleave, F0 and system-common aborts, lone MSB byte, unused MSB bit,
   discarded payloads; random garbage followed by a good message.
 * `test_midi_control`: mount / unmount, small GET / SET, dispatcher errors,
-  `OVERSIZE`, `BLOCKED`, CRC and version errors, foreign SysEx, bulk SET with
+  `OVERSIZE`, `0xF5` reaching the dispatcher, `0x0F` larger than 132 bytes,
+  chunked `0xA2` / `0xA3` sessions (order, session end, idle reap, lock
+  contention), CRC and version errors, foreign SysEx, bulk SET with
   back-pressure, `BULK_LOCKED`, lock release on CRC error / timeout / unplug,
   bulk GET with a slow host and with a stalled host, `BUSY` retry window,
   pipelined requests, notification ordering, bootloader reply ordering.
@@ -333,26 +347,26 @@ build (`DSPi.bin` size; `.data` / `.bss` and free RAM as reported by
 
 | Chip | Flash image | `.data` (RAM code + data) | `.bss` | Free RAM |
 |---|---|---|---|---|
-| RP2040 | 283376 -> 289552 (+6176 B) | 71032 -> 72072 (+1040 B; budget 72704) | +1396 B | 58224 -> 55788 (-2436 B) |
-| RP2350 | 312612 -> 318468 (+5856 B) | 97656 -> 98592 (+936 B) | +1396 B | 119296 -> 116964 (-2332 B) |
+| RP2040 | 283384 -> 290656 (+7272 B) | 71032 -> 72072 (+1040 B; budget 72704) | +1408 B | 58224 -> 55776 (-2448 B) |
+| RP2350 | 312612 -> 319516 (+6904 B) | 97656 -> 98592 (+936 B) | +1408 B | 119296 -> 116952 (-2344 B) |
 
 `.bss` is TinyUSB's MIDI FIFOs (768 B) and endpoint buffers (128 B), the
 module's state and buffers (payload 64 B, reply copy 132 B, notify 64 B, codec
-state) and one more notify-ring consumer. `.data` grows because the TinyUSB
+and chunk-session state) and one more notify-ring consumer. `.data` grows because the TinyUSB
 device core and FIFO helpers, which the build keeps in RAM, gain the MIDI
 driver's code paths. On RP2040 this leaves 632 B of the `.data` budget. On
 RP2350 the heap start moves by 9.6 KB, not 2.3 KB, because `.bss` starts at the
 next 8 KB boundary (`input_capture_arena` alignment) and the larger `.data`
 crosses one; that padding is a layout effect of the existing linker script.
 
-## 10. Open decisions
+## 10. Decisions and open points
 
-1. **Manufacturer ID for release builds.** `0x7D` is for non-commercial /
-   development use. A product should use a registered ID (`DSPI_USB_MIDI_MFR_ID`);
-   hosts then match it. Weeb Labs' choice.
-2. **`0xF5` / `0xF7` over MIDI.** Refused today (same rule as UART/I2C). An
-   iPhone-only user would need `0xF5` to enable an ESP32 bridge on the UART;
-   allowing it over MIDI is safe from the lock-out point of view but changes the
-   shared allow-list.
-3. **Notification opt-in.** Always on while configured. A host that never opens
+1. **Manufacturer ID for release builds.** `0x7D` (development) stays the
+   default (decided 2026-11-03). A product may switch to a registered ID with
+   `DSPI_USB_MIDI_MFR_ID`; hosts then match it. Weeb Labs' choice.
+2. **Command set (decided 2026-11-03).** Parity with the USB vendor path:
+   `0xF5`, `0xF7`, `0xA2`, `0xA3` and `0x0F` are allowed over MIDI (4.2). The
+   only remaining difference is `0x82` on bench builds.
+3. **`bcdDevice` 0x0205** for MIDI builds (decided 2026-11-03).
+4. **Notification opt-in.** Always on while configured. A host that never opens
    the port leaves up to 512 bytes of stale notifications queued.

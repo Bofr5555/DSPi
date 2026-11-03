@@ -23,6 +23,7 @@
 #ifndef MIDI_CTRL_HOST_TEST
 #include "vendor_commands.h"
 #include "usb_audio.h"          // bulk_param_buf
+#include "bulk_params.h"        // WIRE_BULK_PARAMS_SIZE (chunk sessions)
 #include "usb_descriptors.h"    // MIDI_IN_ENDPOINT
 #include "notify.h"
 #include "config.h"             // REQ_* opcodes
@@ -73,6 +74,8 @@ static const mf_mfr_id_t g_id = {
 #define BULK_TOUCH_BYTES     64u          // refresh the bulk lock this often
 #define TX_STALL_US          400000u      // host stopped reading a bulk reply
 #define BOOT_FLUSH_US        200000u      // max wait for the 0xF0 reply to leave
+#define CHUNK_SESSION_US     3000000u     // idle chunk session reaped (USB's stale window)
+#define BULK_TOTAL           ((uint32_t)WIRE_BULK_PARAMS_SIZE)
 
 // ---------------------------------------------------------------------------
 // State
@@ -103,6 +106,19 @@ static struct {
     uint32_t boot_t0;
 } pending;
 
+// Chunked bulk sessions (0xA2 / 0xA3), the USB vendor path's semantics
+// (bulk_params_chunking.md): a GET session parks one coherent snapshot in
+// bulk_param_buf from offset 0 until the final chunk; a SET session takes
+// sequential chunks from offset 0 and applies on the final byte.  Either
+// holds the bulk lock for its whole life; the first non-chunk request, 3 s
+// of inactivity, or unplug closes it.
+static struct {
+    bool     get_open;
+    bool     set_open;
+    uint32_t set_received;
+    uint32_t last_us;
+} chunk;
+
 static mf_enc_t enc;
 static struct {
     bool     active;
@@ -126,7 +142,20 @@ static void release_parser_bulk(void) {
     }
 }
 
+static bool chunk_open(void) { return chunk.get_open || chunk.set_open; }
+
+static void chunk_close(void) {
+    if (chunk_open()) vendor_bulk_release(CTRL_SOURCE_MIDI);
+    chunk.get_open = chunk.set_open = false;
+    chunk.set_received = 0;
+}
+
+static bool is_chunk_req(uint8_t bReq) {
+    return bReq == REQ_GET_ALL_PARAMS_CHUNK || bReq == REQ_SET_ALL_PARAMS_CHUNK;
+}
+
 static void reset_all(void) {
+    chunk_close();
     release_parser_bulk();
     if (pending.active && pending.holds_bulk) vendor_bulk_release(CTRL_SOURCE_MIDI);
     if (tx.active && tx.bulk) vendor_bulk_release(CTRL_SOURCE_MIDI);
@@ -180,12 +209,13 @@ static void pump_tx(void) {
         }
     }
 
-    // The host stopped reading in the middle of a bulk reply: end the SysEx
+    // The host stopped reading in the middle of a bulk (or chunk) reply: end the SysEx
     // early (the host sees a malformed message and retries) and give the
     // bulk buffer back instead of pinning it for every other transport.
-    if (tx.active && tx.bulk &&
+    if (tx.active && (tx.bulk || chunk.get_open) &&
         (uint32_t)(time_us_32() - tx.last_progress) > TX_STALL_US) {
         tx_release_bulk();
+        chunk_close();                      // a GET chunk was streaming from the session
         enc.phase = 3;                      // encoder done
         if (!tx.have_pkt) {
             tx.pkt[0] = (uint8_t)((MIDI_CABLE << 4) | MF_CIN_SYSEX_END1);
@@ -222,6 +252,34 @@ static void on_event(mf_event_t ev) {
     switch (ev) {
         case MF_EV_SET_HEADER:
             dec.dst = NULL;
+            if (dec.bReq == REQ_SET_ALL_PARAMS_CHUNK) {
+                // Payload lands at bulk_param_buf + offset, like USB.
+                uint32_t off = dec.wValue, n = dec.wLength;
+                if (off + n > BULK_TOTAL) {
+                    dec.deferred_status = CTRL_STATUS_ERROR;
+                } else if (off == 0) {
+                    if (tx.active && chunk.get_open) {
+                        // A GET chunk is still being sent out of the buffer.
+                        dec.deferred_status = CTRL_STATUS_BULK_LOCKED;
+                    } else if (chunk_open() || vendor_bulk_try_acquire(CTRL_SOURCE_MIDI)) {
+                        chunk.get_open = false;      // SET supersedes a GET session
+                        chunk.set_open = true;
+                        chunk.set_received = 0;
+                        chunk.last_us = time_us_32();
+                        dec.dst = bulk_param_buf;
+                    } else {
+                        dec.deferred_status = CTRL_STATUS_BULK_LOCKED;
+                    }
+                } else if (!chunk.set_open || off != chunk.set_received) {
+                    dec.deferred_status = CTRL_STATUS_ERROR;   // out of order: restart at 0
+                } else {
+                    chunk.last_us = time_us_32();
+                    dec.dst = bulk_param_buf + off;
+                }
+                break;
+            }
+            if (vendor_is_bulk_set(dec.bReq, dec.wLength) && chunk_open() && !tx.active)
+                chunk_close();                   // a non-chunk bulk SET ends the session
             if (vendor_is_bulk_set(dec.bReq, dec.wLength)) {
                 if (vendor_bulk_try_acquire(CTRL_SOURCE_MIDI)) {
                     parser_holds_bulk = true;
@@ -329,12 +387,92 @@ static void dispatch_bootloader(void) {
     }
 }
 
+static bool retry_pending(CtrlDispatchResult res) {
+    bool retryable = (res == CTRL_DISPATCH_BUSY) ||
+                     (pending.is_get && res == CTRL_DISPATCH_BULK_LOCKED);
+    return retryable &&
+           (uint32_t)(time_us_32() - pending.retry_start) < DISPATCH_RETRY_US;
+}
+
+// GET 0xA2: wValue = offset, wLength = chunk size.  Offset 0 snapshots the
+// whole struct under the bulk lock (through the normal 0xA0 dispatch).
+static void dispatch_chunk_get(void) {
+    uint32_t off = pending.wValue, n = pending.wLen;
+    uint8_t status = CTRL_STATUS_OK;
+    if (n == 0 || off >= BULK_TOTAL) {
+        status = CTRL_STATUS_ERROR;
+    } else if (off == 0) {
+        chunk_close();
+        const uint8_t *rd = NULL;
+        uint16_t rl = 0;
+        CtrlDispatchResult res = vendor_dispatch_get(CTRL_SOURCE_MIDI, REQ_GET_ALL_PARAMS,
+                                                     0, pending.wIndex, 0, &rd, &rl);
+        if (retry_pending(res)) return;
+        if (res == CTRL_DISPATCH_OK) chunk.get_open = true;   // lock now ours
+        else status = ctrl_status_from_dispatch(res);
+    } else if (!chunk.get_open) {
+        status = CTRL_STATUS_ERROR;      // no snapshot (session lost): restart at 0
+    }
+    pending.active = false;
+    if (status != CTRL_STATUS_OK) {
+        start_tx(pending.tag, MF_RESP_GET, status, NULL, 0, false);
+        return;
+    }
+    chunk.last_us = time_us_32();
+    if (off + n > BULK_TOTAL) n = BULK_TOTAL - off;
+    if (off + n >= BULK_TOTAL) {
+        // Final chunk: the reply takes over the lock and releases it once
+        // the payload is encoded.
+        chunk.get_open = false;
+        start_tx(pending.tag, MF_RESP_GET, CTRL_STATUS_OK, bulk_param_buf + off, (uint16_t)n, true);
+    } else {
+        start_tx(pending.tag, MF_RESP_GET, CTRL_STATUS_OK, bulk_param_buf + off, (uint16_t)n, false);
+    }
+}
+
+// SET 0xA3: the payload is already at bulk_param_buf + offset (checked at
+// the header).  The chunk that completes the struct hands it to the apply.
+static void dispatch_chunk_set(void) {
+    if (pending.wLen == 0 || !chunk.set_open) {
+        pending.active = false;
+        start_tx(pending.tag, MF_RESP_SET, CTRL_STATUS_ERROR, NULL, 0, false);
+        return;
+    }
+    chunk.set_received = (uint32_t)pending.wValue + pending.wLen;
+    chunk.last_us = time_us_32();
+    uint8_t status = CTRL_STATUS_OK;
+    if (chunk.set_received >= BULK_TOTAL) {
+        CtrlDispatchResult res = vendor_dispatch_set(CTRL_SOURCE_MIDI, REQ_SET_ALL_PARAMS, 0,
+                                                     pending.wIndex, NULL, (uint16_t)BULK_TOTAL);
+        if (retry_pending(res)) return;
+        if (res == CTRL_DISPATCH_OK) {
+            chunk.set_open = false;          // lock handed to the apply
+            chunk.set_received = 0;
+        } else {
+            chunk_close();
+        }
+        status = ctrl_status_from_dispatch(res);
+    }
+    pending.active = false;
+    start_tx(pending.tag, MF_RESP_SET, status, NULL, 0, false);
+}
+
 static void try_dispatch(void) {
     if (!pending.dispatch) {
         start_tx(pending.tag, pending.resp_type, pending.status, NULL, 0, false);
         pending.active = false;
         return;
     }
+    if (pending.bReq == REQ_GET_ALL_PARAMS_CHUNK && pending.is_get) {
+        dispatch_chunk_get();
+        return;
+    }
+    if (pending.bReq == REQ_SET_ALL_PARAMS_CHUNK && !pending.is_get) {
+        dispatch_chunk_set();
+        return;
+    }
+    // Like USB: the first non-chunk request ends an open chunk session.
+    if (!is_chunk_req(pending.bReq)) chunk_close();
     if (pending.is_get && pending.bReq == REQ_ENTER_BOOTLOADER) {
         dispatch_bootloader();
         return;
@@ -351,11 +489,7 @@ static void try_dispatch(void) {
                                   pending.wIndex, payload_buf, pending.wLen);
     }
 
-    bool retryable = (res == CTRL_DISPATCH_BUSY) ||
-                     (pending.is_get && res == CTRL_DISPATCH_BULK_LOCKED);
-    if (retryable &&
-        (uint32_t)(time_us_32() - pending.retry_start) < DISPATCH_RETRY_US)
-        return;   // keep pending; retry next poll
+    if (retry_pending(res)) return;   // keep pending; retry next poll
 
     // Bulk SET: vendor_dispatch_set hands the buffer to the apply on OK;
     // release on anything else (as UART).
@@ -365,7 +499,7 @@ static void try_dispatch(void) {
     pending.active = false;
 
     if (pending.is_get && res == CTRL_DISPATCH_OK) {
-        if (pending.bReq == REQ_GET_ALL_PARAMS) {
+        if (pending.bReq == REQ_GET_ALL_PARAMS || pending.bReq == REQ_RTA_GET_BANDS_ALL) {
             // Zero-copy from bulk_param_buf; the dispatcher handed us the
             // bulk lock, released once the payload is encoded.
             start_tx(pending.tag, MF_RESP_GET, CTRL_STATUS_OK, rd, rl, true);
@@ -395,9 +529,18 @@ void midi_ctrl_poll(void) {
     }
     if (!mounted) return;
 
-    // Hold a bulk SET's lock while it waits for dispatch.
+    // Hold a bulk SET's lock while it waits for dispatch, and an open chunk
+    // session's for up to CHUNK_SESSION_US of inactivity.
     if (pending.active && pending.holds_bulk)
         vendor_bulk_touch(CTRL_SOURCE_MIDI);
+    if (chunk_open()) {
+        if ((uint32_t)(time_us_32() - chunk.last_us) > CHUNK_SESSION_US &&
+            !(tx.active && chunk.get_open) &&
+            !(pending.active && is_chunk_req(pending.bReq)))
+            chunk_close();
+        else
+            vendor_bulk_touch(CTRL_SOURCE_MIDI);
+    }
 
     // Silence mid-message: drop the partial message, answer nothing (UART rule).
     if (mf_dec_busy(&dec) &&

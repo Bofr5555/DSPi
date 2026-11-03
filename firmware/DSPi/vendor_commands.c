@@ -1429,7 +1429,7 @@ static bool vendor_handle_set_body(tusb_control_request_t const *req) {
         }
 
         case REQ_SET_UART_CONFIG: {
-            // USB-only (vendor_dispatch_set refuses it on UART/I2C).
+            // USB / USB MIDI only (vendor_dispatch_set refuses it on UART/I2C).
             // Deferred to main loop: apply does GPIO/IRQ work and the
             // persist is a ~45 ms flash write.  Result lands in
             // ctrl_uart_last_status, readable via REQ_GET_CTRL_IFACE_STATUS.
@@ -1443,7 +1443,7 @@ static bool vendor_handle_set_body(tusb_control_request_t const *req) {
         }
 
         case REQ_SET_I2C_CONFIG: {
-            // USB-only; same deferred apply+persist shape as UART above.
+            // USB / USB MIDI only; same deferred apply+persist shape as UART above.
             if (buffer->data_len >= sizeof(I2cCtrlConfig)) {
                 memcpy((void *)&ctrl_set_i2c_val, vendor_rx_buf,
                        sizeof(I2cCtrlConfig));
@@ -4472,7 +4472,14 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                 // USB only: the response outgrows the external transports'
                 // 132-byte GET cap, so they poll 0x0B per channel.  Caller
                 // (the USB SETUP path) holds the bulk lock; see vendor_is_bulk_get.
+                // USB MIDI builds also serve it to CTRL_SOURCE_MIDI, whose
+                // vendor_dispatch_get takes the bulk lock (CTRL_BULK_GET).
+#ifdef DSPI_USB_MIDI
+                if (_active_source != CTRL_SOURCE_USB &&
+                    _active_source != CTRL_SOURCE_MIDI) return false;
+#else
                 if (_active_source != CTRL_SOURCE_USB) return false;
+#endif
                 rta_note_read();
                 uint16_t mask = rta_live_mask();
                 uint16_t len = 0;
@@ -4487,6 +4494,12 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                 // rather than a STALL, so the host can tell "nothing live"
                 // from "command rejected".
                 if (setup->wLength < len) len = setup->wLength;
+#ifdef DSPI_USB_MIDI
+                if (_active_source != CTRL_SOURCE_USB) {
+                    vendor_send_response(bulk_param_buf, len);   // zero-copy
+                    return true;
+                }
+#endif
                 return tud_control_xfer(_vendor_rhport, _vendor_current_req,
                                         bulk_param_buf, len);
             }
@@ -4704,6 +4717,26 @@ static bool ctrl_cmd_usb_only(uint8_t bRequest) {
            bRequest == REQ_SET_ALL_PARAMS_CHUNK;
 }
 
+// USB MIDI (DSPI_USB_MIDI) rides on USB, so it follows the USB vendor path's
+// rules, not UART/I2C's: interface self-configuration (0xF5 / 0xF7) is
+// allowed because a MIDI host cannot lock itself out of USB, and
+// REQ_RTA_GET_BANDS_ALL answers out of bulk_param_buf under the bulk lock
+// (the MIDI channel has no 132-byte reply cap).  The chunked 0xA2 / 0xA3 are
+// served by midi_control.c's own chunk sessions and never reach the
+// dispatcher.  Macros, so a default build preprocesses to the old tokens.
+#ifdef DSPI_USB_MIDI
+#define CTRL_CMD_REFUSED(src, b) \
+    (ctrl_cmd_usb_only(b) && \
+     !((src) == CTRL_SOURCE_MIDI && \
+       ((b) == REQ_SET_UART_CONFIG || (b) == REQ_SET_I2C_CONFIG)))
+#define CTRL_BULK_GET(src, b) \
+    ((b) == REQ_GET_ALL_PARAMS || \
+     ((src) == CTRL_SOURCE_MIDI && (b) == REQ_RTA_GET_BANDS_ALL))
+#else
+#define CTRL_CMD_REFUSED(src, b) ctrl_cmd_usb_only(b)
+#define CTRL_BULK_GET(src, b)    ((b) == REQ_GET_ALL_PARAMS)
+#endif
+
 // notify source tag for an external dispatch source.  A macro, not a helper,
 // so a default (DSPI_USB_MIDI OFF) build preprocesses to the same tokens as
 // before the MIDI transport existed.
@@ -4723,9 +4756,9 @@ CtrlDispatchResult vendor_dispatch_get(CtrlSource src, uint8_t bRequest,
                                        const uint8_t **resp_data, uint16_t *resp_len) {
     if (src == CTRL_SOURCE_USB) return CTRL_DISPATCH_ERROR;  // USB uses the TinyUSB path
     if (usb_set_busy())         return CTRL_DISPATCH_BUSY;
-    if (ctrl_cmd_usb_only(bRequest)) return CTRL_DISPATCH_BLOCKED;
+    if (CTRL_CMD_REFUSED(src, bRequest)) return CTRL_DISPATCH_BLOCKED;
 
-    bool bulk = (bRequest == REQ_GET_ALL_PARAMS);
+    bool bulk = CTRL_BULK_GET(src, bRequest);
     if (bulk && !vendor_bulk_try_acquire(src)) return CTRL_DISPATCH_BULK_LOCKED;
 
     tusb_control_request_t req = {
@@ -4762,7 +4795,7 @@ CtrlDispatchResult vendor_dispatch_set(CtrlSource src, uint8_t bRequest,
     (void)wIndex;   // SET handlers carry sub-params in wValue only (matches USB)
     if (src == CTRL_SOURCE_USB) return CTRL_DISPATCH_ERROR;
     if (usb_set_busy())         return CTRL_DISPATCH_BUSY;
-    if (ctrl_cmd_usb_only(bRequest)) return CTRL_DISPATCH_BLOCKED;
+    if (CTRL_CMD_REFUSED(src, bRequest)) return CTRL_DISPATCH_BLOCKED;
 
     if (bRequest == REQ_SET_ALL_PARAMS) {
         if (!vendor_is_bulk_set(bRequest, wLength)) return CTRL_DISPATCH_ERROR;

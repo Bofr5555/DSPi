@@ -8,8 +8,9 @@ exercise midi_ctrl.py, measure.py and soak.py without a device:
   * FRAME_ERROR with tag 0x7F for a bad version, a host tag of 0 or a
     truncated header; FRAME_ERROR with the tag for malformed packing or a
     frame that is truncated / has trailing bytes; CRC_ERROR with the tag;
-  * OVERSIZE for a non-bulk SET payload > 64 bytes; BLOCKED for 0xF5/0xF7
-    and the chunked 0xA2/0xA3;
+  * OVERSIZE for a non-bulk SET payload > 64 bytes;
+  * USB-path parity: 0xF5 / 0xF7 accepted (recorded, never applied), chunked
+    0xA2 / 0xA3 sessions, 0x0F (RTA bands-all) larger than 132 bytes;
   * a small command set: 0x7F platform, 0xD2/0xD3 master volume (with a
     PARAM_CHANGED notification, src MIDI), 0xA0/0xA1 bulk (BULK_INVALIDATED
     after a SET), 0x50 status, 0xB0/0xB2 stats, 0xF0 bootloader;
@@ -58,6 +59,10 @@ class FakeDevice:
         self.inject = []            # statuses returned (once each) before real handling
         self.requests = 0
         self.in_bootloader = False
+        self.iface_config = []      # (bReq, payload) of 0xF5 / 0xF7 received
+        self.chunk_get = False
+        self.chunk_set = None       # bytes received so far, or None
+        self.chunk_buf = bytearray()
 
     # -- output -----------------------------------------------------------
     def _emit(self, tag: int, frame: bytes) -> None:
@@ -119,12 +124,47 @@ class FakeDevice:
     def _dispatch(self, tag: int, is_get: bool, r: dict) -> None:
         breq, wv, payload = r["breq"], r["wvalue"], r["payload"]
         is_bulk_set = (not is_get and breq == mc.REQ_SET_ALL_PARAMS and r["wlength"] == len(self.bulk))
-        if not is_get and len(payload) > mc.NON_BULK_SET_MAX and not is_bulk_set:
+        is_chunk = breq in (0xA2, 0xA3)
+        if not is_chunk:
+            self.chunk_get, self.chunk_set = False, None     # non-chunk request ends sessions
+        if not is_get and len(payload) > mc.NON_BULK_SET_MAX and not is_bulk_set and not is_chunk:
             return self._reply(tag, False, mc.ST_OVERSIZE)
         if self.inject:
             return self._reply(tag, is_get, self.inject.pop(0))
-        if breq in (0xF5, 0xF7, 0xA2, 0xA3):
-            return self._reply(tag, is_get, mc.ST_BLOCKED)
+        if not is_get and breq in (0xF5, 0xF7):
+            self.iface_config.append((breq, payload))
+            return self._reply(tag, False, mc.ST_OK)
+        if is_get and breq == 0xA2:
+            off, n = wv, r["wlength"]
+            if n == 0 or off >= len(self.bulk):
+                return self._reply(tag, True, mc.ST_ERROR)
+            if off == 0:
+                self.chunk_buf = bytearray(self.bulk)
+                self.chunk_get = True
+            elif not self.chunk_get:
+                return self._reply(tag, True, mc.ST_ERROR)
+            data = bytes(self.chunk_buf[off:off + n])
+            if off + len(data) >= len(self.bulk):
+                self.chunk_get = False
+            return self._reply(tag, True, mc.ST_OK, data)
+        if not is_get and breq == 0xA3:
+            off = wv
+            if not payload or off + len(payload) > len(self.bulk):
+                return self._reply(tag, False, mc.ST_ERROR)
+            if off == 0:
+                self.chunk_set, self.chunk_get = 0, False
+                self.chunk_buf = bytearray(len(self.bulk))
+            elif self.chunk_set is None or off != self.chunk_set:
+                return self._reply(tag, False, mc.ST_ERROR)
+            self.chunk_buf[off:off + len(payload)] = payload
+            self.chunk_set = off + len(payload)
+            if self.chunk_set >= len(self.bulk):
+                self.bulk[:] = self.chunk_buf
+                self.chunk_set = None
+                self._reply(tag, False, mc.ST_OK)
+                self._notify_bulk_invalidated()
+                return
+            return self._reply(tag, False, mc.ST_OK)
 
         if is_get:
             cap = r["wlength"]
@@ -136,6 +176,8 @@ class FakeDevice:
                 data = bytes(self.bulk)
             elif breq == mc.REQ_GET_STATUS:
                 data = bytes(26) if wv == 9 else bytes(4)
+            elif breq == 0x0F:                          # RTA bands-all (4 x 75 B)
+                data = bytes(300)
             elif breq == mc.REQ_GET_BUFFER_STATS:
                 data = bytes(44)
             elif breq == mc.REQ_GET_USB_ERROR_STATS:
