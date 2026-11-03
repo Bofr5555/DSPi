@@ -330,6 +330,15 @@ late. Use generous timeouts (hundreds of ms) and retry idempotent GETs.
   bulk GET with a slow host and with a stalled host, `BUSY` retry window,
   pipelined requests, notification ordering, bootloader reply ordering.
 
+`scripts/check_usb_config.py <DSPi.elf>` (stdlib, no toolchain) replays
+TinyUSB's SET_CONFIGURATION driver binding over the configuration descriptor in
+a built ELF: each interface is offered to the UAC1 driver, the loopback driver
+and the MIDI driver in TinyUSB's order, with the UAC1 driver's
+interface-number scoping read from `usb_audio.c`. It fails if any interface is
+left without a driver (the device would STALL SET_CONFIGURATION), bound twice,
+bound to the wrong driver, or if an endpoint is claimed by two drivers. Run it
+on every build variant (default, `DSPI_USB_MIDI`, `DSPI_LOOPBACK`, both).
+
 `tools/midi_ctrl/` (container, no device): codec and vectors, the client
 against an in-process fake device and against a fake device on a pty.
 
@@ -338,6 +347,13 @@ against an in-process fake device and against a fake device on a pty.
 Enumeration on real hosts (Linux, macOS, Windows, iOS), CoreMIDI's SysEx pacing,
 and coexistence with streaming audio are hardware tests (`tools/midi_ctrl/`
 `regress.sh`, `measure.py`, `soak.py`).
+
+**Driver binding.** DSPi's UAC1 class driver (`usb_audio.c`) is offered every
+interface first. It must stay scoped to interface 0 whenever a second
+AudioControl interface exists (loopback or MIDI); otherwise it claims the MIDI
+AudioControl interface, the MIDIStreaming interface is left without a driver
+and SET_CONFIGURATION stalls (the first hardware build, 247c524, failed this
+way: "can't set config #1, error -32"). `check_usb_config.py` guards it.
 
 ## 9. Cost
 

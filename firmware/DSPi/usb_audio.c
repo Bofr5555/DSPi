@@ -949,11 +949,14 @@ static uint16_t uac1_driver_open(uint8_t rhport, tusb_desc_interface_t const *it
     TU_VERIFY(itf_desc->bInterfaceClass == TUSB_CLASS_AUDIO);
     TU_VERIFY(itf_desc->bInterfaceSubClass == AUDIO_SUBCLASS_CONTROL);
     TU_VERIFY(itf_desc->bAlternateSetting == 0);
-#ifdef DSPI_LOOPBACK
-    // With the loopback capture function present there is a SECOND audio-control
-    // interface (ITF_NUM_LOOPBACK_AC).  Scope this driver to the playback AC
-    // interface so it doesn't claim — and hijack — the capture function; the
-    // loopback driver claims ITF_NUM_LOOPBACK_AC.
+#if defined(DSPI_LOOPBACK) || defined(DSPI_USB_MIDI)
+    // With the loopback capture function (ITF_NUM_LOOPBACK_AC) or the USB MIDI
+    // function (ITF_NUM_MIDI_AC) present there is a SECOND audio-control
+    // interface.  Scope this driver to the playback AC interface so it doesn't
+    // claim — and hijack — the other function; the loopback driver and
+    // TinyUSB's MIDI driver claim theirs.  (Without this, a MIDI build claimed
+    // the MIDI AC interface here, left the MIDIStreaming interface without a
+    // driver, and SET_CONFIGURATION stalled.)
     TU_VERIFY(itf_desc->bInterfaceNumber == ITF_NUM_AUDIO_CONTROL);
 #endif
 
