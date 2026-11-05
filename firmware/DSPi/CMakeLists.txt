@@ -266,3 +266,29 @@ target_link_libraries(DSPi
 pico_enable_stdio_uart(DSPi 0)
 
 pico_add_extra_outputs(DSPi)
+
+# DSPI_DEBUG_PRINTF: printf()/puts() diagnostics.  No stdio driver is linked
+# (UART stdio is off above, no USB CDC), so their output goes nowhere; the
+# default build compiles them out with dspi_no_printf.h (arguments still
+# evaluated, formats still checked).  With them gone, the SDK panic() is the
+# last stdio user: PICO_PANIC_FUNCTION= (empty) makes it halt directly on a
+# breakpoint loop, as the stock panic does after printing to no driver
+# (_exit -> __breakpoint loop).  No remaining snprintf() format uses a float
+# conversion (display text and channel names use %s %d %u %c only), so the
+# pico_printf float/exponential code is dropped too.  Turn ON only together
+# with a stdio driver.
+option(DSPI_DEBUG_PRINTF "Keep printf/puts diagnostics (only useful with a stdio driver)" OFF)
+if (NOT DSPI_DEBUG_PRINTF)
+    get_target_property(_dspi_c_sources DSPi SOURCES)
+    list(FILTER _dspi_c_sources INCLUDE REGEX "\\.c$")
+    file(GLOB _dspi_extras_c_sources
+        ${CMAKE_CURRENT_SOURCE_DIR}/../pico-extras/src/rp2_common/pico_audio_i2s_multi/*.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/../pico-extras/src/rp2_common/pico_audio_spdif_multi/*.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/../pico-extras/src/rp2_common/pico_spdif_rx/*.c)
+    set_property(SOURCE ${_dspi_c_sources} ${_dspi_extras_c_sources} APPEND PROPERTY
+        COMPILE_OPTIONS -include ${CMAKE_CURRENT_SOURCE_DIR}/dspi_no_printf.h)
+    target_compile_definitions(DSPi PRIVATE
+        PICO_PANIC_FUNCTION=
+        PICO_PRINTF_SUPPORT_FLOAT=0
+        PICO_PRINTF_SUPPORT_EXPONENTIAL=0)
+endif()
