@@ -100,6 +100,12 @@ SECTIONS
             .text.dcd_edpt_iso_activate .text.dcd_int_enable)
         *tinyusb/src/portable/raspberrypi/rp2040/rp2040_usb.c.o(.text.rp2040_usb_init)
         *tinyusb/src/tusb.c.o(.text.tu_edpt_validate)
+        /* tu_fifo stream/bulk helpers: only the MIDI class (DSPI_USB_MIDI,
+           tud_task context, flash) and init use them; the OSAL event queue
+           needs only tu_fifo_write/tu_fifo_read, which stay in RAM. */
+        *tinyusb/src/common/tusb_fifo.c.o(.text.tu_fifo_config .text.tu_fifo_clear
+            .text.tu_fifo_write_n .text.tu_fifo_read_n .text._tu_fifo_peek_n*
+            .text.tu_fifo_remaining .text.tu_fifo_count)
         *pico_time/time.c.o(.text.runtime_init_default_alarm_pool)
         *hardware_timer/timer.c.o(.text.busy_wait_ms .text.busy_wait_us
             .text.timer_hardware_alarm_claim .text.hardware_alarm_claim_unused)
