@@ -244,6 +244,21 @@ SECTIONS
     __binary_info_end = .;
     . = ALIGN(4);
 
+    /* DSPi: DMA buffers whose ring wrap needs size alignment (input capture
+       arena, PDM DMA ring) go first in RAM, where ORIGIN(RAM) is aligned for
+       all of them and each size is a multiple of its alignment, so no padding
+       is spent.  In .bss they set the section alignment, and the gap between
+       .data's end and the next 8 KB boundary (0..8 KB, moving with every
+       .data change) was lost to the heap.  NOLOAD and outside crt0's .bss
+       clear: audio_input.c zeroes [__bss_aligned_start__, __bss_aligned_end__)
+       from a constructor, before main(). */
+    .bss_aligned (NOLOAD) : {
+        __bss_aligned_start__ = .;
+        KEEP(*(SORT_BY_ALIGNMENT(.bss.aligned.*)))
+        . = ALIGN(4);
+        __bss_aligned_end__ = .;
+    } > RAM
+
     .ram_vector_table (NOLOAD): {
         *(.ram_vector_table)
     } > RAM
