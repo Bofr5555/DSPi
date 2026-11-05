@@ -34,7 +34,9 @@ static volatile uint8_t pdm_head = 0;
 static volatile uint8_t pdm_tail = 0;
 
 // DMA Circular Buffer
-static uint32_t __attribute__((aligned(PDM_DMA_BUFFER_SIZE * 4))) pdm_dma_buffer[PDM_DMA_BUFFER_SIZE];
+// Section: the linker scripts' .bss_aligned block (no alignment padding).
+static uint32_t __attribute__((aligned(PDM_DMA_BUFFER_SIZE * 4), section(".bss.aligned.pdm_dma_buffer")))
+    pdm_dma_buffer[PDM_DMA_BUFFER_SIZE];
 static int pdm_dma_chan = -1;
 
 // PIO program offset and current pin (needed for pdm_change_pin)
