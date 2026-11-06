@@ -141,7 +141,7 @@ The stamp is readable three ways.
 - `picotool info <file>.uf2` reads the same string from the UF2's binary info, identifying a build file with no device attached.
 - `tools/dspi_test` prints it in the profile summary and checks it in the identity tests.
 
-Two rules keep it honest. First, the stamp is for humans only; no software may gate, compare, or parse it, exactly as with build labels. Second, a release build must be made from a clean checkout of the tagged commit, so a published binary reports the bare tag with no offset and no `-dirty`. A release stamp that says anything else means the binary was not built from the tag.
+Two rules keep it honest. First, the stamp is for humans only; no software may gate, compare, or parse it, exactly as with build labels. Second, a release build must be made from a clean checkout of the tagged commit, so a published binary reports the bare tag with no offset and no `-dirty`. A release stamp that says anything else means the binary was not built from the tag. Configuring with `-DRELEASE=ON` enforces this: the build refuses unless `HEAD` is exactly a clean tag that matches `FW_VERSION_*`, and it names the published copy from the stamp (`Documentation/RELEASING.md`).
 
 Wire layout details live in `Documentation/Features/device_identification_spec.md`.
 

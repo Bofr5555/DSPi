@@ -212,14 +212,45 @@ target_include_directories(DSPi PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
+# RELEASE (default OFF): a build meant to be published.  Every build then
+# refuses (and deletes the previous DSPi.* outputs) unless HEAD is exactly a
+# tag, the tree is clean and the tag matches FW_VERSION_* in config.h; a
+# passing build also copies the UF2 to release/DSPi-<tag>-<variant>.uf2 with a
+# .sha256.  Dev builds (OFF) are unaffected.  See Documentation/RELEASING.md.
+option(RELEASE "Release build: require a clean, exactly tagged checkout" OFF)
+if (RELEASE)
+    foreach(_bench DSPI_LOOPBACK DSPI_CLOCK_DIAG DSPI_LOOP_PROF DSPI_DEBUG_PRINTF)
+        if (${_bench})
+            message(FATAL_ERROR "RELEASE build refused: ${_bench} is a bench option and must be OFF")
+        endif()
+    endforeach()
+    # Variant suffix of the published file name: platform, MIDI, non-default
+    # core voltage (K340: rp2350-midi-vreg1200).  Override with
+    # -DRELEASE_VARIANT=<name>.
+    set(_variant ${PICO_PLATFORM})
+    string(REGEX REPLACE "-.*" "" _variant "${_variant}")   # rp2350-arm-s -> rp2350
+    if (DSPI_USB_MIDI)
+        string(APPEND _variant "-midi")
+    endif()
+    if (NOT DSPI_VREG_MV STREQUAL "1150")
+        string(APPEND _variant "-vreg${DSPI_VREG_MV}")
+    endif()
+    set(RELEASE_VARIANT "${_variant}" CACHE STRING "Release file-name variant (DSPi-<tag>-<variant>.uf2)")
+    message(STATUS "RELEASE build ON: variant '${RELEASE_VARIANT}'; the tag is checked at build time")
+endif()
+
 # Git build stamp, regenerated on EVERY build so the header tracks the
 # checkout rather than the last configure. The script writes only on change,
 # so dependents recompile only when the hash, dirty state, or date moved.
+# With RELEASE it also enforces the tag rules above.
 set(BUILD_INFO_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/build_info.h)
 add_custom_target(dspi_build_info
     COMMAND ${CMAKE_COMMAND}
         -DREPO_DIR=${CMAKE_CURRENT_SOURCE_DIR}
         -DOUT_FILE=${BUILD_INFO_HEADER}
+        -DRELEASE=${RELEASE}
+        -DCONFIG_H=${CMAKE_CURRENT_SOURCE_DIR}/config.h
+        -DARTIFACT_DIR=${CMAKE_CURRENT_BINARY_DIR}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/gen_build_info.cmake
     BYPRODUCTS ${BUILD_INFO_HEADER}
     COMMENT "Stamping git build info"
@@ -266,6 +297,21 @@ target_link_libraries(DSPi
 pico_enable_stdio_uart(DSPi 0)
 
 pico_add_extra_outputs(DSPi)
+
+if (RELEASE)
+    # Publishable copy named from the stamp actually compiled in.  A POST_BUILD
+    # step would not run when the elf is already up to date (e.g. a second
+    # build of the same tag), so this is an always-run target after DSPi.
+    add_custom_target(dspi_release_artifact ALL
+        COMMAND ${CMAKE_COMMAND}
+            -DBUILD_INFO=${BUILD_INFO_HEADER}
+            -DUF2=${CMAKE_CURRENT_BINARY_DIR}/DSPi.uf2
+            -DOUT_DIR=${CMAKE_BINARY_DIR}/release
+            -DVARIANT=${RELEASE_VARIANT}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/release_artifact.cmake
+        VERBATIM)
+    add_dependencies(dspi_release_artifact DSPi)
+endif()
 
 # DSPI_DEBUG_PRINTF: printf()/puts() diagnostics.  No stdio driver is linked
 # (UART stdio is off above, no USB CDC), so their output goes nowhere; the

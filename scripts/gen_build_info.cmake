@@ -6,6 +6,14 @@
 # Expected -D arguments:
 #   REPO_DIR  - any directory inside the git checkout
 #   OUT_FILE  - path of the header to generate
+# Optional (release builds, -DRELEASE=ON at configure time):
+#   RELEASE       - ON: refuse to build unless HEAD is exactly a tag, the tree
+#                   is clean and the tag matches FW_VERSION_* in config.h
+#   CONFIG_H      - path of firmware/DSPi/config.h (version macros)
+#   ARTIFACT_DIR  - directory holding DSPi.elf/.uf2/...; on a refusal the
+#                   previous outputs there are deleted so no stale image can
+#                   be mistaken for the release
+# See Documentation/RELEASING.md.
 
 find_program(GIT_EXECUTABLE git)
 
@@ -20,6 +28,76 @@ if(GIT_EXECUTABLE)
     if(_rc EQUAL 0 AND NOT _out STREQUAL "")
         set(DESCRIBE "${_out}")
     endif()
+endif()
+
+if(RELEASE)
+    set(_why "")
+    set(_tag "")
+    if(NOT GIT_EXECUTABLE)
+        set(_why "git not found")
+    else()
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" -C "${REPO_DIR}" describe --tags --exact-match HEAD
+            OUTPUT_VARIABLE _tag
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+            RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0 OR _tag STREQUAL "")
+            set(_why "HEAD is not a tagged commit (git describe: ${DESCRIBE})")
+        elseif(NOT DESCRIBE STREQUAL _tag)
+            set(_why "the working tree has uncommitted changes (git describe: ${DESCRIBE})")
+        endif()
+    endif()
+
+    # The tag must spell the version the firmware reports over 0x7F:
+    # v<major>.<minor>.<patch>[-beta<N>][-<label>], with N == FW_VERSION_BETA
+    # (no -betaN means FW_VERSION_BETA 0).
+    if(_why STREQUAL "")
+        file(STRINGS "${CONFIG_H}" _vlines
+             REGEX "^#define[ \t]+FW_VERSION_(MAJOR|MINOR|PATCH|BETA)[ \t]+[0-9]+")
+        foreach(_l IN LISTS _vlines)
+            string(REGEX REPLACE "^#define[ \t]+FW_VERSION_([A-Z]+)[ \t]+([0-9]+).*" "\\1;\\2" _kv "${_l}")
+            list(GET _kv 0 _k)
+            list(GET _kv 1 _v)
+            set(_fw_${_k} "${_v}")
+        endforeach()
+        if(NOT DEFINED _fw_MAJOR OR NOT DEFINED _fw_MINOR OR NOT DEFINED _fw_PATCH OR NOT DEFINED _fw_BETA)
+            set(_why "cannot read FW_VERSION_* from ${CONFIG_H}")
+        elseif(NOT _tag MATCHES "^v([0-9]+)\\.([0-9]+)\\.([0-9]+)(-beta([0-9]+))?(-[A-Za-z0-9._-]+)?$")
+            set(_why "tag '${_tag}' is not v<major>.<minor>.<patch>[-beta<N>][-<label>]")
+        else()
+            set(_t_beta 0)
+            if(NOT "${CMAKE_MATCH_5}" STREQUAL "")
+                set(_t_beta "${CMAKE_MATCH_5}")
+            endif()
+            set(_t "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3} beta ${_t_beta}")
+            set(_c "${_fw_MAJOR}.${_fw_MINOR}.${_fw_PATCH} beta ${_fw_BETA}")
+            if(NOT _t STREQUAL _c)
+                set(_why "tag '${_tag}' says ${_t} but config.h says ${_c}")
+            endif()
+        endif()
+    endif()
+
+    if(NOT _why STREQUAL "")
+        if(ARTIFACT_DIR)
+            file(GLOB _stale "${ARTIFACT_DIR}/DSPi.*")
+            if(_stale)
+                file(REMOVE ${_stale})
+            endif()
+        endif()
+        message(FATAL_ERROR
+            "\n"
+            "################################################################\n"
+            "##  RELEASE BUILD REFUSED\n"
+            "##  ${_why}\n"
+            "##\n"
+            "##  A release image must be built from a clean checkout of a tag\n"
+            "##  that matches FW_VERSION_* (Documentation/RELEASING.md).\n"
+            "##  Previous DSPi.* outputs in this build dir were deleted.\n"
+            "##  Dev builds: reconfigure with -DRELEASE=OFF.\n"
+            "################################################################\n")
+    endif()
+    message(STATUS "RELEASE build: ${_tag} (config.h ${_fw_MAJOR}.${_fw_MINOR}.${_fw_PATCH} beta ${_fw_BETA})")
 endif()
 
 # The wire field is 48 bytes (47 chars + NUL). Clamp from the FRONT: the
