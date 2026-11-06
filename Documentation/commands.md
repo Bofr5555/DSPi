@@ -1292,6 +1292,10 @@ reconfigure a subset of slots out of band to avoid the mute.
   mode); `dsp_recalculate_all_filters()` + delays; re-sync MCK; re-derive Core 1 mode;
   then either `process_type_switches()` for any slot whose output type changed, or
   `complete_pipeline_reset()` to re-align all slots; finally restart RX.
+  `bulk_params_pending` is cleared only once `bulk_params_apply()` has returned, so
+  no transport (in particular the I2C target ISR) can claim `bulk_param_buf` for a
+  new bulk SET while the apply still reads it; such a SET gets `BULK_LOCKED` and
+  retries.
 * **Flash footprint.** **None.** `SET_ALL_PARAMS` rewrites **live RAM state only**; it does
   **not** persist anything. To make a bulk-applied state survive a power cycle you must
   separately save it (a preset save, or the device-global saves in 22.3). This is the most

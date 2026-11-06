@@ -3194,10 +3194,12 @@ int main(void) {
 
         // Handle bulk parameter SET (deferred from USB IRQ)
         if (bulk_params_pending && pipeline_reset_ready()) {
-            // Latch the SET's dispatch source while the pending flag still
-            // guards it (see bulk_params_pending_src).
+            // bulk_params_pending stays set until bulk_params_apply() has
+            // finished reading bulk_param_buf: it is what keeps the I2C
+            // target ISR (vendor_bulk_try_acquire) from claiming the buffer
+            // and streaming a new bulk SET into it mid-apply.  USB, UART and
+            // MIDI run on this main loop and cannot interleave anyway.
             ParamSource bulk_src = (ParamSource)bulk_params_pending_src;
-            bulk_params_pending = false;
 
             extern uint8_t output_types[];
 
@@ -3252,6 +3254,11 @@ int main(void) {
             int err = bulk_params_apply((const WireBulkParams *)bulk_param_buf,
                                         oc_mode == OUTPUT_CONFIG_MODE_WITH_PRESET,
                                         bulk_src);
+            // Buffer fully consumed (also on a rejected payload): release it
+            // to the next bulk SET.  A writer refused meanwhile got
+            // BULK_LOCKED and retries.
+            __dmb();
+            bulk_params_pending = false;
             if (err == 0) {
                 float rate = (float)audio_state.freq;
                 dsp_recalculate_all_filters(rate);
