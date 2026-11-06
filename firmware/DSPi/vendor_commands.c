@@ -555,6 +555,102 @@ uint8_t ctrl_iface_check_pin(uint8_t pin) {
 }
 
 // ----------------------------------------------------------------------------
+// EXTENSION CHANNEL (REQ_EXTENSION 0x00)
+// ----------------------------------------------------------------------------
+// One opcode for the features that live outside the upstream opcode map; see
+// Documentation/Features/extension_channel_spec.md.  wValue selects the
+// sub-command, bmRequestType the direction.  Anything unknown, in the wrong
+// direction or (OUT) with the wrong length is refused, which STALLs exactly
+// like an unknown opcode.
+
+// Supported sub-commands, ascending; EXT_LIST (0x0000) itself is not listed.
+static const uint16_t ext_ids[] = {
+    EXT_CROSSFEED_PAIR_MAP,
+    EXT_CORE_VREG,
+};
+
+// Exact OUT payload length of a sub-command; 0 = no OUT form (STALL).
+static uint16_t ext_set_len(uint16_t id) {
+    switch (id) {
+        case EXT_CROSSFEED_PAIR_MAP: return CROSSFEED_MAP_PAIRS;   // uint8[4]
+        case EXT_CORE_VREG:          return 2;                     // {op, value}
+        default:                     return 0;
+    }
+}
+
+static bool ext_handle_set(uint16_t id, const uint8_t *p, uint16_t len) {
+    uint16_t want = ext_set_len(id);
+    if (want == 0 || len != want) return false;
+    switch (id) {
+        case EXT_CROSSFEED_PAIR_MAP: {
+            // Whole map in one write (pairs must stay disjoint, so a single
+            // pair cannot be validated alone).  An invalid map is ignored
+            // (ACKed, no change), like an out-of-range crossfeed preset; the
+            // IN form shows the result.
+            uint32_t map = (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+                         | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+            if (crossfeed_map_valid(map, NUM_SPDIF_INSTANCES)) {
+                map = crossfeed_map_normalize(map);
+                // One 32-bit store; the pipeline snapshots it per packet and
+                // resets the state of any pair whose outputs changed, so no
+                // coefficient recompute is needed.
+                crossfeed_config.pair_map = map;
+                uint8_t b[CROSSFEED_MAP_PAIRS];
+                for (int i = 0; i < CROSSFEED_MAP_PAIRS; i++) b[i] = crossfeed_map_byte(map, i);
+                notify_param_write(offsetof(WireBulkParams, crossfeed.pair_map),
+                                   CROSSFEED_MAP_PAIRS, b);
+            }
+            return true;
+        }
+        case EXT_CORE_VREG:
+            // {op, value} (core_vreg.h).  An invalid op, a voltage outside
+            // the hard window or below the build default is refused (STALL),
+            // not clamped.  Deferred to the main loop, which owns the flash
+            // bracket.
+            if (!core_vreg_request_valid(p[0], p[1])) return false;
+            core_vreg_req_op = p[0];
+            core_vreg_req_value = p[1];
+            __dmb();
+            core_vreg_req_pending = true;
+            return true;
+    }
+    return false;
+}
+
+// IN replies are truncated to wLength like every other GET (wLength 0 on an
+// external transport means "whole reply").
+static bool ext_handle_get(uint16_t id, uint16_t wLength, uint8_t *resp) {
+    uint16_t n;
+    switch (id) {
+        case EXT_LIST:
+            n = 0;
+            for (size_t i = 0; i < sizeof(ext_ids) / sizeof(ext_ids[0]); i++) {
+                resp[n++] = (uint8_t)(ext_ids[i] & 0xFF);
+                resp[n++] = (uint8_t)(ext_ids[i] >> 8);
+            }
+            if (wLength && wLength < n) n = wLength;
+            break;
+        case EXT_CROSSFEED_PAIR_MAP: {
+            uint32_t map = crossfeed_config.pair_map;
+            for (int p = 0; p < CROSSFEED_MAP_PAIRS; p++) resp[p] = crossfeed_map_byte(map, p);
+            n = CROSSFEED_MAP_PAIRS;
+            break;
+        }
+        case EXT_CORE_VREG: {
+            CoreVregStatus st;
+            core_vreg_get_status(&st);
+            memcpy(resp, &st, sizeof(st));
+            n = sizeof(st);
+            break;
+        }
+        default:
+            return false;
+    }
+    vendor_send_response(resp, n);
+    return true;
+}
+
+// ----------------------------------------------------------------------------
 // VENDOR SET HANDLER (moved from usb_audio.c)
 // ----------------------------------------------------------------------------
 
@@ -874,27 +970,12 @@ static bool vendor_handle_set_body(tusb_control_request_t const *req) {
             }
             break;
 
-        case REQ_CROSSFEED_PAIR_MAP:   // OUT: set the map
-            // Whole map in one write (pairs must stay disjoint, so a single
-            // pair cannot be validated alone).  Invalid maps are ignored,
-            // like an out-of-range crossfeed preset; GET shows the result.
-            if (buffer->data_len >= CROSSFEED_MAP_PAIRS) {
-                uint32_t map = (uint32_t)vendor_rx_buf[0]
-                             | ((uint32_t)vendor_rx_buf[1] << 8)
-                             | ((uint32_t)vendor_rx_buf[2] << 16)
-                             | ((uint32_t)vendor_rx_buf[3] << 24);
-                if (crossfeed_map_valid(map, NUM_SPDIF_INSTANCES)) {
-                    map = crossfeed_map_normalize(map);
-                    // One 32-bit store; the pipeline snapshots it per packet and
-                    // resets the state of any pair whose outputs changed, so no
-                    // coefficient recompute is needed.
-                    crossfeed_config.pair_map = map;
-                    uint8_t b[CROSSFEED_MAP_PAIRS];
-                    for (int p = 0; p < CROSSFEED_MAP_PAIRS; p++) b[p] = crossfeed_map_byte(map, p);
-                    notify_param_write(offsetof(WireBulkParams, crossfeed.pair_map),
-                                       CROSSFEED_MAP_PAIRS, b);
-                }
-            }
+        case REQ_EXTENSION:
+            // Extension channel OUT (extension_channel_spec.md).  Unknown
+            // sub-command, GET-only sub-command or wrong length: not handled,
+            // which STALLs on USB (setup / status stage) and reports ERROR on
+            // the other transports.
+            handled = ext_handle_set(vendor_last_wValue, vendor_rx_buf, buffer->data_len);
             break;
 
         // Psychoacoustic Bass Commands
@@ -1205,22 +1286,6 @@ static bool vendor_handle_set_body(tusb_control_request_t const *req) {
                                    sizeof(float), &val);
             }
             break;
-
-        case REQ_SET_CORE_VREG: {
-            // Payload {op, value} (core_vreg.h).  Out-of-window voltages
-            // STALL: the window (1.15..1.30 V) is a hard limit, not a clamp.
-            // Deferred to the main loop, which owns the flash bracket.
-            if (buffer->data_len < 2 ||
-                !core_vreg_request_valid(vendor_rx_buf[0], vendor_rx_buf[1])) {
-                handled = false;
-                break;
-            }
-            core_vreg_req_op = vendor_rx_buf[0];
-            core_vreg_req_value = vendor_rx_buf[1];
-            __dmb();
-            core_vreg_req_pending = true;
-            break;
-        }
 
         case REQ_SET_LEVELLER_MASKS:
             if (buffer->data_len >= 2) {
@@ -2175,12 +2240,9 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                 return true;
             }
 
-            case REQ_CROSSFEED_PAIR_MAP: {   // IN: get the map
-                uint32_t map = crossfeed_config.pair_map;
-                for (int p = 0; p < CROSSFEED_MAP_PAIRS; p++) resp_buf[p] = crossfeed_map_byte(map, p);
-                vendor_send_response(resp_buf, CROSSFEED_MAP_PAIRS);
-                return true;
-            }
+            case REQ_EXTENSION:
+                // Extension channel IN; STALLs an unknown or SET-only sub-command.
+                return ext_handle_get(setup->wValue, setup->wLength, resp_buf);
 
             // Psychoacoustic Bass GET commands
             case REQ_GET_PSYBASS: {
@@ -2781,14 +2843,6 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
             case REQ_GET_SERIAL: {
                 memcpy(resp_buf, usb_descriptor_str_serial, 16);
                 vendor_send_response(resp_buf, 16);
-                return true;
-            }
-
-            case REQ_GET_CORE_VREG: {
-                CoreVregStatus st;
-                core_vreg_get_status(&st);
-                memcpy(resp_buf, &st, sizeof(st));
-                vendor_send_response(resp_buf, sizeof(st));
                 return true;
             }
 
@@ -4635,6 +4689,14 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
         vendor_last_wValue  = req->wValue;
         vendor_last_wLength = req->wLength;
 
+        // Extension channel OUT: unknown / IN-only sub-command or wrong
+        // length STALLs here, before any DATA stage (an unknown plain opcode
+        // is ACKed instead, which is long-standing upstream behaviour).
+        if (req->bRequest == REQ_EXTENSION &&
+            (ext_set_len(req->wValue) == 0 || req->wLength != ext_set_len(req->wValue))) {
+            return false;
+        }
+
         if (vendor_is_bulk_set(req->bRequest, req->wLength)) {
             // Large bulk SET — tud_control_xfer handles EP0 chunking.  At V16
             // compatibility is broken, so WIRE_BULK_PARAMS_MIN_SIZE ==
@@ -4696,8 +4758,12 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
     if (stage == CONTROL_STAGE_DATA) {
         // SET data received — run the legacy command dispatcher.
         if (req->bmRequestType_bit.direction == TUSB_DIR_OUT) {
-            vendor_handle_set_data(req);
+            bool handled = vendor_handle_set_data(req);
             usb_set_in_flight = false;
+            // An extension SET whose payload is refused (e.g. an invalid
+            // core voltage) STALLs the status stage; every other unhandled
+            // SET keeps upstream's ACK.
+            if (!handled && req->bRequest == REQ_EXTENSION) return false;
         }
         return true;
     }

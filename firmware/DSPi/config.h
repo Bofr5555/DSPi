@@ -135,11 +135,23 @@ extern volatile uint32_t nominal_feedback_10_14;
 // tud_vendor_control_xfer_cb in vendor_commands.c.
 #define MS_VENDOR_CODE      0x01
 
+// Extension channel: one opcode multiplexing features that live outside the
+// upstream opcode map; see Documentation/Features/extension_channel_spec.md.
+// wValue = extension sub-command ID; direction from bmRequestType (IN = get,
+// OUT = set).  An unknown sub-command, a wrong direction or a wrong length
+// STALLs, exactly like an unknown opcode, so stock firmware (which STALLs 0x00)
+// reads as "no extensions".  IDs 0x0001-0x7FFF are coordinated with Weeb Labs
+// and listed in the spec; 0x8000-0xFFFF are experimental/private, never shipped.
+#define REQ_EXTENSION               0x00
+#define EXT_LIST                    0x0000  // IN: supported IDs, uint16 LE ascending (excl. 0), truncated to wLength
+#define EXT_CROSSFEED_PAIR_MAP      0x0001  // IN: uint8[4]; OUT: uint8[4] (crossfeed_map.h)
+#define EXT_CORE_VREG               0x0002  // IN: CoreVregStatus (16 B); OUT: {op, value} (core_vreg.h)
+
 // Control Surfaces auxiliary outputs (caps v18); see control_surfaces.h and
 // Documentation/Features/control_surfaces_aux_spec.md.  wValue is the binding
 // slot holding the aux component.  0x01 is MS_VENDOR_CODE above, intercepted
 // in tud_vendor_control_xfer_cb before the application dispatcher sees it;
-// 0x00 stays unallocated; 0x02 is REQ_CROSSFEED_PAIR_MAP (K340 fork); 0x03 is REQ_OUTPUT_LATENCY.
+// 0x00 is REQ_EXTENSION (above); 0x02 stays unallocated; 0x03 is REQ_OUTPUT_LATENCY.
 #define REQ_SET_CS_AUX_STATE        0x04  // wValue = slot, 1 byte 0/1; immediate, runtime
                                           // only; STALL unless the slot is an aux output
 #define REQ_GET_CS_AUX_STATE        0x05  // wValue = slot: 1 byte (STALL if not an aux);
@@ -231,12 +243,6 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_GET_PSYBASS_ORIGINAL    0x3B
 #define REQ_SET_PSYBASS_MASK        0x3C
 #define REQ_GET_PSYBASS_MASK        0x3D
-
-// Core voltage at the fixed 307.2 MHz clock (core_vreg.h).  The two spare
-// codes in otherwise-full blocks; 0x40/0x41 are left for the selectable
-// sys-clock branch's REQ_SET/GET_SYS_CLOCK, which would subsume these.
-#define REQ_SET_CORE_VREG           0x4F  // payload = {op, value}; see CORE_VREG_OP_*; STALL on invalid
-#define REQ_GET_CORE_VREG           0x6F  // returns CoreVregStatus (16 B)
 
 // Tube preamp emulation (indexed parameter access; tube.h).  One SET/GET pair
 // covers every parameter, so adding one must not add an opcode here.
@@ -608,16 +614,6 @@ extern volatile uint32_t nominal_feedback_10_14;
 // Crossfeed output-pair mask (bit p = crossfeed on output pair p; see crossfeed.h)
 #define REQ_SET_CROSSFEED_OUTPUTS   0xFC  // payload = uint8 pair mask
 #define REQ_GET_CROSSFEED_OUTPUTS   0xFD  // returns uint8 pair mask
-
-// Crossfeed output pair map (K340 fork; which two outputs each pair
-// processes, see crossfeed_map.h for the encoding).  One opcode for both
-// directions, like REQ_LIMITER: OUT sets, IN gets.  Payload / reply = 4
-// bytes, byte p = pair p: 0x00 = default (2p, 2p+1), else (right << 4) |
-// left.  OUT ignores an invalid map; IN returns the normalized live map.
-// Same bytes as WireCrossfeedParams.pair_map.  0x02 is unallocated on every
-// upstream branch (v1.1.6-beta5, release/v1.1.6, main; 0x40/0x41 are taken
-// by the overclock branch, 0x03 by release/v1.1.6's REQ_OUTPUT_LATENCY).
-#define REQ_CROSSFEED_PAIR_MAP      0x02  // OUT: uint8[4] map; IN: returns uint8[4] map
 
 // UART control interface configuration.  Fixed 8N1 framing (the wire CRC16
 // covers integrity, so parity adds nothing); only the baud rate is

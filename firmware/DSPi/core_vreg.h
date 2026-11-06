@@ -12,9 +12,9 @@
  *
  *  1. Build default: DSPI_VREG_MV (CMake cache, 1150 by default).  It is
  *     also the floor for the persisted selection: a stored value below it
- *     boots at the build default and REQ_SET_CORE_VREG refuses (STALLs) one.
+ *     boots at the build default and EXT_CORE_VREG OUT refuses (STALLs) one.
  *  2. Persisted per-device selection (flash directory; 0 = build default),
- *     set by the host with REQ_SET_CORE_VREG, or raised automatically: two
+ *     set by the host with EXT_CORE_VREG OUT, or raised automatically: two
  *     watchdog hangs within one power session step the voltage up one notch
  *     (+50 mV), up to CORE_VREG_AUTO_CAP, and the step is persisted with the
  *     AUTO_RAISED flag so the host can see the device adapted itself.
@@ -62,7 +62,7 @@ extern "C" {
 #define CORE_VREG_FLAG_AUTO_RAISED    0x01   // the stored selection was raised by the firmware
 #define CORE_VREG_FLAG_AUTO_DISABLED  0x02   // user opted out of automatic escalation
 
-// REQ_SET_CORE_VREG payload: {op, value}.
+// EXT_CORE_VREG OUT payload (REQ_EXTENSION, wValue 0x0002): {op, value}.
 enum {
     CORE_VREG_OP_SET        = 0,  // value: 0 = build default, else vreg enum in [build default, CAP]; persisted
     CORE_VREG_OP_TRIAL      = 1,  // value: vreg enum in [FLOOR, CAP]; RAM only, until TRIAL_END or a hang
@@ -71,7 +71,7 @@ enum {
     CORE_VREG_OP_CLEAR      = 4,  // value ignored; forget hang count and last trial failure
 };
 
-// REQ_GET_CORE_VREG response (16 bytes, little-endian words).
+// EXT_CORE_VREG IN response (16 bytes, little-endian words).
 typedef struct __attribute__((packed)) {
     uint8_t  live_vreg;          // vreg enum currently programmed
     uint8_t  stored_sel;         // persisted selection, 0 = build default
