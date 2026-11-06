@@ -8,7 +8,7 @@ nothing installed). Wire format:
 
 | File | Purpose |
 |---|---|
-| `midi_ctrl.py` | codec, `RawMidiPort`, `Client`, CLI (`list`, `get`, `set`, `notify`, `enter-bootloader`) |
+| `midi_ctrl.py` | codec, `RawMidiPort`, `Client`, CLI (`list`, `get`, `set`, `ext-list`, `notify`, `enter-bootloader`) |
 | `measure.py` | RTT, bulk 0xA0/0xA1 throughput, notification latency, optional vendor-interface concurrency; Markdown table |
 | `soak.py` | long run: meter 10 Hz, 0xA0 every 10 s, random volume in a given range, notification seq check, underrun counters |
 | `regress.sh` | before/after a flash: interfaces 0-2 identical, state image identical, ALSA view |
@@ -21,7 +21,13 @@ nothing installed). Wire format:
 ./run.sh measure.py --fake                        # no device
 ./run.sh midi_ctrl.py list                        # rawmidi ports (no device node needed)
 DSPI_MIDI_DEV=/dev/snd/midiC2D0 ./run.sh midi_ctrl.py get 0x7F --port /dev/snd/midiC2D0
+DSPI_MIDI_DEV=/dev/snd/midiC2D0 ./run.sh midi_ctrl.py ext-list --port /dev/snd/midiC2D0
+DSPI_MIDI_DEV=/dev/snd/midiC2D0 ./run.sh midi_ctrl.py get 0x00 --wvalue 0x0002 --port /dev/snd/midiC2D0
 ```
+
+Extension sub-commands (`Documentation/Features/extension_channel_spec.md`) are
+plain `get` / `set` with `req` 0x00 and the sub-command in `--wvalue`;
+`ext-list` prints the supported IDs (stock firmware: `ERROR`).
 
 `run.sh` passes at most one rawmidi node (`DSPI_MIDI_DEV`) and optionally one
 USB node (`DSPI_USB_DEV`, for `--vendor`), no network. Nothing here plays

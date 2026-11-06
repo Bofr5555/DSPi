@@ -13,7 +13,8 @@ exercise midi_ctrl.py, measure.py and soak.py without a device:
     0xA2 / 0xA3 sessions, 0x0F (RTA bands-all) larger than 132 bytes;
   * a small command set: 0x7F platform, 0xD2/0xD3 master volume (with a
     PARAM_CHANGED notification, src MIDI), 0xA0/0xA1 bulk (BULK_INVALIDATED
-    after a SET), 0x50 status, 0xB0/0xB2 stats, 0xF0 bootloader;
+    after a SET), 0x50 status, 0xB0/0xB2 stats, 0xF0 bootloader, 0x00
+    extension channel (EXT_LIST, pair map, core-voltage status);
   * optional BUSY / BULK_LOCKED injection.
 
 In-process use: FakePort(FakeDevice()) has the RawMidiPort interface.
@@ -63,6 +64,7 @@ class FakeDevice:
         self.chunk_get = False
         self.chunk_set = None       # bytes received so far, or None
         self.chunk_buf = bytearray()
+        self.pair_map = bytes(4)    # EXT_CROSSFEED_PAIR_MAP (normalization not modelled)
 
     # -- output -----------------------------------------------------------
     def _emit(self, tag: int, frame: bytes) -> None:
@@ -166,6 +168,9 @@ class FakeDevice:
                 return
             return self._reply(tag, False, mc.ST_OK)
 
+        if breq == mc.REQ_EXTENSION:
+            return self._extension(tag, is_get, wv, payload, r["wlength"])
+
         if is_get:
             cap = r["wlength"]
             if breq == mc.REQ_GET_PLATFORM:
@@ -207,6 +212,27 @@ class FakeDevice:
             self._notify_bulk_invalidated()
             return
         return self._reply(tag, False, mc.ST_ERROR)
+
+
+    def _extension(self, tag: int, is_get: bool, sub: int, payload: bytes, cap: int) -> None:
+        # Extension channel (extension_channel_spec.md): unknown sub-command,
+        # wrong direction or wrong OUT length -> ERROR (USB: STALL).
+        set_len = {mc.EXT_CROSSFEED_PAIR_MAP: 4, mc.EXT_CORE_VREG: 2}
+        if is_get:
+            if sub == mc.EXT_LIST:
+                data = struct.pack("<2H", mc.EXT_CROSSFEED_PAIR_MAP, mc.EXT_CORE_VREG)
+            elif sub == mc.EXT_CROSSFEED_PAIR_MAP:
+                data = self.pair_map
+            elif sub == mc.EXT_CORE_VREG:
+                data = bytes([0x0D, 0, 0x0D, 0]) + bytes(12)   # live/default 1.20 V
+            else:
+                return self._reply(tag, True, mc.ST_ERROR)
+            return self._reply(tag, True, mc.ST_OK, data[:cap] if cap else data)
+        if set_len.get(sub) != len(payload):
+            return self._reply(tag, False, mc.ST_ERROR)
+        if sub == mc.EXT_CROSSFEED_PAIR_MAP:
+            self.pair_map = bytes(payload)
+        return self._reply(tag, False, mc.ST_OK)
 
 
 class FakePort:

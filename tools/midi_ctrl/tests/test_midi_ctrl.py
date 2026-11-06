@@ -135,6 +135,20 @@ class ClientAgainstFake(unittest.TestCase):
         self.assertEqual(self.c.set(0x20, payload=bytes(65)).status, mc.ST_OVERSIZE)
         self.assertEqual(self.c.get(0x9F).status, mc.ST_ERROR)   # unassigned in v1.1.6
 
+    def test_extension_channel(self):
+        rep = self.c.get(mc.REQ_EXTENSION, mc.EXT_LIST)
+        self.assertEqual(rep.status, mc.ST_OK)
+        self.assertEqual(struct.unpack("<2H", rep.payload), (1, 2))
+        self.assertEqual(self.c.get(mc.REQ_EXTENSION, mc.EXT_LIST, wlength=2).payload, b"\x01\x00")
+        k340 = bytes([0x02, 0x13, 0, 0])
+        self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_CROSSFEED_PAIR_MAP, payload=k340).status, mc.ST_OK)
+        self.assertEqual(self.c.get(mc.REQ_EXTENSION, mc.EXT_CROSSFEED_PAIR_MAP).payload, k340)
+        self.assertEqual(len(self.c.get(mc.REQ_EXTENSION, mc.EXT_CORE_VREG).payload), 16)
+        # Refusals: wrong OUT length, OUT on the IN-only list, unknown sub-command.
+        self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_CROSSFEED_PAIR_MAP, payload=k340[:3]).status, mc.ST_ERROR)
+        self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_LIST, payload=b"\x00\x00").status, mc.ST_ERROR)
+        self.assertEqual(self.c.get(mc.REQ_EXTENSION, 0x7FFF).status, mc.ST_ERROR)
+
     def test_usb_parity_opcodes(self):
         # 0xF5 / 0xF7 are accepted over MIDI (fake only: never sent to a unit).
         self.assertEqual(self.c.set(0xF5, payload=bytes(8)).status, mc.ST_OK)

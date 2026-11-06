@@ -79,6 +79,14 @@ REQ_SET_MASTER_VOLUME = 0xD2
 REQ_GET_MASTER_VOLUME = 0xD3
 REQ_ENTER_BOOTLOADER = 0xF0
 
+# Extension channel (Documentation/Features/extension_channel_spec.md):
+# bRequest 0x00, wValue = sub-command, GET/SET frame = IN/OUT.  Stock
+# firmware answers ERROR, which means "no extensions".
+REQ_EXTENSION = 0x00
+EXT_LIST = 0x0000                # GET: supported IDs, uint16 LE ascending
+EXT_CROSSFEED_PAIR_MAP = 0x0001  # GET/SET: uint8[4]
+EXT_CORE_VREG = 0x0002           # GET: CoreVregStatus (16 B); SET: {op, value}
+
 # Commands that are reads on the wire although they act ("write-as-read",
 # Documentation/commands.md): they go in GET-type frames.  The CLI's `get`
 # sends anything; this set only drives the `set` sanity warning.
@@ -571,6 +579,18 @@ def cmd_set(args) -> int:
     return _print_reply(rep, None, time.monotonic() - t0)
 
 
+def cmd_ext_list(args) -> int:
+    c = open_client(args)
+    rep = c.get(REQ_EXTENSION, EXT_LIST)
+    if rep.status != ST_OK:
+        print(f"status={rep.status_name} (no extension channel)")
+        return 1
+    n = len(rep.payload) // 2
+    ids = struct.unpack(f"<{n}H", rep.payload[:2 * n])
+    print(" ".join(f"0x{i:04X}" for i in ids) or "(none)")
+    return 0
+
+
 def cmd_notify(args) -> int:
     c = open_client(args)
     c.on_notify = lambda r: print(f"{time.strftime('%H:%M:%S')} {decode_notify(r.payload)}", flush=True)
@@ -620,6 +640,10 @@ def main(argv=None) -> int:
     g.add_argument("--u8", type=_int, help="payload = one byte")
     g.add_argument("--in", dest="payload_in", help="payload from file (e.g. 0xA1 bulk image)")
     p.set_defaults(fn=cmd_set)
+
+    p = sub.add_parser("ext-list", help="GET 0x00 EXT_LIST: the extension sub-commands the device supports")
+    add_common_args(p)
+    p.set_defaults(fn=cmd_ext_list)
 
     p = sub.add_parser("notify", help="print decoded 0x40 notification frames")
     add_common_args(p)

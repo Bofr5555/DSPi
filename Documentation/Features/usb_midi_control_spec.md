@@ -231,6 +231,7 @@ firmware is treated as follows:
 | `0x0F` `RTA_GET_BANDS_ALL` | allowed | `ERROR` (over the 132-byte cap) | **allowed** | MIDI has no reply cap; answered zero-copy out of `bulk_param_buf` under the bulk lock, like `0xA0`. |
 | `0x82` `GET_CLOCK_DIAG` (`DSPI_CLOCK_DIAG` bench builds only) | full packet | zero bytes if over 132 | zero bytes if over 132 | The one remaining difference: the packet lives in a handler-local buffer the external copy path caps at 132 bytes. Bench-only; not worth a second large buffer. |
 | `0xF0` `ENTER_BOOTLOADER` | allowed | allowed (reply lost) | allowed, reply flushed first (4.5) | |
+| `0x00` `EXTENSION` (`extension_channel_spec.md`) | allowed; refusal = STALL | allowed; refusal = `ERROR` | **allowed**; refusal = `ERROR` | Same dispatcher, no special casing: `wValue` = sub-command, GET/SET frame type = IN/OUT. An unknown sub-command, the wrong direction or a wrong OUT length is refused. |
 | everything else | allowed | allowed | allowed | Same dispatcher. |
 
 `0xA0` / `0xA1` remain the recommended bulk commands over MIDI (no size cap, one
