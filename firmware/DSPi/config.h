@@ -146,6 +146,7 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define EXT_LIST                    0x0000  // IN: supported IDs, uint16 LE ascending (excl. 0), truncated to wLength
 #define EXT_CROSSFEED_PAIR_MAP      0x0001  // IN: uint8[4]; OUT: uint8[4] (crossfeed_map.h)
 #define EXT_CORE_VREG               0x0002  // IN: CoreVregStatus (16 B); OUT: {op, value} (core_vreg.h)
+#define EXT_NOTIFY_FEATURES         0x0003  // IN: uint32 LE NOTIFY_FEAT_* flags (notify.h); no OUT
 
 // Control Surfaces auxiliary outputs (caps v18); see control_surfaces.h and
 // Documentation/Features/control_surfaces_aux_spec.md.  wValue is the binding

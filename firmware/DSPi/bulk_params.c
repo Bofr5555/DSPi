@@ -381,7 +381,7 @@ void bulk_params_collect(WireBulkParams *out) {
 // APPLY: Wire format → live state
 // ============================================================================
 
-int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
+int bulk_params_apply(const WireBulkParams *in, bool apply_pins, ParamSource src) {
 #if PICO_RP2350
     if (in->header.platform_id != WIRE_PLATFORM_RP2350)
         return -2;
@@ -404,8 +404,11 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         return -4;
 
     // Bracket the wholesale state rewrite.  Per-field writes are suppressed
-    // and one BULK_INVALIDATED(source=BULK_SET) is emitted at notify_end_bulk().
-    notify_begin_bulk(PARAM_SRC_BULK_SET);
+    // and one BULK_INVALIDATED is emitted at notify_end_bulk(), tagged with
+    // the dispatch source of the SET (so a host can recognise its own
+    // write); BULK_SET when the origin is not known.
+    if (src == PARAM_SRC_UNKNOWN) src = PARAM_SRC_BULK_SET;
+    notify_begin_bulk(src);
 
     // Global params — preamp from the legacy single field (a baseline applied to
     // all inputs); overridden by the per-channel preamp section below.
@@ -1032,7 +1035,7 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     }
 #endif
 
-    // Close the bulk bracket — emits BULK_INVALIDATED(source=BULK_SET).
+    // Close the bulk bracket — emits BULK_INVALIDATED(source=src).
     notify_end_bulk();
     return 0;
 }

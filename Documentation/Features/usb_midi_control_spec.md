@@ -240,7 +240,11 @@ path works unchanged.
 
 Changes made over MIDI notify with source `PARAM_SRC_MIDI` (10), on every
 consumer: the USB notify endpoint `0x83`, UART notification frames and the
-MIDI channel itself.
+MIDI channel itself. This includes the `BULK_INVALIDATED` that follows a bulk SET
+over MIDI (`0xA1`, or the final `0xA3` chunk) on firmware that reports
+`NOTIFY_FEAT_BULK_SOURCE` (extension `EXT_NOTIFY_FEATURES`, `0x0003`); older
+builds tag it `PARAM_SRC_BULK_SET` (2). A MIDI host recognises its own bulk write
+by `src == 10` (`notification_protocol_v2_spec.md` 3.5.1).
 
 ### 4.3 Transmitting
 

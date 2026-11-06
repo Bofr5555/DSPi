@@ -123,6 +123,19 @@ typedef enum {
 } ParamSource;
 
 // ---------------------------------------------------------------------------
+// Notification semantics flags (EXT_NOTIFY_FEATURES, extension channel 0x0003)
+// ---------------------------------------------------------------------------
+
+// BULK_INVALIDATED from a bulk SET (0xA1 / last 0xA3) carries the dispatch
+// source of the SET (HOST_SET, UART, I2C, MIDI) instead of BULK_SET, and a
+// coalesced invalidation whose causes had different sources carries
+// UNKNOWN.  Without this flag the source of a bulk-SET invalidation is
+// always BULK_SET.
+#define NOTIFY_FEAT_BULK_SOURCE      (1u << 0)
+
+#define NOTIFY_FEATURES              (NOTIFY_FEAT_BULK_SOURCE)
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 

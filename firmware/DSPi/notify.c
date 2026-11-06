@@ -141,14 +141,13 @@ static uint8_t ring_find_coalesce_locked(uint16_t offset, uint16_t size) {
     return 0xFF;
 }
 
-// Find a fully-unsent BULK_INVALIDATED entry.  At most one is ever useful.
-static uint8_t ring_find_invalidated_locked(void) {
-    uint8_t i = ring_coalesce_start_locked();
-    while (i != notify_head) {
-        if (notify_ring[i].event_id == NOTIFY_EVT_BULK_INVALIDATED) return i;
-        i = (i + 1) & NOTIFY_RING_MASK;
-    }
-    return 0xFF;
+// Index of the newest entry if it is a fully-unsent BULK_INVALIDATED, else
+// 0xFF.  Only the newest entry may absorb a new invalidation (see
+// notify_push_bulk_invalidated).
+static uint8_t ring_newest_invalidated_locked(void) {
+    if (ring_coalesce_start_locked() == notify_head) return 0xFF;   // nothing unsent
+    uint8_t last = (uint8_t)(notify_head - 1) & NOTIFY_RING_MASK;
+    return notify_ring[last].event_id == NOTIFY_EVT_BULK_INVALIDATED ? last : 0xFF;
 }
 
 // Append entry.  Never fails: any active consumer whose tail would collide
@@ -473,14 +472,29 @@ void notify_push_device_name(const char *name, ParamSource src) {
 void notify_push_bulk_invalidated(ParamSource src) {
     uint32_t flags = save_and_disable_interrupts();
 
-    // Coalesce: if a fully-unsent invalidation is already queued, just
-    // refresh its source.  One invalidation covers any number of causes.
+    // Coalesce into a fully-unsent invalidation, but only when it is the
+    // NEWEST entry.  An older one has events queued after it; a host that
+    // treats it as its own echo (or re-reads on it) would then apply those
+    // events, which this newer rewrite has overtaken, on top of the new
+    // state.  A fresh entry after them puts the invalidation last again.
+    //
+    // Source of a merged entry: kept when both causes have the same source,
+    // otherwise PARAM_SRC_UNKNOWN.  A merged entry stands for every rewrite
+    // in it, so it may only read as a host's own write when all of them
+    // were; UNKNOWN is never any host's own path, so every host re-reads.
+    // (Latest-wins would let the last writer skip a re-read after another
+    // path's preset load / factory reset that also touched state outside
+    // the bulk image.)  UNKNOWN is sticky: any further cause keeps it.
+    // See notification_protocol_v2_spec.md, "BULK_INVALIDATED source".
+    //
     // (The pre-multi-consumer code also had a displace-oldest-on-full path
     // here; ring_push_locked's force-advance now guarantees delivery
     // without it, at the cost of the laggard's oldest entry.)
-    uint8_t idx = ring_find_invalidated_locked();
+    uint8_t idx = ring_newest_invalidated_locked();
     if (idx != 0xFF) {
-        notify_ring[idx].source = (uint8_t)src;
+        if (notify_ring[idx].source != (uint8_t)src) {
+            notify_ring[idx].source = PARAM_SRC_UNKNOWN;
+        }
         restore_interrupts(flags);
         return;
     }

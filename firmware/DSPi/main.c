@@ -3194,6 +3194,9 @@ int main(void) {
 
         // Handle bulk parameter SET (deferred from USB IRQ)
         if (bulk_params_pending && pipeline_reset_ready()) {
+            // Latch the SET's dispatch source while the pending flag still
+            // guards it (see bulk_params_pending_src).
+            ParamSource bulk_src = (ParamSource)bulk_params_pending_src;
             bulk_params_pending = false;
 
             extern uint8_t output_types[];
@@ -3247,7 +3250,8 @@ int main(void) {
             uint16_t _occ; uint8_t _m, _d, _la, oc_mode, _mv_mode;
             preset_get_directory(&_occ, &_m, &_d, &_la, &oc_mode, &_mv_mode);
             int err = bulk_params_apply((const WireBulkParams *)bulk_param_buf,
-                                        oc_mode == OUTPUT_CONFIG_MODE_WITH_PRESET);
+                                        oc_mode == OUTPUT_CONFIG_MODE_WITH_PRESET,
+                                        bulk_src);
             if (err == 0) {
                 float rate = (float)audio_state.freq;
                 dsp_recalculate_all_filters(rate);

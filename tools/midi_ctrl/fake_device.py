@@ -13,8 +13,9 @@ exercise midi_ctrl.py, measure.py and soak.py without a device:
     0xA2 / 0xA3 sessions, 0x0F (RTA bands-all) larger than 132 bytes;
   * a small command set: 0x7F platform, 0xD2/0xD3 master volume (with a
     PARAM_CHANGED notification, src MIDI), 0xA0/0xA1 bulk (BULK_INVALIDATED
-    after a SET), 0x50 status, 0xB0/0xB2 stats, 0xF0 bootloader, 0x00
-    extension channel (EXT_LIST, pair map, core-voltage status);
+    after a SET, src MIDI), 0x50 status, 0xB0/0xB2 stats, 0xF0 bootloader, 0x00
+    extension channel (EXT_LIST, pair map, core-voltage status, notify
+    feature flags);
   * optional BUSY / BULK_LOCKED injection.
 
 In-process use: FakePort(FakeDevice()) has the RawMidiPort interface.
@@ -82,7 +83,9 @@ class FakeDevice:
         self.seq += 1
         self.notify(pkt)
 
-    def _notify_bulk_invalidated(self, src: int = 2) -> None:
+    def _notify_bulk_invalidated(self, src: int = 10) -> None:
+        # A bulk SET's invalidation carries the SET's dispatch source (MIDI
+        # here; NOTIFY_FEAT_BULK_SOURCE).  Older firmware sent BULK_SET (2).
         self.notify(bytes([2, 0x03, 0, self.seq & 0xFF, src, 0, 0, 0]))
         self.seq += 1
 
@@ -220,11 +223,14 @@ class FakeDevice:
         set_len = {mc.EXT_CROSSFEED_PAIR_MAP: 4, mc.EXT_CORE_VREG: 2}
         if is_get:
             if sub == mc.EXT_LIST:
-                data = struct.pack("<2H", mc.EXT_CROSSFEED_PAIR_MAP, mc.EXT_CORE_VREG)
+                data = struct.pack("<3H", mc.EXT_CROSSFEED_PAIR_MAP, mc.EXT_CORE_VREG,
+                                   mc.EXT_NOTIFY_FEATURES)
             elif sub == mc.EXT_CROSSFEED_PAIR_MAP:
                 data = self.pair_map
             elif sub == mc.EXT_CORE_VREG:
                 data = bytes([0x0D, 0, 0x0D, 0]) + bytes(12)   # live/default 1.20 V
+            elif sub == mc.EXT_NOTIFY_FEATURES:
+                data = struct.pack("<I", mc.NOTIFY_FEAT_BULK_SOURCE)
             else:
                 return self._reply(tag, True, mc.ST_ERROR)
             return self._reply(tag, True, mc.ST_OK, data[:cap] if cap else data)

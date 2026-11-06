@@ -567,6 +567,7 @@ uint8_t ctrl_iface_check_pin(uint8_t pin) {
 static const uint16_t ext_ids[] = {
     EXT_CROSSFEED_PAIR_MAP,
     EXT_CORE_VREG,
+    EXT_NOTIFY_FEATURES,
 };
 
 // Exact OUT payload length of a sub-command; 0 = no OUT form (STALL).
@@ -641,6 +642,16 @@ static bool ext_handle_get(uint16_t id, uint16_t wLength, uint8_t *resp) {
             core_vreg_get_status(&st);
             memcpy(resp, &st, sizeof(st));
             n = sizeof(st);
+            break;
+        }
+        case EXT_NOTIFY_FEATURES: {
+            // Notification-semantics flags (notify.h NOTIFY_FEAT_*), uint32 LE.
+            uint32_t f = NOTIFY_FEATURES;
+            resp[0] = (uint8_t)f;
+            resp[1] = (uint8_t)(f >> 8);
+            resp[2] = (uint8_t)(f >> 16);
+            resp[3] = (uint8_t)(f >> 24);
+            n = 4;
             break;
         }
         default:
@@ -4773,6 +4784,7 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
         // the pending flag takes over guarding bulk_param_buf from the lock.
         if (req->bmRequestType_bit.direction == TUSB_DIR_OUT &&
             req->bRequest == REQ_SET_ALL_PARAMS) {
+            bulk_params_pending_src = PARAM_SRC_HOST_SET;   // before the flag
             bulk_params_pending = true;
             vendor_bulk_release(CTRL_SOURCE_USB);
         }
@@ -4787,6 +4799,7 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
             usb_chunk_set_received = (uint16_t)(req->wValue + req->wLength);
             if (usb_chunk_set_received >= sizeof(WireBulkParams)) {
                 usb_chunk_sessions_close();
+                bulk_params_pending_src = PARAM_SRC_HOST_SET;   // before the flag
                 bulk_params_pending = true;
                 vendor_bulk_release(CTRL_SOURCE_USB);
             }
@@ -4912,6 +4925,9 @@ CtrlDispatchResult vendor_dispatch_set(CtrlSource src, uint8_t bRequest,
         uint32_t save = save_and_disable_interrupts();
         bool owned = (bulk_buf_owner == bulk_owner_for(src));
         if (owned) {
+            // The apply tags BULK_INVALIDATED with the transport's source
+            // (UART / I2C / MIDI; a GPIO-sourced bulk SET reads as GPIO).
+            bulk_params_pending_src = (uint8_t)CTRL_PARAM_SOURCE(src);
             bulk_params_pending = true;   // pending flag guards the buffer now
             bulk_buf_owner = BULK_OWNER_NONE;
         }

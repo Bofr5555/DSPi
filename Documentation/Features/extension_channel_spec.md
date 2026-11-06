@@ -52,8 +52,9 @@ IN replies are truncated to `wLength` like every other DSPi GET. On UART / I2C /
 | `0x0000` | `EXT_LIST` | supported IDs as uint16 LE, ascending, `0x0000` itself excluded, truncated to `wLength` | none (STALL) |
 | `0x0001` | `EXT_CROSSFEED_PAIR_MAP` | `uint8[4]` live map, normalized | `uint8[4]` map (exactly 4 bytes) |
 | `0x0002` | `EXT_CORE_VREG` | `CoreVregStatus`, 16 bytes | `{op, value}` (exactly 2 bytes) |
+| `0x0003` | `EXT_NOTIFY_FEATURES` | `uint32` LE notification-semantics flags | none (STALL) |
 
-Current firmware answers `EXT_LIST` with `01 00 02 00`.
+Current firmware answers `EXT_LIST` with `01 00 02 00 03 00`.
 
 ### 2.1 `EXT_LIST` (0x0000)
 
@@ -105,6 +106,17 @@ Vreg codes are the same on both chips: `0x0C` = 1.15 V, `0x0D` = 1.20 V, `0x0E` 
 - **Refused (STALL / `ERROR`):** an unknown op, a voltage outside 1.15-1.30 V, or a `SET` below the build default. A device built with `DSPI_VREG_MV=1200` (K340) never boots below 1.20 V, even if an earlier build stored 1.15 V.
 - **Automatic raising:** after two watchdog hangs in one power session the device raises its stored voltage by one step (+50 mV), up to 1.25 V.
 
+### 2.4 `EXT_NOTIFY_FEATURES` (0x0003)
+
+IN only: a `uint32` (little-endian) of flags that describe how the firmware fills in notifications. The notification packets themselves do not change; the flags tell a host which rules it may rely on. Reading this needs no new opcode, and an older build simply does not list `0x0003`.
+
+| Bit | Name | Meaning when set |
+|---|---|---|
+| 0 | `NOTIFY_FEAT_BULK_SOURCE` | A bulk SET's `BULK_INVALIDATED` carries the SET's dispatch source (`HOST_SET` for USB vendor, `UART`, `I2C`, `MIDI`) instead of `BULK_SET`. An invalidation merged from causes with different sources carries `UNKNOWN`. A pending invalidation absorbs a new one only while nothing is queued after it. See `notification_protocol_v2_spec.md` §3.5.1. |
+| 1-31 | reserved | zero |
+
+A host that sees bit 0 can recognise its own bulk write from the source byte and drop the time-window echo heuristic it needs for older firmware.
+
 ## 3. Transports
 
 | Transport | Reaches `0x00`? | Refusal |
@@ -113,7 +125,7 @@ Vreg codes are the same on both chips: `0x0C` = 1.15 V, `0x0D` = 1.20 V, `0x0E` 
 | USB MIDI (`DSPI_USB_MIDI`) | yes; same dispatcher, no special casing | `ERROR` |
 | UART / I2C control interfaces | yes; same dispatcher | `ERROR` |
 
-Notifications are unchanged. Only the pair map sends one, as a `PARAM_CHANGED` for its bulk-parameter offset.
+Notifications are unchanged. Only the pair map sends one, as a `PARAM_CHANGED` for its bulk-parameter offset. `EXT_NOTIFY_FEATURES` only describes notification behaviour; it sends nothing itself.
 
 ## 4. Implementation map
 
@@ -121,6 +133,7 @@ Notifications are unchanged. Only the pair map sends one, as a `PARAM_CHANGED` f
 |---|---|
 | `config.h` | `REQ_EXTENSION`, `EXT_*` IDs |
 | `vendor_commands.c` | `ext_ids[]` (the `EXT_LIST` table), `ext_set_len()`, `ext_handle_set()`, `ext_handle_get()`; the SETUP-stage length check and the status-stage STALL in `tud_vendor_control_xfer_cb` |
+| `notify.h` | `NOTIFY_FEAT_*`, `NOTIFY_FEATURES` (the `EXT_NOTIFY_FEATURES` value) |
 | `crossfeed_map.h` | pair-map validation, normalization and encoding |
 | `core_vreg.{c,h}` | core voltage selection, trials, hang accounting |
 
@@ -129,3 +142,4 @@ Notifications are unchanged. Only the pair map sends one, as a `PARAM_CHANGED` f
 ## 5. History
 
 - 2026-11-06: introduced. Replaces the fork's squatted opcodes `0x02` (`REQ_CROSSFEED_PAIR_MAP`), `0x4F` (`REQ_SET_CORE_VREG`) and `0x6F` (`REQ_GET_CORE_VREG`), which are removed with no aliases.
+- 2026-11-06: `0x0003` `EXT_NOTIFY_FEATURES` added (bit 0 `NOTIFY_FEAT_BULK_SOURCE`).

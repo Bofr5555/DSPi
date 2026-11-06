@@ -86,6 +86,8 @@ REQ_EXTENSION = 0x00
 EXT_LIST = 0x0000                # GET: supported IDs, uint16 LE ascending
 EXT_CROSSFEED_PAIR_MAP = 0x0001  # GET/SET: uint8[4]
 EXT_CORE_VREG = 0x0002           # GET: CoreVregStatus (16 B); SET: {op, value}
+EXT_NOTIFY_FEATURES = 0x0003     # GET: uint32 LE NOTIFY_FEAT_* flags
+NOTIFY_FEAT_BULK_SOURCE = 1 << 0  # BULK_INVALIDATED of a bulk SET carries its dispatch source
 
 # Commands that are reads on the wire although they act ("write-as-read",
 # Documentation/commands.md): they go in GET-type frames.  The CLI's `get`
@@ -588,6 +590,12 @@ def cmd_ext_list(args) -> int:
     n = len(rep.payload) // 2
     ids = struct.unpack(f"<{n}H", rep.payload[:2 * n])
     print(" ".join(f"0x{i:04X}" for i in ids) or "(none)")
+    if EXT_NOTIFY_FEATURES in ids:
+        f = c.get(REQ_EXTENSION, EXT_NOTIFY_FEATURES)
+        if f.status == ST_OK and len(f.payload) >= 4:
+            flags = struct.unpack("<I", f.payload[:4])[0]
+            names = ["BULK_SOURCE"] if flags & NOTIFY_FEAT_BULK_SOURCE else []
+            print(f"notify features: 0x{flags:08X} {' '.join(names)}".rstrip())
     return 0
 
 

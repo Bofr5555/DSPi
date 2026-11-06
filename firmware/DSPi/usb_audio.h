@@ -116,6 +116,9 @@ extern volatile uint16_t pending_eq_qp_x512;
 extern volatile bool rate_change_pending;
 extern volatile uint32_t pending_rate;
 extern volatile bool bulk_params_pending;
+// ParamSource of the pending bulk SET (HOST_SET / UART / I2C / MIDI); the
+// apply tags its BULK_INVALIDATED with it.  Set before bulk_params_pending.
+extern volatile uint8_t bulk_params_pending_src;
 extern volatile bool output_type_switch_in_progress;
 extern uint8_t bulk_param_buf[];
 extern char channel_names[NUM_CHANNELS][PRESET_NAME_LEN];

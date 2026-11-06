@@ -27,7 +27,10 @@ DSPI_MIDI_DEV=/dev/snd/midiC2D0 ./run.sh midi_ctrl.py get 0x00 --wvalue 0x0002 -
 
 Extension sub-commands (`Documentation/Features/extension_channel_spec.md`) are
 plain `get` / `set` with `req` 0x00 and the sub-command in `--wvalue`;
-`ext-list` prints the supported IDs (stock firmware: `ERROR`).
+`ext-list` prints the supported IDs (stock firmware: `ERROR`) and, when
+`0x0003` (`EXT_NOTIFY_FEATURES`) is listed, the notification feature flags
+(`BULK_SOURCE`: a bulk SET's `BULK_INVALIDATED` carries the SET's source, so
+`notify` shows `src=MIDI` for a MIDI 0xA1 instead of `src=BULK_SET`).
 
 `run.sh` passes at most one rawmidi node (`DSPI_MIDI_DEV`) and optionally one
 USB node (`DSPI_USB_DEV`, for `--vendor`), no network. Nothing here plays

@@ -70,6 +70,9 @@ volatile uint16_t pending_eq_qp_x512 = 0;
 volatile bool rate_change_pending = false;
 volatile uint32_t pending_rate = 48000;
 volatile bool bulk_params_pending = false;
+// ParamSource of the transport that handed bulk_param_buf to the apply
+// (written before bulk_params_pending is raised; read by the main loop).
+volatile uint8_t bulk_params_pending_src = PARAM_SRC_BULK_SET;
 
 // UAC1 endpoint state is retained while USB is a decorative, inactive source;
 // audio_state.freq remains the rate actually applied to the live pipeline.

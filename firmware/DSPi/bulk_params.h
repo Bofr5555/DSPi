@@ -20,6 +20,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "notify.h"
 
 // Fixed maximums for the wire format (sized for the largest platform).
 // Channel index space: [ inputs 0..WIRE_MAX_INPUT_CHANNELS-1 ][ outputs ... ],
@@ -499,6 +500,9 @@ void bulk_params_collect(WireBulkParams *out);
 // Caller must recalculate filters and delays after this returns.
 // If apply_pins is true (output_config_mode WITH_PRESET), the output pin
 // assignments and the output limiter settings from the payload are applied.
-int bulk_params_apply(const WireBulkParams *in, bool apply_pins);
+// src is the dispatch source of the bulk SET (PARAM_SRC_HOST_SET for USB
+// vendor, _UART, _I2C, _MIDI); it tags the BULK_INVALIDATED the apply emits.
+// PARAM_SRC_UNKNOWN (origin not known) is reported as PARAM_SRC_BULK_SET.
+int bulk_params_apply(const WireBulkParams *in, bool apply_pins, ParamSource src);
 
 #endif // BULK_PARAMS_H

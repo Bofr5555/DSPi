@@ -572,7 +572,11 @@ prefix down to the V2 size; older/shorter payloads are accepted by range gate, a
 the firmware honors only the sections present per `header.format_version` and
 `payload_length`). The apply is **deferred** to the main loop and brackets a muted,
 synchronized pipeline reset; expect a busy window afterward. The host should
-re-read `REQ_GET_ALL_PARAMS` afterward to confirm.
+re-read `REQ_GET_ALL_PARAMS` afterward to confirm. When the apply finishes the
+device pushes one `BULK_INVALIDATED`. Its `src` is the transport the SET arrived
+on (1 = USB vendor, 8 = UART, 9 = I2C, 10 = USB MIDI) on firmware that reports
+`NOTIFY_FEAT_BULK_SOURCE` (section 17.3, `EXT_NOTIFY_FEATURES`); older firmware
+always sends 2 (bulk SET). See section 18.
 
 ### 13.3 `WireBulkParams` layout (V14, 3664 bytes, little-endian)
 
@@ -887,6 +891,7 @@ extensions". IDs `0x0001`-`0x7FFF` are coordinated with Weeb Labs;
 | 0x0000 | `EXT_LIST` | supported IDs, uint16 LE ascending, 0x0000 excluded, truncated to wLength | STALL |
 | 0x0001 | `EXT_CROSSFEED_PAIR_MAP` | 4 bytes, live map (normalized) | exactly 4 bytes; byte p = pair p: 0x00 = default (2p, 2p+1), else (right << 4) \| left; an invalid map is ignored (ACK, no change); notify on write |
 | 0x0002 | `EXT_CORE_VREG` | 16-byte `CoreVregStatus` | exactly 2 bytes `{op, value}`: op 0 SET (persisted; 0 = build default, else vreg code >= build default), 1 TRIAL (RAM only), 2 TRIAL_END, 3 AUTO (0/1), 4 CLEAR; invalid STALLs |
+| 0x0003 | `EXT_NOTIFY_FEATURES` | `uint32` LE flags: bit 0 `NOTIFY_FEAT_BULK_SOURCE` (a bulk SET's `BULK_INVALIDATED` carries the SET's transport source; section 18) | STALL |
 
 Vreg codes: `0x0C` = 1.15 V, `0x0D` = 1.20 V, `0x0E` = 1.25 V, `0x0F` = 1.30 V.
 
@@ -910,9 +915,19 @@ bytes:
 For `PARAM_CHANGED`, `off` is the **byte offset into `WireBulkParams`** of the
 changed field and `size` is its length; `value` is the new little-endian bytes.
 This lets a host dispatch on offset rather than a per-command switch. `src` is the
-origin (1=host SET, 2=bulk SET, 3=preset, 4=factory, 5=GPIO, 6=internal, 7=UAC1,
-8=UART, 9=I2C, 10=USB MIDI).
+origin (0=unknown, 1=host SET, 2=bulk SET of unknown transport, 3=preset,
+4=factory, 5=GPIO, 6=internal, 7=UAC1, 8=UART, 9=I2C, 10=USB MIDI).
 On `BULK_INVALIDATED` or `PRESET_LOADED`, re-read `REQ_GET_ALL_PARAMS`.
+
+`BULK_INVALIDATED` `src`: 3 preset, 4 factory, and for a bulk SET (`0xA1` / last
+`0xA3`) the transport's source, the same value as a single SET on that path:
+1 USB vendor, 8 UART, 9 I2C, 10 USB MIDI. Firmware without
+`NOTIFY_FEAT_BULK_SOURCE` (`EXT_NOTIFY_FEATURES`, section 17.3) always sends 2 for a
+bulk SET. Two invalidations merge only while the pending one is unsent and still
+the newest packet. If the merged causes had different sources the result is 0
+(unknown). A host may skip the re-read only when `src` is its own path and it has
+a bulk SET of its own outstanding on that path. Full rules:
+`Features/notification_protocol_v2_spec.md` 3.5.1.
 
 The same v2 packets can also be delivered over the **UART control transport** as
 type-`0x40` frames when `UartCtrlConfig.notify_enable` is set (see section 17 and
@@ -1020,7 +1035,7 @@ with no OUT data, issued as an IN transfer (returns a status/echo byte).
 
 | Hex | Name | Dir | Internal mapping |
 |-----|------|-----|------------------|
-| 0x00 | EXTENSION | W / R | wValue = sub-command; `ext_handle_set()` / `ext_handle_get()` (section 17.3, `Features/extension_channel_spec.md`). 0x0000 `EXT_LIST` R; 0x0001 `EXT_CROSSFEED_PAIR_MAP` W/R -> `crossfeed_config.pair_map` (one store, notify on write); 0x0002 `EXT_CORE_VREG` W -> `core_vreg_req_pending` -> `core_vreg_apply_request()` (+ directory write), R -> `core_vreg_get_status()`. Unknown / wrong direction / wrong OUT length STALLs |
+| 0x00 | EXTENSION | W / R | wValue = sub-command; `ext_handle_set()` / `ext_handle_get()` (section 17.3, `Features/extension_channel_spec.md`). 0x0000 `EXT_LIST` R; 0x0001 `EXT_CROSSFEED_PAIR_MAP` W/R -> `crossfeed_config.pair_map` (one store, notify on write); 0x0002 `EXT_CORE_VREG` W -> `core_vreg_req_pending` -> `core_vreg_apply_request()` (+ directory write), R -> `core_vreg_get_status()`; 0x0003 `EXT_NOTIFY_FEATURES` R -> `NOTIFY_FEATURES` (`notify.h`). Unknown / wrong direction / wrong OUT length STALLs |
 | 0x42 | SET_EQ_PARAM | W | copy payload to `pending_packet`, validate ch/band; `eq_update_pending` -> write `filter_recipes`/`xover_recipes` + `dsp_compute_coefficients()` / `xover_design_filter()` |
 | 0x43 | GET_EQ_PARAM | R | read `filter_recipes[ch][band]` / `xover_recipes[ch][band-20]`; wValue packs ch/band/param(0..4); returns 4-byte scalar |
 | 0x44 | SET_PREAMP | W | legacy: `update_preamp(ch, db)` for all input channels (dB->linear->Q28) |
@@ -1085,7 +1100,7 @@ with no OUT data, issued as an IN transfer (returns a status/echo byte).
 | 0x9B | SET_CHANNEL_NAME | W | wValue=ch; copies payload to `channel_names[ch]` (RAM; persisted on preset save) |
 | 0x9C | GET_CHANNEL_NAME | R | returns `channel_names[ch]` (32 bytes) |
 | 0xA0 | GET_ALL_PARAMS | R | `bulk_params_collect()` -> chunked `WireBulkParams` |
-| 0xA1 | SET_ALL_PARAMS | W | payload -> `bulk_param_buf` (chunked); `bulk_params_pending` -> `bulk_params_apply()` + `dsp_recalculate_all_filters()` + reset (gated) |
+| 0xA1 | SET_ALL_PARAMS | W | payload -> `bulk_param_buf` (chunked); `bulk_params_pending_src` + `bulk_params_pending` -> `bulk_params_apply(..., src)` + `dsp_recalculate_all_filters()` + reset (gated) |
 | 0xA2 | GET_ALL_PARAMS_CHUNK | R | wValue = byte offset; offset 0 snapshots under the bulk lock; USB-only (WinUSB 4 KB cap; see `Features/bulk_params_chunking.md`) |
 | 0xA3 | SET_ALL_PARAMS_CHUNK | W | wValue = byte offset, sequential from 0 into `bulk_param_buf`; final byte sets `bulk_params_pending`; USB-only |
 | 0xA4 | SIGGEN_SET_CONFIG | W | payload = `SiggenConfig` (36 B) -> `siggen_stage_config()` (validate + stage; restarts if running, never auto-starts); STALL on reject. See section 23 |
@@ -1266,7 +1281,9 @@ reconfigure a subset of slots out of band to avoid the mute.
   **version tolerant**: it honors only the sections present per `header.format_version`
   and `header.payload_length`, so an older host's shorter packet still applies cleanly.
 * **Handler (immediate).** The full transfer lands in `bulk_param_buf`; on the control
-  **status (ACK) stage** the handler sets `bulk_params_pending = true`. No state changes
+  **status (ACK) stage** the handler records the source (`bulk_params_pending_src`,
+  `HOST_SET` for USB; UART / I2C / MIDI hand-offs record theirs in
+  `vendor_dispatch_set()`) and sets `bulk_params_pending = true`. No state changes
   in IRQ context.
 * **Deferred work (gated).** In the main loop: snapshot current `output_types`; drain the
   USB ring; `prepare_pipeline_reset()` (mute + Core 1 fence); suspend S/PDIF and I2S RX

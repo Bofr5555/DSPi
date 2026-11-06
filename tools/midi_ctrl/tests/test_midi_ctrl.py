@@ -130,6 +130,8 @@ class ClientAgainstFake(unittest.TestCase):
         self.assertEqual(self.c.get(mc.REQ_GET_ALL_PARAMS).payload, new)
         n = self.c.wait_notify(lambda r: r.payload[1] == 0x03, 0.5)
         self.assertIsNotNone(n)
+        self.assertEqual(n.payload[4], 10)          # PARAM_SRC_MIDI (NOTIFY_FEAT_BULK_SOURCE)
+        self.assertIn("src=MIDI", mc.decode_notify(n.payload))
 
     def test_status_codes(self):
         self.assertEqual(self.c.set(0x20, payload=bytes(65)).status, mc.ST_OVERSIZE)
@@ -138,12 +140,15 @@ class ClientAgainstFake(unittest.TestCase):
     def test_extension_channel(self):
         rep = self.c.get(mc.REQ_EXTENSION, mc.EXT_LIST)
         self.assertEqual(rep.status, mc.ST_OK)
-        self.assertEqual(struct.unpack("<2H", rep.payload), (1, 2))
+        self.assertEqual(struct.unpack("<3H", rep.payload), (1, 2, 3))
         self.assertEqual(self.c.get(mc.REQ_EXTENSION, mc.EXT_LIST, wlength=2).payload, b"\x01\x00")
         k340 = bytes([0x02, 0x13, 0, 0])
         self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_CROSSFEED_PAIR_MAP, payload=k340).status, mc.ST_OK)
         self.assertEqual(self.c.get(mc.REQ_EXTENSION, mc.EXT_CROSSFEED_PAIR_MAP).payload, k340)
         self.assertEqual(len(self.c.get(mc.REQ_EXTENSION, mc.EXT_CORE_VREG).payload), 16)
+        feats = struct.unpack("<I", self.c.get(mc.REQ_EXTENSION, mc.EXT_NOTIFY_FEATURES).payload)[0]
+        self.assertTrue(feats & mc.NOTIFY_FEAT_BULK_SOURCE)
+        self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_NOTIFY_FEATURES, payload=bytes(4)).status, mc.ST_ERROR)
         # Refusals: wrong OUT length, OUT on the IN-only list, unknown sub-command.
         self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_CROSSFEED_PAIR_MAP, payload=k340[:3]).status, mc.ST_ERROR)
         self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_LIST, payload=b"\x00\x00").status, mc.ST_ERROR)

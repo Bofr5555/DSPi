@@ -1,7 +1,7 @@
 # Notification Protocol v2 Specification
 
 *Status: implemented*
-*Last updated: 2026-09-15*
+*Last updated: 2026-11-06*
 
 ## 1. Motivation
 
@@ -121,6 +121,30 @@ Total = 8 bytes. Emitted when the host should do a full re-sync rather than appl
 - Bulk SET via `REQ_SET_ALL_PARAMS`
 - Firmware-side mass edits (e.g., auto-tune completes, future batch operations)
 
+#### 3.5.1 BULK_INVALIDATED source
+
+The `source` byte names what rewrote the state:
+
+| Cause | `source` |
+|---|---|
+| Preset load | `PRESET` |
+| Factory reset | `FACTORY` |
+| Bulk SET (`0xA1`, or the last `0xA3` chunk) over the USB vendor interface | `HOST_SET` |
+| Bulk SET over the UART / I2C control interface | `UART` / `I2C` |
+| Bulk SET over the USB MIDI control channel | `MIDI` |
+| Bulk SET whose transport is not known | `BULK_SET` |
+| Several of the above merged into one entry, with different sources | `UNKNOWN` |
+
+A bulk SET is tagged with the same dispatch source that a single-parameter SET on the same path carries in its `PARAM_CHANGED`. The transport records it when it hands `bulk_param_buf` to the main-loop apply (`bulk_params_pending_src`), and `bulk_params_apply()` opens its bulk bracket with it. Firmware that does this reports `NOTIFY_FEAT_BULK_SOURCE` (see "Detecting the feature" below). Older firmware tagged every bulk SET `BULK_SET`, whatever the path. The packet layout is unchanged; only the value of byte 4 differs.
+
+**Coalescing rule.** A new invalidation is merged into a pending one only when the pending one is still fully unsent (§4.7) **and is the newest entry in the ring**. Otherwise a new entry is pushed after whatever was queued in between. If the pending invalidation could absorb a later one past events queued after it, a host would apply those events after it had adopted the newer state, and they are stale by then. A merged entry keeps its source when both causes have the same source. When the sources differ it becomes `UNKNOWN`, and it stays `UNKNOWN` for any further merge. A merged entry stands for every rewrite in it, so it may read as a host's own write only when all of them were. `UNKNOWN` is never any host's own path. "Latest wins" (the rule before 2026-11-06) let the last writer skip a re-read after another path's preset load or factory reset, which also changes state outside the bulk image.
+
+**Per-field notifications of the apply.** Inside the bracket they only update the shadow; no `PARAM_CHANGED` goes out. Work that the apply defers to later main-loop passes (input-source switch, I2S clock-mode change, sample-rate change) notifies afterwards as an ordinary `PARAM_CHANGED` that carries the source tag active at that time (normally `UNKNOWN`). These packets carry the real resulting value, so every host applies them.
+
+**Host rule.** Treat a `BULK_INVALIDATED` as your own echo only when its `source` is the path you sent the bulk SET on (`HOST_SET` for the USB vendor interface, `MIDI` for the MIDI channel, and so on) **and** you sent a bulk SET on that path whose invalidation you have not seen yet (a matching invalidation settles all of your outstanding SETs on that path, because a same-source merge can stand for several of them; if they arrive unmerged, the later ones read as foreign and cost one extra re-read). Skip the re-read then, and do nothing else; do not re-apply your image, because `PARAM_CHANGED` packets that arrived before it may be newer. Any other source, including `UNKNOWN` and `BULK_SET`, means "re-read with `REQ_GET_ALL_PARAMS`". Several hosts can share one path: two apps on one PC both use `HOST_SET`, for example. The outstanding-SET condition keeps a host from taking another host's write on the same path for its own. A host that cannot rule this out re-reads, which is always safe.
+
+**Detecting the feature.** Read the extension channel's `EXT_LIST` (`extension_channel_spec.md`). If `0x0003` (`EXT_NOTIFY_FEATURES`) is listed and its `uint32` has bit 0 (`NOTIFY_FEAT_BULK_SOURCE`) set, the rules above apply. Otherwise (stock or older fork firmware, where `EXT_LIST` STALLs / answers `ERROR` or lacks `0x0003`), a bulk SET's invalidation is always `BULK_SET` and merged entries take the latest source. On such firmware a host has to fall back to a time window around its own bulk SET to recognise the echo.
+
 ### 3.6 Addressing Rule
 
 `wire_offset` is strictly `offsetof(WireBulkParams, field)` for scalar fields, or `offsetof(WireBulkParams, array) + index * sizeof(element)` for array elements.
@@ -138,7 +162,7 @@ Examples:
 typedef enum : uint8_t {
     PARAM_SRC_UNKNOWN    = 0,
     PARAM_SRC_HOST_SET   = 1,  // REQ_SET_* via EP0
-    PARAM_SRC_BULK_SET   = 2,  // REQ_SET_ALL_PARAMS
+    PARAM_SRC_BULK_SET   = 2,  // REQ_SET_ALL_PARAMS, transport unknown (§3.5.1)
     PARAM_SRC_PRESET     = 3,  // Preset load
     PARAM_SRC_FACTORY    = 4,  // Factory reset
     PARAM_SRC_GPIO       = 5,  // Hardware control (knobs, encoders, pads)
@@ -347,7 +371,7 @@ __dmb();
 current_param_source = PARAM_SRC_UNKNOWN;
 ```
 
-Equivalent brackets wrap preset load (`PARAM_SRC_PRESET`), factory reset (`PARAM_SRC_FACTORY`), bulk SET (`PARAM_SRC_BULK_SET`), and GPIO handlers (`PARAM_SRC_GPIO`). Because v1 `update_master_volume()` runs inside these brackets, the source is attached at emit time without per-setter plumbing.
+Equivalent brackets wrap preset load (`PARAM_SRC_PRESET`), factory reset (`PARAM_SRC_FACTORY`), bulk SET (the SET's dispatch source, see §3.5.1), and GPIO handlers (`PARAM_SRC_GPIO`). Because v1 `update_master_volume()` runs inside these brackets, the source is attached at emit time without per-setter plumbing.
 
 **Concurrency:** `current_param_source` is file-scope and not thread-safe. Core 1 must not issue parameter writes concurrently with Core 0 — today it doesn't, and we preserve that invariant. If that changes, promote the source to a per-core variable.
 
@@ -362,7 +386,7 @@ Rationale: emitting 100+ PARAM_CHANGED events for every preset load floods the r
 
 Implementation: a `notify_suppress_count` that emit paths check. `preset_apply`, `apply_factory_defaults`, `bulk_params_apply` increment at entry, decrement at exit, and emit `BULK_INVALIDATED` on the last exit.
 
-**Host bulk SET** (`REQ_SET_ALL_PARAMS`): same pattern with `PARAM_SRC_BULK_SET`.
+**Host bulk SET** (`REQ_SET_ALL_PARAMS`): same pattern, tagged with the SET's dispatch source (`HOST_SET`, `UART`, `I2C`, `MIDI`; `BULK_SET` if unknown). See §3.5.1.
 
 **Factory reset**: same pattern with `PARAM_SRC_FACTORY`.
 
@@ -419,7 +443,8 @@ Two consequences:
   would see a one-count gap on every master-volume change.)
 
 **Coalesce window restricted to fully-unsent entries.** Coalescing (PARAM_CHANGED
-on `(offset, size)`, and the single pending `BULK_INVALIDATED` / v1 master-volume)
+on `(offset, size)`, the pending `BULK_INVALIDATED` when it is the newest entry
+(§3.5.1), and the v1 master-volume)
 may mutate an entry only if **no active consumer has consumed it yet**. The window
 starts at the **fastest** consumer's tail (the one with the fewest pending
 entries). Touching an entry that a faster consumer already sent would make that
@@ -478,6 +503,8 @@ static void on_master_volume(const void *v, uint16_t n, uint8_t source) {
 
 For GPIO-driven changes, `source == PARAM_SRC_GPIO` — the host always wants these and updates the slider.
 
+For `BULK_INVALIDATED` the echo rule is in §3.5.1: skip the re-read only for your own path's source while your own bulk SET is unanswered, on firmware that reports `NOTIFY_FEAT_BULK_SOURCE`.
+
 ## 6. GPIO Integration (Illustrative)
 
 A GPIO poll loop calling the existing setters needs **zero** notification-specific code:
@@ -518,6 +545,7 @@ RP2040 BSS is currently ~125 KB; headroom is fine. RP2350 currently ~210 KB; sam
 - Ring overflow: 33 discrete events produce `notify_overflow_count == 1` and 32 delivered.
 - `BULK_INVALIDATED` always delivered even when ring full.
 - `notify_suppress_count` correctly gates individual emits during preset load.
+- `BULK_INVALIDATED` source and coalescing (§3.5.1): `firmware/tests/test_notify.c`.
 
 ### 8.2 Integration Tests
 
