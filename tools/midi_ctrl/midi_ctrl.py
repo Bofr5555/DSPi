@@ -98,6 +98,37 @@ IDENTIFY_TONE_NONE = 0xFF
 RESET_REASONS = {0: "UNKNOWN", 1: "POWER_ON", 2: "BROWNOUT", 3: "RUN_PIN", 4: "WATCHDOG",
                  5: "SOFTWARE", 6: "DEBUGGER", 7: "GLITCH"}
 
+# Link block 0x8000-0x80FF (extension_channel_spec.md 2.8, SYS2 5.3).  Fork
+# firmware without the link and stock firmware refuse these IDs (ERROR here,
+# STALL over USB); a host checks EXT_LIST for 0x8000 first.
+EXT_LINK_INFO = 0x8000           # GET: LinkInfo (32 B)
+EXT_LINK_STATUS = 0x8001         # GET: LinkStatus (52 B)
+EXT_LINK_CONFIG = 0x8002         # GET/SET: LinkConfig (8 B)
+EXT_LINK_SLOTS = 0x8003          # GET/SET: uint8[8] link slot per matrix input, 0xFF = silence
+EXT_LINK_PHASE = 0x8004          # GET/SET: LinkPhase (8 B)
+EXT_FRAME_COUNTER = 0x8005       # GET: {u64 F, u32 time_us, u32 O} (16 B)
+EXT_APPLY_AT_FRAME = 0x8006      # SET: ApplyRequest (16 B); GET: ApplyStatus (16 B)
+EXT_LINK_TX = 0x8007             # GET/SET: LinkTx (16 B), sender builds only
+EXT_LINK_CTRL_MSG = 0x8008       # GET: superframe snapshot (24 B); SET (sender only): ApplyRequest-like (16 B)
+EXT_LINK_STATS_RESET = 0x8009    # SET: 1 byte, 1 = clear the counters
+EXT_LINK_DIAG = 0x800A           # GET: bench diagnostics (64 B), layout versioned, not for apps
+LINK_INFO_LEN, LINK_STATUS_LEN, LINK_DIAG_LEN, LINK_CTRL_MSG_IN_LEN = 32, 52, 64, 24
+NOTIFY_FEAT_LINK_STATE = 1 << 2   # link state event 0xE1
+NOTIFY_FEAT_APPLY_RESULT = 1 << 3  # apply-at-frame result event 0xE2
+NOTIFY_EVT_LINK_STATE = 0xE1
+NOTIFY_EVT_APPLY_RESULT = 0xE2
+LINK_ROLES = {0: "none", 1: "receiver", 2: "sender", 3: "repeater", 4: "fan-out"}
+LINK_STATES = {0: "off", 1: "searching", 2: "locked", 3: "holdover"}
+LINK_PHASE_STATES = {0: "free", 1: "anchoring", 2: "locked", 3: "re-anchor pending"}
+LINK_REASONS = {0: "NONE", 1: "LOCKED", 2: "LOS", 3: "FRAME_ERRORS", 4: "COMMA_LOST",
+                5: "REANCHOR", 6: "VCXO_LIMIT", 7: "DISABLED"}
+LINK_FEATURES = ((1 << 0, "PHASE_LOCK"), (1 << 1, "APPLY_AT_FRAME"), (1 << 2, "REPEATER"),
+                 (1 << 3, "FAN_OUT"), (1 << 4, "TEST_PATTERNS"), (1 << 5, "LOS_PIN"))
+RATE_CODES = {0: "44.1k", 1: "48k", 2: "96k"}
+APPLY_OPS = {0: "CANCEL_ALL", 1: "MUTE", 2: "UNMUTE", 3: "PRESET_LOAD", 4: "MASTER_VOLUME",
+             5: "OUT_DELAY", 6: "RATE", 7: "CLICK", 8: "SYNC_PULSE"}
+APPLY_RESULTS = {0: "applied", 1: "late", 2: "cancelled", 3: "refused"}
+
 # Commands that are reads on the wire although they act ("write-as-read",
 # Documentation/commands.md): they go in GET-type frames.  The CLI's `get`
 # sends anything; this set only drives the `set` sanity warning.
@@ -247,7 +278,8 @@ def decode_notify(pkt: bytes) -> str:
     names = {0x02: "PARAM_CHANGED", 0x03: "BULK_INVALIDATED", 0x04: "PRESET_LOADED",
              0x05: "INPUT_FORMAT", 0x07: "SIGGEN_STATE", 0x08: "ADAT_STATE",
              0x09: "I2S_SLAVE_STATE", 0x0A: "CS_IR_LEARN", 0x0B: "ADAT_INPUT_STATE",
-             0x0C: "CS_AUX", 0x0D: "RTA_CONFIG", NOTIFY_EVT_EXT_CLIP: "EXT_CLIP"}
+             0x0C: "CS_AUX", 0x0D: "RTA_CONFIG", NOTIFY_EVT_EXT_CLIP: "EXT_CLIP",
+             NOTIFY_EVT_LINK_STATE: "LINK_STATE", NOTIFY_EVT_APPLY_RESULT: "APPLY_RESULT"}
     s = f"v{ver} seq={seq:3d} {names.get(evt, f'evt 0x{evt:02X}')}"
     if evt == 0x02 and len(pkt) >= 12:
         # [ver, evt, flags, seq, off_LE16, size_LE16, src, 0, 0, 0, value...]
@@ -262,6 +294,14 @@ def decode_notify(pkt: bytes) -> str:
     elif evt == NOTIFY_EVT_EXT_CLIP and len(pkt) >= 12:
         # [ver, evt, flags, seq, channel, count, 0, 0, mask_LE32]
         s += f" channel={pkt[4]} count={pkt[5]} mask=0x{struct.unpack_from('<I', pkt, 8)[0]:08X}"
+    elif evt == NOTIFY_EVT_LINK_STATE and len(pkt) >= 12:
+        # [ver, evt, flags, seq, state, class, reason, 0, F_low32_LE]
+        s += (f" state={LINK_STATES.get(pkt[4], pkt[4])} class=L{pkt[5]} "
+              f"reason={LINK_REASONS.get(pkt[6], pkt[6])} F_low32={struct.unpack_from('<I', pkt, 8)[0]}")
+    elif evt == NOTIFY_EVT_APPLY_RESULT and len(pkt) >= 12:
+        # [ver, evt, flags, seq, op, result, 0, 0, target_frame_low32_LE]
+        s += (f" op={APPLY_OPS.get(pkt[4], pkt[4])} result={APPLY_RESULTS.get(pkt[5], pkt[5])} "
+              f"frame_low32={struct.unpack_from('<I', pkt, 8)[0]}")
     else:
         s += f" {pkt[4:].hex()}"
     return s
@@ -523,10 +563,15 @@ def chunked_write(c: Client, image: bytes, chunk: int = 2048) -> int:
 
 
 def open_client(args) -> Client:
-    if getattr(args, "fake", False):
+    if getattr(args, "fake", False) or getattr(args, "fake_link", None):
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import fake_device
-        port = fake_device.FakePort(fake_device.FakeDevice())
+        dev = fake_device.FakeDevice(link=getattr(args, "fake_link", None))
+        if dev.link and not dev.link.sender:        # a receiver that has locked
+            dev.link.config[0] = 1
+            dev.link_event(2, 1)
+            dev.out.clear()
+        port = fake_device.FakePort(dev)
     else:
         port = RawMidiPort(args.port or find_port(args.card_name))
     return Client(port, bytes.fromhex(args.mfr), timeout=args.timeout)
@@ -538,6 +583,8 @@ def add_common_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--mfr", default="7d", help="manufacturer ID hex, 1 or 3 bytes (default 7d)")
     p.add_argument("--timeout", type=float, default=2.0, help="per-request timeout, s")
     p.add_argument("--fake", action="store_true", help="talk to the in-process fake device")
+    p.add_argument("--fake-link", choices=("receiver", "sender"),
+                   help="in-process fake device with the link block 0x8000+ (implies --fake)")
 
 
 # ---------------------------------------------------------------------------
@@ -607,7 +654,9 @@ def cmd_ext_list(args) -> int:
         if f.status == ST_OK and len(f.payload) >= 4:
             flags = struct.unpack("<I", f.payload[:4])[0]
             names = [n for bit, n in ((NOTIFY_FEAT_BULK_SOURCE, "BULK_SOURCE"),
-                                      (NOTIFY_FEAT_CLIP_EVENT, "CLIP_EVENT")) if flags & bit]
+                                      (NOTIFY_FEAT_CLIP_EVENT, "CLIP_EVENT"),
+                                      (NOTIFY_FEAT_LINK_STATE, "LINK_STATE"),
+                                      (NOTIFY_FEAT_APPLY_RESULT, "APPLY_RESULT")) if flags & bit]
             print(f"notify features: 0x{flags:08X} {' '.join(names)}".rstrip())
     return 0
 
@@ -691,6 +740,68 @@ def cmd_fixes(args) -> int:
     return 0
 
 
+def _pin(p: int) -> str:
+    return "none" if p == 0xFF else f"GP{p}"
+
+
+def decode_link_info(b: bytes) -> str:
+    """LinkInfo (extension_channel_spec.md 2.8.1)."""
+    if len(b) < LINK_INFO_LEN:
+        return f"short reply {b.hex()}"
+    role, ver, cmask, links, chans, slots, _flags, rx, tx = struct.unpack_from("<BBBBBBHBB", b)
+    feats, dmin, dmax = struct.unpack_from("<IHH", b, 12)
+    classes = ",".join(f"L{i + 1}" for i in range(3) if cmask >> i & 1) or "none"
+    names = " ".join(n for bit, n in LINK_FEATURES if feats & bit)
+    return (f"role={LINK_ROLES.get(role, role)} protocol=v{ver} classes={classes} max_links={links} "
+            f"max_channels={chans} slots={slots} rx_pin={_pin(rx)} tx_pin={_pin(tx)} "
+            f"features=0x{feats:08X} {names} d_local={dmin}..{dmax}").replace("  ", " ")
+
+
+def decode_link_status(b: bytes) -> str:
+    """LinkStatus (extension_channel_spec.md 2.8.2)."""
+    if len(b) < LINK_STATUS_LEN:
+        return f"short reply {b.hex()}"
+    state, cls, rate, chans, hops, los, sender, sflags, frame = struct.unpack_from("<8BQ", b)
+    locks, losses, crc8, crc16_, slips, sferr, ppm, phase, fill = struct.unpack_from("<6IffH", b, 16)
+    los_s = {0: "clear", 1: "ASSERTED", 0xFF: "n/a"}.get(los, los)
+    return (f"state={LINK_STATES.get(state, state)} class=L{cls} rate={RATE_CODES.get(rate, rate)} "
+            f"C={chans} hops={hops} los={los_s} sender=0x{sender:02X} sf_flags=0x{sflags:02X} F={frame} "
+            f"locks={locks} losses={losses} crc8={crc8} crc16={crc16_} slips={slips} sf_errors={sferr} "
+            f"vcxo={ppm:+.2f}ppm phase_error={phase:+.3f} fill={fill}")
+
+
+def decode_link_phase(b: bytes) -> str:
+    """LinkPhase (extension_channel_spec.md 2.8.5)."""
+    if len(b) < 8:
+        return f"short reply {b.hex()}"
+    mode, _r, d_local, hops_off, flags, state = struct.unpack_from("<BBHhBB", b)
+    return (f"mode={'phase lock' if mode else 'fill servo'} d_local={d_local} hops_offset={hops_off} "
+            f"state={LINK_PHASE_STATES.get(state, state)}" + (" D_BELOW_MIN" if flags & 1 else ""))
+
+
+def cmd_link(args) -> int:
+    """Read-only link overview: info, status, config, slots, phase (no SETs)."""
+    c = open_client(args)
+    rep = c.get(REQ_EXTENSION, EXT_LINK_INFO)
+    if rep.status != ST_OK:
+        print(f"status={rep.status_name} (no link support: EXT_LINK_INFO not available)")
+        return 1
+    print("info:   " + decode_link_info(rep.payload))
+    role = rep.payload[0]
+    for name, sub, dec in (("status", EXT_LINK_STATUS, decode_link_status),
+                           ("config", EXT_LINK_CONFIG, lambda b: b.hex(" ")),
+                           ("slots", EXT_LINK_SLOTS, lambda b: " ".join("--" if x == 0xFF else str(x) for x in b)),
+                           ("phase", EXT_LINK_PHASE, decode_link_phase),
+                           ("tx", EXT_LINK_TX, lambda b: b.hex(" "))):
+        if sub == EXT_LINK_TX and role not in (2, 4):
+            continue
+        if sub in (EXT_LINK_SLOTS, EXT_LINK_PHASE) and role in (2, 4):
+            continue
+        r = c.get(REQ_EXTENSION, sub)
+        print(f"{name + ':':8s}" + (dec(r.payload) if r.status == ST_OK else f"status={r.status_name}"))
+    return 0
+
+
 def cmd_bootloader(args) -> int:
     if not args.yes:
         print("This reboots the DSPi into its USB bootloader (it leaves USB audio and MIDI).")
@@ -748,6 +859,10 @@ def main(argv=None) -> int:
     p = sub.add_parser("fixes", help="EXT_FIRMWARE_FIXES: firmware bugs this build has fixed")
     add_common_args(p)
     p.set_defaults(fn=cmd_fixes)
+
+    p = sub.add_parser("link", help="link block 0x8000+: info, status, config, slots, phase (read only)")
+    add_common_args(p)
+    p.set_defaults(fn=cmd_link)
 
     p = sub.add_parser("notify", help="print decoded 0x40 notification frames")
     add_common_args(p)

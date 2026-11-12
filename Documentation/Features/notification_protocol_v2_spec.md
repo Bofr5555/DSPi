@@ -74,7 +74,9 @@ Bytes 4..N are event-specific. Host MUST size its read by `actual_length`, not b
 | 0x0E..0x7F | reserved (coalesceable) |              | |
 | 0x80..0xDF | reserved (discrete)     |              | |
 | 0xE0 | `NOTIFY_EVT_EXT_CLIP` (fork)  | Discrete     | A clip flag set. Sent only by firmware whose `EXT_NOTIFY_FEATURES` has bit 1; see `extension_channel_spec.md` §2.4.1. |
-| 0xE1..0xEF | fork extension events   |              | Announced by `EXT_NOTIFY_FEATURES` bits; decode only when the bit is set. |
+| 0xE1 | `NOTIFY_EVT_LINK_STATE` (fork) | Discrete | Link lock, loss or re-anchor. Sent only by firmware whose `EXT_NOTIFY_FEATURES` has bit 2; see `extension_channel_spec.md` §2.8.12. Specified, not implemented yet. |
+| 0xE2 | `NOTIFY_EVT_APPLY_RESULT` (fork) | Discrete | An apply-at-frame op completed. Sent only by firmware whose `EXT_NOTIFY_FEATURES` has bit 3; see `extension_channel_spec.md` §2.8.12. Specified, not implemented yet. |
+| 0xE3..0xEF | fork extension events   |              | Announced by `EXT_NOTIFY_FEATURES` bits; decode only when the bit is set. |
 | 0xF0..0xFF | reserved (discrete)     |              | |
 
 > **Note on discrete IDs below 0x80.** The original design reserved `0x80..0xFF`
