@@ -86,6 +86,8 @@ add_executable(DSPi
     core_vreg.h
     identify.c
     identify.h
+    reset_info.c
+    reset_info.h
     subharm.c
     subharm.h
     tube.c

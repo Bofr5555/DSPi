@@ -48,6 +48,7 @@
 #include "loopback.h"   // DSPI_LOOPBACK glitch counters (self-guarded; empty otherwise)
 #include "core_vreg.h"
 #include "identify.h"
+#include "reset_info.h"
 #include "usb_descriptors.h"
 #include "tusb.h"
 #include "pico/audio_spdif.h"
@@ -570,6 +571,7 @@ static const uint16_t ext_ids[] = {
     EXT_CORE_VREG,
     EXT_NOTIFY_FEATURES,
     EXT_IDENTIFY,
+    EXT_RESET_INFO,
 };
 
 // Exact OUT payload length of a sub-command; 0 = no OUT form (STALL).
@@ -667,6 +669,13 @@ static bool ext_handle_get(uint16_t id, uint16_t wLength, uint8_t *resp) {
             identify_get_status(&st);
             memcpy(resp, &st, sizeof(st));
             n = sizeof(st);
+            break;
+        }
+        case EXT_RESET_INFO: {
+            ResetInfo ri;
+            reset_info_get(&ri);
+            memcpy(resp, &ri, sizeof(ri));
+            n = sizeof(ri);
             break;
         }
         default:

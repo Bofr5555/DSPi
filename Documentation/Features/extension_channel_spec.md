@@ -54,8 +54,9 @@ IN replies are truncated to `wLength` like every other DSPi GET. On UART / I2C /
 | `0x0002` | `EXT_CORE_VREG` | `CoreVregStatus`, 16 bytes | `{op, value}` (exactly 2 bytes) |
 | `0x0003` | `EXT_NOTIFY_FEATURES` | `uint32` LE notification-semantics flags | none (STALL) |
 | `0x0004` | `EXT_IDENTIFY` | `IdentifyStatus`, 56 bytes | `IdentifyRequest` (exactly 4 bytes) |
+| `0x0005` | `EXT_RESET_INFO` | `ResetInfo`, 20 bytes | none (STALL) |
 
-Current firmware answers `EXT_LIST` with `01 00 02 00 03 00 04 00`.
+Current firmware answers `EXT_LIST` with `01 00 02 00 03 00 04 00 05 00`.
 
 ### 2.1 `EXT_LIST` (0x0000)
 
@@ -172,6 +173,39 @@ Finds a unit on the bench or in a rack: the on-board LED blinks fast for a while
 
 `hw_rev` is a build-time string: a board build sets it with `-DDSPI_HW_REV="..."`. The firmware cannot sense the board revision itself, so the string is only as right as the build that set it.
 
+### 2.6 `EXT_RESET_INFO` (0x0005)
+
+IN only: why the unit last reset and how long it has been up (`reset_info.h`). The cause registers are latched first thing in `main()`.
+
+**IN** returns `ResetInfo`, 20 bytes, little-endian:
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 1 | `reason` | see the table below |
+| 1 | 1 | `flags` | bit 0 `PREV_UPTIME`: `prev_uptime_s` is valid |
+| 2 | 1 | `hang_count` | the same value as `CoreVregStatus.hang_count` (2.3) |
+| 3 | 1 | `chip` | 0 = RP2040, 1 = RP2350 |
+| 4 | 4 | `uptime_s` | this run's uptime |
+| 8 | 4 | `prev_uptime_s` | how long the run before this reset lasted, in 1 s steps (the core-voltage uptime breadcrumb); 0 when bit 0 is clear |
+| 12 | 4 | `chip_reset` | raw chip reset-cause register at boot: `VREG_AND_CHIP_RESET.CHIP_RESET` (RP2040) or `POWMAN.CHIP_RESET` (RP2350) |
+| 16 | 4 | `watchdog_reason` | raw `WATCHDOG.REASON` at boot (bit 0 timer, bit 1 force); bit 8 set when the SDK marker of our own `watchdog_enable()` was present |
+
+| `reason` | Name | RP2040 | RP2350 |
+|---|---|---|---|
+| 0 | `UNKNOWN` | no known cause bit | no known cause bit |
+| 1 | `POWER_ON` | `HAD_POR`: power-on **or brown-out**; the RP2040 does not tell them apart | `HAD_POR` |
+| 2 | `BROWNOUT` | never | `HAD_BOR` |
+| 3 | `RUN_PIN` | `HAD_RUN` | `HAD_RUN_LOW` |
+| 4 | `WATCHDOG` | our 8 s watchdog fired: a hang (also counted in `hang_count`) | same |
+| 5 | `SOFTWARE` | a requested watchdog reboot: host-requested reboot, the BOOTSEL round trip | same, plus the bootrom starting the app after a UF2 copy, and any other watchdog reset in `CHIP_RESET` |
+| 6 | `DEBUGGER` | `HAD_PSM_RESTART` | `HAD_DP_RESET_REQ`, `HAD_HZD_SYS_RESET_REQ`, `HAD_RESCUE` |
+| 7 | `GLITCH` | never | `HAD_GLITCH_DETECT` |
+
+- **Order:** a set `WATCHDOG.REASON` bit decides first (it is zero after any hardware reset, while the RP2040's `CHIP_RESET` keeps showing the power-on that preceded a watchdog reset). Our own watchdog timeout (bit 8) is `WATCHDOG`, any other watchdog reset `SOFTWARE`. Otherwise the cause bits are taken in the order of the table.
+- **Power-on and brown-out clear the scratch registers**, so `PREV_UPTIME` is clear and `hang_count` starts at 0 after them. After a watchdog or software reset `prev_uptime_s` says how long the previous run lasted.
+- **STM32:** the tree has no STM32 build; the platforms are RP2040 and RP2350.
+- The raw registers are there for diagnosis; a host should show `reason` and keep the raw words for a support report.
+
 ## 3. Transports
 
 | Transport | Reaches `0x00`? | Refusal |
@@ -194,6 +228,7 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 | `crossfeed_map.h` | pair-map validation, normalization and encoding |
 | `core_vreg.{c,h}` | core voltage selection, trials, hang accounting |
 | `identify.{c,h}` | identify blink and tone, hardware description; `DSPI_HW_REV` in `CMakeLists.txt` |
+| `reset_info.{c,h}` | reset-cause capture and decoding; `reset_info_capture()` is the first call in `main()` |
 
 **Adding a sub-command:** pick the next free ID (`0x0001`-`0x7FFF` only after agreeing it with Weeb Labs). Add it to `config.h`, to `ext_ids[]` in ascending order and to `ext_set_len()` if it has an OUT form, then add cases to `ext_handle_set()` / `ext_handle_get()` and a row to section 2.
 
@@ -203,3 +238,4 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 - 2026-11-06: `0x0003` `EXT_NOTIFY_FEATURES` added (bit 0 `NOTIFY_FEAT_BULK_SOURCE`).
 - 2026-11-12: `EXT_NOTIFY_FEATURES` bit 1 `NOTIFY_FEAT_CLIP_EVENT` and the clip event `0xE0`; fork event IDs `0xE0`-`0xEF`.
 - 2026-11-12: `0x0004` `EXT_IDENTIFY` added.
+- 2026-11-12: `0x0005` `EXT_RESET_INFO` added.

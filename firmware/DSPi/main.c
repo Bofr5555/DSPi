@@ -35,6 +35,7 @@
 #include "flash_clkdiv.h"
 #include "core_vreg.h"
 #include "identify.h"
+#include "reset_info.h"
 #include "flash_storage.h"
 #include "pico/audio_i2s_multi.h"
 #include "adat_output.h"
@@ -2143,6 +2144,10 @@ static void input_service_servos(void) {
 }
 
 int main(void) {
+    // Reset cause first: watchdog_enable() below rewrites the SDK marker
+    // that tells our own watchdog timeout from a requested reboot.
+    reset_info_capture();
+
     // Initial LED on to show we're alive
     gpio_init(25); gpio_set_dir(25, GPIO_OUT);
     gpio_put(25, 1);
