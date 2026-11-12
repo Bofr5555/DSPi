@@ -8,7 +8,7 @@ nothing installed). Wire format:
 
 | File | Purpose |
 |---|---|
-| `midi_ctrl.py` | codec, `RawMidiPort`, `Client`, CLI (`list`, `get`, `set`, `ext-list`, `notify`, `enter-bootloader`) |
+| `midi_ctrl.py` | codec, `RawMidiPort`, `Client`, CLI (`list`, `get`, `set`, `ext-list`, `identify`, `reset-info`, `notify`, `enter-bootloader`) |
 | `measure.py` | RTT, bulk 0xA0/0xA1 throughput, notification latency, optional vendor-interface concurrency; Markdown table |
 | `soak.py` | long run: meter 10 Hz, 0xA0 every 10 s, random volume in a given range, notification seq check, underrun counters |
 | `regress.sh` | before/after a flash: interfaces 0-2 identical, state image identical, ALSA view |

@@ -72,7 +72,10 @@ Bytes 4..N are event-specific. Host MUST size its read by `actual_length`, not b
 | 0x0C | `NOTIFY_EVT_CS_AUX`           | Discrete     | Aux output state or level changed. 9-byte packet `[ver=2, 0x0C, flags=0, seq, slot (0-15), state (0/1), level_q8 (uint16 LE, 8.8 percent), src]`. `slot` is the Control Surfaces binding slot holding the aux component; `level_q8` reads 0 on a `CS_TYPE_AUX_OUT` slot. Pushed on every `REQ_SET_CS_AUX_STATE` (0x04) and `REQ_SET_CS_AUX_LEVEL` (0x06) that changes a value, whatever the origin. `src` identifies it: `GPIO` for a bound control, `HOST_SET` for USB, `UART` / `I2C` for those transports. See `control_surfaces_aux_spec.md`. |
 | 0x0D | `NOTIFY_EVT_RTA_CONFIG`       | Discrete     | The spectrum analyser applied a configuration. See §3.9. |
 | 0x0E..0x7F | reserved (coalesceable) |              | |
-| 0x80..0xFF | reserved (discrete)     |              | |
+| 0x80..0xDF | reserved (discrete)     |              | |
+| 0xE0 | `NOTIFY_EVT_EXT_CLIP` (fork)  | Discrete     | A clip flag set. Sent only by firmware whose `EXT_NOTIFY_FEATURES` has bit 1; see `extension_channel_spec.md` §2.4.1. |
+| 0xE1..0xEF | fork extension events   |              | Announced by `EXT_NOTIFY_FEATURES` bits; decode only when the bit is set. |
+| 0xF0..0xFF | reserved (discrete)     |              | |
 
 > **Note on discrete IDs below 0x80.** The original design reserved `0x80..0xFF`
 > for discrete events, but the discrete `INPUT_FORMAT` (0x05) and `SIGGEN_STATE`

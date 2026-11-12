@@ -34,6 +34,8 @@
 #include "crossover.h"
 #include "flash_clkdiv.h"
 #include "core_vreg.h"
+#include "identify.h"
+#include "reset_info.h"
 #include "flash_storage.h"
 #include "pico/audio_i2s_multi.h"
 #include "adat_output.h"
@@ -2142,6 +2144,10 @@ static void input_service_servos(void) {
 }
 
 int main(void) {
+    // Reset cause first: watchdog_enable() below rewrites the SDK marker
+    // that tells our own watchdog timeout from a requested reboot.
+    reset_info_capture();
+
     // Initial LED on to show we're alive
     gpio_init(25); gpio_set_dir(25, GPIO_OUT);
     gpio_put(25, 1);
@@ -2178,6 +2184,7 @@ int main(void) {
         // deferred from update_master_volume() to here so we never call
         // usbd_edpt_xfer from within a control-transfer DATA stage.
         LOOP_PROF(LP_NOTIFY);
+        notify_clip_service(to_ms_since_boot(get_absolute_time()));
         usb_notify_tick();
 
         // External control transports: parse any complete UART/I2C frames
@@ -3776,11 +3783,13 @@ int main(void) {
         // throttled).  No-op when DSPI_CLOCK_DIAG is 0.
         clock_diag_poll();
 
-        // LED heartbeat - toggle every ~1000 iterations
+        // LED heartbeat - toggle every ~1000 iterations, unless an identify
+        // request (EXT_IDENTIFY) is blinking it
+        bool led_identify = identify_service(to_ms_since_boot(get_absolute_time()));
         static uint32_t loop_counter = 0;
         if (++loop_counter >= 1000) {
             loop_counter = 0;
-            gpio_xor_mask(1u << 25);
+            if (!led_identify) gpio_xor_mask(1u << 25);
         }
     }
 }

@@ -112,6 +112,11 @@ void core_vreg_persist(void);
 
 void core_vreg_get_status(CoreVregStatus *out);
 
+// How long the previous run lasted (its last once-a-second uptime breadcrumb
+// in SCRATCH1).  False after a power-on or brown-out, which clear the
+// scratch registers; *out_s is then 0.
+bool core_vreg_prev_uptime(uint32_t *out_s);
+
 #ifdef __cplusplus
 }
 #endif

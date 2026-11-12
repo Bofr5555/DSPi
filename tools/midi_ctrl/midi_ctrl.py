@@ -87,7 +87,14 @@ EXT_LIST = 0x0000                # GET: supported IDs, uint16 LE ascending
 EXT_CROSSFEED_PAIR_MAP = 0x0001  # GET/SET: uint8[4]
 EXT_CORE_VREG = 0x0002           # GET: CoreVregStatus (16 B); SET: {op, value}
 EXT_NOTIFY_FEATURES = 0x0003     # GET: uint32 LE NOTIFY_FEAT_* flags
+EXT_IDENTIFY = 0x0004            # GET: IdentifyStatus (56 B); SET: {seconds, tone_output, 0, 0}
+EXT_RESET_INFO = 0x0005          # GET: ResetInfo (20 B)
 NOTIFY_FEAT_BULK_SOURCE = 1 << 0  # BULK_INVALIDATED of a bulk SET carries its dispatch source
+NOTIFY_FEAT_CLIP_EVENT = 1 << 1   # clip event 0xE0 (EXT_CLIP)
+NOTIFY_EVT_EXT_CLIP = 0xE0
+IDENTIFY_TONE_NONE = 0xFF
+RESET_REASONS = {0: "UNKNOWN", 1: "POWER_ON", 2: "BROWNOUT", 3: "RUN_PIN", 4: "WATCHDOG",
+                 5: "SOFTWARE", 6: "DEBUGGER", 7: "GLITCH"}
 
 # Commands that are reads on the wire although they act ("write-as-read",
 # Documentation/commands.md): they go in GET-type frames.  The CLI's `get`
@@ -238,7 +245,7 @@ def decode_notify(pkt: bytes) -> str:
     names = {0x02: "PARAM_CHANGED", 0x03: "BULK_INVALIDATED", 0x04: "PRESET_LOADED",
              0x05: "INPUT_FORMAT", 0x07: "SIGGEN_STATE", 0x08: "ADAT_STATE",
              0x09: "I2S_SLAVE_STATE", 0x0A: "CS_IR_LEARN", 0x0B: "ADAT_INPUT_STATE",
-             0x0C: "CS_AUX", 0x0D: "RTA_CONFIG"}
+             0x0C: "CS_AUX", 0x0D: "RTA_CONFIG", NOTIFY_EVT_EXT_CLIP: "EXT_CLIP"}
     s = f"v{ver} seq={seq:3d} {names.get(evt, f'evt 0x{evt:02X}')}"
     if evt == 0x02 and len(pkt) >= 12:
         # [ver, evt, flags, seq, off_LE16, size_LE16, src, 0, 0, 0, value...]
@@ -250,6 +257,9 @@ def decode_notify(pkt: bytes) -> str:
             s += f" (f32 {struct.unpack('<f', val)[0]:.3f})"
     elif evt == 0x03 and len(pkt) >= 5:
         s += f" src={PARAM_SRC.get(pkt[4], pkt[4])}"
+    elif evt == NOTIFY_EVT_EXT_CLIP and len(pkt) >= 12:
+        # [ver, evt, flags, seq, channel, count, 0, 0, mask_LE32]
+        s += f" channel={pkt[4]} count={pkt[5]} mask=0x{struct.unpack_from('<I', pkt, 8)[0]:08X}"
     else:
         s += f" {pkt[4:].hex()}"
     return s
@@ -594,7 +604,8 @@ def cmd_ext_list(args) -> int:
         f = c.get(REQ_EXTENSION, EXT_NOTIFY_FEATURES)
         if f.status == ST_OK and len(f.payload) >= 4:
             flags = struct.unpack("<I", f.payload[:4])[0]
-            names = ["BULK_SOURCE"] if flags & NOTIFY_FEAT_BULK_SOURCE else []
+            names = [n for bit, n in ((NOTIFY_FEAT_BULK_SOURCE, "BULK_SOURCE"),
+                                      (NOTIFY_FEAT_CLIP_EVENT, "CLIP_EVENT")) if flags & bit]
             print(f"notify features: 0x{flags:08X} {' '.join(names)}".rstrip())
     return 0
 
@@ -606,6 +617,55 @@ def cmd_notify(args) -> int:
     while time.monotonic() < end:
         c.pump(min(0.5, end - time.monotonic()))
     print(f"stats: {dict(c.stats)}")
+    return 0
+
+
+def decode_identify(b: bytes) -> str:
+    """IdentifyStatus (extension_channel_spec.md 2.5)."""
+    if len(b) < 56:
+        return f"short reply {b.hex()}"
+    left, tone, chip, rev, chip_id = struct.unpack_from("<BBBBI", b)
+    board = b[8:24].split(b"\0")[0].decode("ascii", "replace")
+    hw_rev = b[24:56].split(b"\0")[0].decode("ascii", "replace")
+    tone_s = "none" if tone == IDENTIFY_TONE_NONE else f"out {tone}"
+    return (f"blink_left={left}s last_tone={tone_s} chip={'RP2350' if chip else 'RP2040'} "
+            f"rev={rev} chip_id=0x{chip_id:08X} board={board!r} hw_rev={hw_rev!r}")
+
+
+def decode_reset_info(b: bytes) -> str:
+    """ResetInfo (extension_channel_spec.md 2.6)."""
+    if len(b) < 20:
+        return f"short reply {b.hex()}"
+    reason, flags, hangs, chip, up, prev, chip_reset, wdt = struct.unpack_from("<BBBBIIII", b)
+    prev_s = f"{prev}s" if flags & 1 else "n/a"
+    return (f"reason={RESET_REASONS.get(reason, reason)} uptime={up}s prev_uptime={prev_s} "
+            f"hang_count={hangs} chip={'RP2350' if chip else 'RP2040'} "
+            f"chip_reset=0x{chip_reset:08X} watchdog_reason=0x{wdt:03X}")
+
+
+def cmd_identify(args) -> int:
+    c = open_client(args)
+    if args.seconds is not None:
+        tone = IDENTIFY_TONE_NONE if args.tone_output is None else args.tone_output
+        rep = c.set(REQ_EXTENSION, EXT_IDENTIFY, payload=bytes([args.seconds, tone, 0, 0]))
+        if rep.status != ST_OK:
+            print(f"status={rep.status_name} (refused: bad output, generator running, or no EXT_IDENTIFY)")
+            return 1
+    rep = c.get(REQ_EXTENSION, EXT_IDENTIFY)
+    if rep.status != ST_OK:
+        print(f"status={rep.status_name} (no EXT_IDENTIFY)")
+        return 1
+    print(decode_identify(rep.payload))
+    return 0
+
+
+def cmd_reset_info(args) -> int:
+    c = open_client(args)
+    rep = c.get(REQ_EXTENSION, EXT_RESET_INFO)
+    if rep.status != ST_OK:
+        print(f"status={rep.status_name} (no EXT_RESET_INFO)")
+        return 1
+    print(decode_reset_info(rep.payload))
     return 0
 
 
@@ -652,6 +712,16 @@ def main(argv=None) -> int:
     p = sub.add_parser("ext-list", help="GET 0x00 EXT_LIST: the extension sub-commands the device supports")
     add_common_args(p)
     p.set_defaults(fn=cmd_ext_list)
+
+    p = sub.add_parser("identify", help="EXT_IDENTIFY: blink the LED (and optionally a quiet tone), print the board info")
+    add_common_args(p)
+    p.add_argument("--seconds", type=_int, help="blink for N s (0 stops); omit to only read")
+    p.add_argument("--tone-output", type=_int, help="also play the -40 dBFS identify tone on this output")
+    p.set_defaults(fn=cmd_identify)
+
+    p = sub.add_parser("reset-info", help="EXT_RESET_INFO: last reset cause, uptime, hang count")
+    add_common_args(p)
+    p.set_defaults(fn=cmd_reset_info)
 
     p = sub.add_parser("notify", help="print decoded 0x40 notification frames")
     add_common_args(p)

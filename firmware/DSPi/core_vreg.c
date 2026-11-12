@@ -42,6 +42,8 @@ static uint8_t  failed_trial_vreg;   // 0 = none
 static uint32_t failed_trial_uptime_s;
 static bool     escalation_unpersisted;
 static uint32_t last_tick_s;
+static bool     prev_run_valid;      // SCRATCH1 held the previous run's uptime
+static uint32_t prev_run_uptime_s;
 
 volatile bool    core_vreg_req_pending = false;
 volatile uint8_t core_vreg_req_op = 0;
@@ -87,6 +89,8 @@ void core_vreg_boot_apply(void) {
     uint32_t scr = SCRATCH_BOOKKEEPING;
     bool have_history = (scr & SCR_MAGIC_MASK) == SCR_MAGIC;
     uint32_t prev_uptime = have_history ? SCRATCH_UPTIME : 0;
+    prev_run_valid = have_history;
+    prev_run_uptime_s = prev_uptime;
     uint8_t prev_trial = have_history ? (uint8_t)SCR_TRIAL(scr) : 0;
     hang_count        = have_history ? (uint8_t)SCR_HANGS(scr) : 0;
     failed_trial_vreg = have_history ? (uint8_t)SCR_FAILED(scr) : 0;
@@ -214,4 +218,9 @@ void core_vreg_get_status(CoreVregStatus *out) {
     out->failed_trial_vreg     = failed_trial_vreg;
     out->failed_trial_uptime_s = failed_trial_uptime_s;
     out->uptime_s              = uptime_s();
+}
+
+bool core_vreg_prev_uptime(uint32_t *out_s) {
+    *out_s = prev_run_uptime_s;
+    return prev_run_valid;
 }

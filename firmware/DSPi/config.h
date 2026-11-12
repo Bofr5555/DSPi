@@ -147,6 +147,8 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define EXT_CROSSFEED_PAIR_MAP      0x0001  // IN: uint8[4]; OUT: uint8[4] (crossfeed_map.h)
 #define EXT_CORE_VREG               0x0002  // IN: CoreVregStatus (16 B); OUT: {op, value} (core_vreg.h)
 #define EXT_NOTIFY_FEATURES         0x0003  // IN: uint32 LE NOTIFY_FEAT_* flags (notify.h); no OUT
+#define EXT_IDENTIFY                0x0004  // IN: IdentifyStatus (56 B); OUT: IdentifyRequest (4 B) (identify.h)
+#define EXT_RESET_INFO              0x0005  // IN: ResetInfo (20 B) (reset_info.h); no OUT
 
 // Control Surfaces auxiliary outputs (caps v18); see control_surfaces.h and
 // Documentation/Features/control_surfaces_aux_spec.md.  wValue is the binding
@@ -492,6 +494,31 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define MASTER_VOL_MIN_DB           (-127.0f)  // Minimum non-mute attenuation
 #define MASTER_VOL_MAX_DB           (0.0f)     // Unity gain (no attenuation)
 #define MASTER_VOL_DEFAULT_DB       (-20.0f)   // Power-on / fresh-device default
+
+// Gain ranges, enforced on every write path: the SET commands (any transport),
+// the bulk SET and preset load.  A non-finite value is refused by a SET and by
+// a bulk SET (nothing applied); a stored slot carrying one loads the minimum.
+// Finite values outside the range are clamped, and the notification carries
+// the clamped value.  The ranges are the host registry's (out.gain) and the
+// ones the bulk path's dB conversion always clamped to.
+#define OUTPUT_GAIN_MIN_DB          (-60.0f)
+#define OUTPUT_GAIN_MAX_DB          (20.0f)
+#define MATRIX_GAIN_MIN_DB          (-60.0f)
+#define MATRIX_GAIN_MAX_DB          (20.0f)
+#define PREAMP_MIN_DB               (-60.0f)
+#if PICO_RP2350
+#define PREAMP_MAX_DB               (24.0f)
+#else
+#define PREAMP_MAX_DB               (18.0f)    // the Q28 preamp multiplier overflows above +18.06 dB
+#endif
+
+// Clamp a finite dB value into [lo, hi]; NaN and both infinities become lo
+// (the quiet end).  Callers that must refuse non-finite input check first.
+static inline float gain_db_clamp(float db, float lo, float hi) {
+    if (db >= lo && db <= hi) return db;
+    if (db > hi && db <= 3.402823466e38f) return hi;   // finite, too high
+    return lo;                                          // too low, -inf, +inf, NaN
+}
 
 // User Volume Commands.  Mirror UAC1 host volume/mute, but as a vendor channel
 // so non-USB controllers (e.g. Console while SPDIF input is active, an external
@@ -1216,6 +1243,14 @@ typedef struct __attribute__((packed)) {
 
 extern uint8_t channel_band_counts[NUM_CHANNELS];
 extern volatile SystemStatusPacket global_status;
+
+// Clip latch for the clip notification (notify.h NOTIFY_EVT_EXT_CLIP).  The
+// metering sites set the same bits as global_status.clip_flags, but this copy
+// is consumed by notify_clip_service() only, so REQ_CLEAR_CLIPS and the status
+// polls keep their exact semantics and the event never waits for a clear.
+extern volatile uint32_t clip_notify_latch;
+#define CLIP_LATCH(bits) do { uint32_t _clip_b = (bits); \
+    global_status.clip_flags |= _clip_b; clip_notify_latch |= _clip_b; } while (0)
 
 // ----------------------------------------------------------------------------
 // Force time-critical functions into RAM. Under the XIP build, .time_critical

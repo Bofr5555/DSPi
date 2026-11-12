@@ -300,6 +300,13 @@ Accepts both PEQ (0..9) and crossover (20..23) band indices.
 
 `NUM_INPUT_CHANNELS` = 2.
 
+Range: `-60.0 .. +18.0` dB on RP2040 (its Q28 preamp multiplier overflows above
++18.06 dB), `-60.0 .. +24.0` dB on RP2350. Values outside are clamped and the
+notification carries the clamped value; NaN or infinity is refused: nothing
+changes, the USB request is ACKed as any refused SET is (only `REQ_EXTENSION`
+STALLs), and UART / I2C / MIDI answer `ERROR`. A bulk SET and a preset load
+apply the same clamp (see section 8.3).
+
 ### 5.2 Master volume (device-side output ceiling)
 
 | ID | Name | Dir | wValue | Payload / Response |
@@ -459,6 +466,23 @@ sub-command `EXT_CROSSFEED_PAIR_MAP` (`0x00`, wValue `0x0001`; section 17.3).
 | 0x77 | `GET_OUTPUT_MUTE` | R | 1 byte |
 | 0x78 | `SET_OUTPUT_DELAY` | W | f32 ms |
 | 0x79 | `GET_OUTPUT_DELAY` | R | f32 |
+
+### 8.3 Gain ranges
+
+| Gain | Range | Command |
+|------|-------|---------|
+| Crosspoint `gain_db` | `-60.0 .. +20.0` dB | 0x70 |
+| Output gain | `-60.0 .. +20.0` dB | 0x74 |
+| Input preamp | `-60.0 .. +18.0` dB (RP2040), `-60.0 .. +24.0` dB (RP2350) | 0x44, 0xD0 |
+
+Every write path enforces these: the SET commands on every transport, the bulk
+SET (`0xA1` / `0xA3`) and preset load. A finite value outside the range is
+clamped, and the `PARAM_CHANGED` notification and the readback carry the clamped
+value. A NaN or infinite gain is refused: a SET changes nothing (over USB it is
+ACKed, as every refused plain SET is; UART / I2C / MIDI answer `ERROR`); a bulk
+SET carrying one is not applied at all (no state change, no `BULK_INVALIDATED`).
+A preset slot saved by older firmware that holds one loads the minimum. Read the
+value back to confirm a write over USB.
 
 `SET_OUTPUT_ENABLE` enforces a Core 1 interlock: PDM and the Core-1 EQ-worker
 outputs are mutually exclusive. Enabling a conflicting output is silently ignored.

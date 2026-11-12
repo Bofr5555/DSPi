@@ -424,7 +424,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
             float a = fabsf(ibuf[i]); if (a > pk) pk = a;
         }
         global_status.peaks[k] = (uint16_t)(fminf(1.0f, pk) * 32767.0f);
-        if (pk > CLIP_THRESH_F) global_status.clip_flags |= (1u << k);
+        if (pk > CLIP_THRESH_F) CLIP_LATCH(1u << k);
         rta_tap(RTA_TAP_INPUT, (uint8_t)k, ibuf, sample_count);
     }
     for (int k = n_active_inputs; k < NUM_INPUT_CHANNELS; k++)
@@ -473,7 +473,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
                 float a = fabsf(dbuf[i]); if (a > pk) pk = a;
             }
             global_status.peaks[row] = (uint16_t)(fminf(1.0f, pk) * 32767.0f);
-            if (pk > CLIP_THRESH_F) global_status.clip_flags |= (1u << row);
+            if (pk > CLIP_THRESH_F) CLIP_LATCH(1u << row);
             rta_tap(RTA_TAP_INPUT, (uint8_t)row, dbuf, sample_count);
         }
     } else {
@@ -715,7 +715,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
                 if (a > peak) peak = a;
             }
             global_status.peaks[CH_OUT_1 + out] = (uint16_t)(fminf(1.0f, peak) * 32767.0f);
-            if (peak > CLIP_THRESH_F) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
+            if (peak > CLIP_THRESH_F) CLIP_LATCH(1u << (CH_OUT_1 + out));
             rta_tap(RTA_TAP_OUTPUT, (uint8_t)out, buf_out[out], sample_count);
         }
         // PDM is inactive in EQ_WORKER mode
@@ -856,7 +856,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
                 if (a > peak) peak = a;
             }
             global_status.peaks[CH_OUT_1 + out] = (uint16_t)(fminf(1.0f, peak) * 32767.0f);
-            if (peak > CLIP_THRESH_F) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
+            if (peak > CLIP_THRESH_F) CLIP_LATCH(1u << (CH_OUT_1 + out));
             rta_tap(RTA_TAP_OUTPUT, (uint8_t)out, buf_out[out], sample_count);
         }
 
@@ -889,7 +889,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
                 if (abs_sub > peak_sub) peak_sub = abs_sub;
             }
             global_status.peaks[CH_OUT_SUB] = (uint16_t)(fminf(1.0f, peak_sub) * 32767.0f);
-            if (peak_sub > CLIP_THRESH_F) global_status.clip_flags |= (1u << CH_OUT_SUB);
+            if (peak_sub > CLIP_THRESH_F) CLIP_LATCH(1u << CH_OUT_SUB);
             rta_tap(RTA_TAP_OUTPUT, NUM_OUTPUT_CHANNELS - 1, buf_out[NUM_OUTPUT_CHANNELS-1], sample_count);
             if (rings_admit) {
                 for (uint32_t i = 0; i < sample_count; i++) {
@@ -982,7 +982,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
             int32_t a = abs(ibuf[i]); if (a > pk) pk = a;
         }
         global_status.peaks[k] = peak_to_meter_q28(pk);
-        if (pk > CLIP_THRESH_Q28) global_status.clip_flags |= (1u << k);
+        if (pk > CLIP_THRESH_Q28) CLIP_LATCH(1u << k);
         rta_tap(RTA_TAP_INPUT, (uint8_t)k, ibuf, sample_count);
     }
 
@@ -1194,7 +1194,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
                 if (a > peak) peak = a;
             }
             global_status.peaks[CH_OUT_1 + out] = peak_to_meter_q28(peak);
-            if (peak > CLIP_THRESH_Q28) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
+            if (peak > CLIP_THRESH_Q28) CLIP_LATCH(1u << (CH_OUT_1 + out));
             rta_tap(RTA_TAP_OUTPUT, (uint8_t)out, buf_out[out], sample_count);
         }
         // PDM is inactive in EQ_WORKER mode
@@ -1332,7 +1332,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
                 if (a > peak) peak = a;
             }
             global_status.peaks[CH_OUT_1 + out] = peak_to_meter_q28(peak);
-            if (peak > CLIP_THRESH_Q28) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
+            if (peak > CLIP_THRESH_Q28) CLIP_LATCH(1u << (CH_OUT_1 + out));
             rta_tap(RTA_TAP_OUTPUT, (uint8_t)out, buf_out[out], sample_count);
         }
 
@@ -1360,7 +1360,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
                 if (abs_sub > peak_sub) peak_sub = abs_sub;
             }
             global_status.peaks[CH_OUT_SUB] = peak_to_meter_q28(peak_sub);
-            if (peak_sub > CLIP_THRESH_Q28) global_status.clip_flags |= (1u << CH_OUT_SUB);
+            if (peak_sub > CLIP_THRESH_Q28) CLIP_LATCH(1u << CH_OUT_SUB);
             rta_tap(RTA_TAP_OUTPUT, (uint8_t)pdm_out, buf_out[pdm_out], sample_count);
             if (rings_admit) {
                 for (uint32_t i = 0; i < sample_count; i++) {

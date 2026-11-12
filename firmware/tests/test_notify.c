@@ -7,6 +7,8 @@
 #include <stdlib.h>
 
 void bulk_params_collect(WireBulkParams *out) { memset(out, 0, sizeof(*out)); }
+volatile uint32_t clip_notify_latch;
+volatile SystemStatusPacket global_status;
 
 static int failures;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); failures++; } } while (0)
@@ -90,6 +92,76 @@ int main(void) {
     notify_end_bulk();
     n = drain(p, NOTIFY_RING_SIZE);
     CHECK(n == 1 && p[0].evt == NOTIFY_EVT_BULK_INVALIDATED && p[0].src == PARAM_SRC_MIDI);
+
+    // 7. Clip event (FW1): latch -> one 12-byte packet with channel, count,
+    //    mask; the polled clip flags are not touched.
+    {
+        uint8_t buf[NOTIFY_MAX_PACKET];
+        uint16_t len;
+        notify_init();
+        global_status.clip_flags = 0;
+        clip_notify_latch = 0;
+        notify_clip_service(1000);                       // nothing clipped
+        CHECK(notify_peek_next_for(NOTIFY_CONSUMER_USB, buf, sizeof buf) == 0);
+        CLIP_LATCH(1u << 5);
+        CLIP_LATCH(1u << 9);
+        notify_clip_service(1000);
+        len = notify_peek_next_for(NOTIFY_CONSUMER_USB, buf, sizeof buf);
+        CHECK(len == 12 && buf[0] == NOTIFY_V2_VERSION && buf[1] == NOTIFY_EVT_EXT_CLIP);
+        CHECK(buf[2] == 0 && buf[4] == 5 && buf[5] == 2 && buf[6] == 0 && buf[7] == 0);
+        CHECK(buf[8] == 0x20 && buf[9] == 0x02 && buf[10] == 0 && buf[11] == 0);
+        notify_commit_pop_for(NOTIFY_CONSUMER_USB);
+        CHECK(clip_notify_latch == 0);
+        CHECK(global_status.clip_flags == ((1u << 5) | (1u << 9)));   // still sticky
+
+        // Rate limit: a clip inside the interval waits, then goes out alone.
+        CLIP_LATCH(1u << 1);
+        notify_clip_service(1000 + NOTIFY_CLIP_MIN_INTERVAL_MS - 1);
+        CHECK(notify_peek_next_for(NOTIFY_CONSUMER_USB, buf, sizeof buf) == 0);
+        CHECK(clip_notify_latch == (1u << 1));
+        notify_clip_service(1000 + NOTIFY_CLIP_MIN_INTERVAL_MS);
+        len = notify_peek_next_for(NOTIFY_CONSUMER_USB, buf, sizeof buf);
+        CHECK(len == 12 && buf[4] == 1 && buf[5] == 1 && buf[8] == 0x02);
+        notify_commit_pop_for(NOTIFY_CONSUMER_USB);
+
+        // A sustained clip nobody drains: the unsent entry absorbs the new
+        // channels, so the ring holds one clip event, not one per interval.
+        for (uint32_t t = 2000; t < 2000 + 100 * NOTIFY_CLIP_MIN_INTERVAL_MS;
+             t += NOTIFY_CLIP_MIN_INTERVAL_MS) {
+            CLIP_LATCH(1u << (t / NOTIFY_CLIP_MIN_INTERVAL_MS % 4));
+            notify_clip_service(t);
+        }
+        n = drain(p, NOTIFY_RING_SIZE);
+        CHECK(n == 1 && p[0].evt == NOTIFY_EVT_EXT_CLIP);
+        CHECK(notify_consumer_drops[NOTIFY_CONSUMER_USB] == 0);
+
+        // An entry queued after the clip event: the next clip is a new entry.
+        notify_init();
+        CLIP_LATCH(1u << 3);
+        notify_clip_service(5000);
+        param(PARAM_SRC_UART, 0x10, 9);
+        CLIP_LATCH(1u << 4);
+        notify_clip_service(5000 + NOTIFY_CLIP_MIN_INTERVAL_MS);
+        n = drain(p, NOTIFY_RING_SIZE);
+        CHECK(n == 3 && p[0].evt == NOTIFY_EVT_EXT_CLIP && p[2].evt == NOTIFY_EVT_EXT_CLIP);
+
+        // An entry a consumer has peeked (a transfer in flight) is never
+        // merged into: the next clip is a new entry.
+        notify_init();
+        CLIP_LATCH(1u << 2);
+        notify_clip_service(9000);
+        CHECK(notify_peek_next_for(NOTIFY_CONSUMER_USB, buf, sizeof buf) == 12);
+        CLIP_LATCH(1u << 6);
+        notify_clip_service(9000 + NOTIFY_CLIP_MIN_INTERVAL_MS);
+        notify_commit_pop_for(NOTIFY_CONSUMER_USB);
+        CHECK(buf[8] == 0x04);                           // the in-flight packet: channel 2 only
+        len = notify_peek_next_for(NOTIFY_CONSUMER_USB, buf, sizeof buf);
+        CHECK(len == 12 && buf[4] == 6 && buf[8] == 0x40);
+        notify_commit_pop_for(NOTIFY_CONSUMER_USB);
+
+        // The flag that announces the event.
+        CHECK((NOTIFY_FEATURES & NOTIFY_FEAT_CLIP_EVENT) != 0);
+    }
 
     if (failures) { printf("test_notify: %d failure(s)\n", failures); return 1; }
     printf("test_notify: OK\n");

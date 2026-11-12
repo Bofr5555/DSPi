@@ -113,7 +113,8 @@ SECTIONS
             .text.clock_configure_undivided .text.clock_configure_int_divider
             .text.check_sys_clock_hz .text.set_sys_clock_pll
             .text.clock_gpio_init_int_frac16)
-        *DSPi.dir/notify.c.o(.text.notify_init)
+        *DSPi.dir/notify.c.o(.text.notify_init .text.notify_clip_service
+            .text.notify_push_clip)
         *pico_spdif_rx/spdif_rx.c.o(.text.spdif_rx_*_program_get_default_config
             .text.spdif_rx_start .text.spdif_rx_end
             .text.spdif_rx_set_callback_on_stable

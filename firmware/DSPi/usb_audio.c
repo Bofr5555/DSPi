@@ -62,6 +62,7 @@
 volatile AudioState audio_state = { .freq = 44100 };
 volatile bool bypass_master_eq = false;
 volatile SystemStatusPacket global_status = {0};
+volatile uint32_t clip_notify_latch = 0;   // see CLIP_LATCH (config.h)
 
 volatile bool eq_update_pending = false;
 volatile EqParamPacket pending_packet;
@@ -344,6 +345,7 @@ void get_default_channel_name(int ch, uint8_t input_source,
 void update_preamp(uint8_t ch, float db) {
     if (!isfinite(db)) return;  // Reject NaN/Inf — would propagate through entire audio path
     if (ch >= NUM_INPUT_CHANNELS) return;
+    db = gain_db_clamp(db, PREAMP_MIN_DB, PREAMP_MAX_DB);
     global_preamp_db[ch] = db;
     float linear = powf(10.0f, db / 20.0f);
     global_preamp_mul[ch]    = (int32_t)(linear * (float)(1 << 28));

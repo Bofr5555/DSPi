@@ -1,6 +1,6 @@
 # Extension Channel (`REQ_EXTENSION`, 0x00)
 
-*Last updated: 2026-11-06*
+*Last updated: 2026-11-12*
 *Status: implemented on the bofr fork, HW-untested*
 *Platforms: RP2040 + RP2350*
 
@@ -53,8 +53,10 @@ IN replies are truncated to `wLength` like every other DSPi GET. On UART / I2C /
 | `0x0001` | `EXT_CROSSFEED_PAIR_MAP` | `uint8[4]` live map, normalized | `uint8[4]` map (exactly 4 bytes) |
 | `0x0002` | `EXT_CORE_VREG` | `CoreVregStatus`, 16 bytes | `{op, value}` (exactly 2 bytes) |
 | `0x0003` | `EXT_NOTIFY_FEATURES` | `uint32` LE notification-semantics flags | none (STALL) |
+| `0x0004` | `EXT_IDENTIFY` | `IdentifyStatus`, 56 bytes | `IdentifyRequest` (exactly 4 bytes) |
+| `0x0005` | `EXT_RESET_INFO` | `ResetInfo`, 20 bytes | none (STALL) |
 
-Current firmware answers `EXT_LIST` with `01 00 02 00 03 00`.
+Current firmware answers `EXT_LIST` with `01 00 02 00 03 00 04 00 05 00`.
 
 ### 2.1 `EXT_LIST` (0x0000)
 
@@ -113,9 +115,96 @@ IN only: a `uint32` (little-endian) of flags that describe how the firmware fill
 | Bit | Name | Meaning when set |
 |---|---|---|
 | 0 | `NOTIFY_FEAT_BULK_SOURCE` | A bulk SET's `BULK_INVALIDATED` carries the SET's dispatch source (`HOST_SET` for USB vendor, `UART`, `I2C`, `MIDI`) instead of `BULK_SET`. An invalidation merged from causes with different sources carries `UNKNOWN`. A pending invalidation absorbs a new one only while nothing is queued after it. See `notification_protocol_v2_spec.md` §3.5.1. |
-| 1-31 | reserved | zero |
+| 1 | `NOTIFY_FEAT_CLIP_EVENT` | The device sends `NOTIFY_EVT_EXT_CLIP` (`0xE0`) when a clip flag sets (section 2.4.1). |
+| 2-31 | reserved | zero |
 
 A host that sees bit 0 can recognise its own bulk write from the source byte and drop the time-window echo heuristic it needs for older firmware.
+
+**Fork event IDs.** Event IDs `0xE0`-`0xEF` are the fork's, taken from the top of the discrete range because upstream assigns IDs upward from `0x01`. Each one is announced by a bit here, and a host decodes it only when that bit is set, so a later upstream use of the same ID on stock firmware cannot be misread.
+
+#### 2.4.1 `NOTIFY_EVT_EXT_CLIP` (0xE0)
+
+Sent on every notification consumer (USB EP 0x83, UART, USB MIDI) when one or more clip flags set. 12 bytes:
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 1 | `version` | 2 |
+| 1 | 1 | `event_id` | `0xE0` |
+| 2 | 1 | `flags` | 0 |
+| 3 | 1 | `seq` | the v2 sequence number |
+| 4 | 1 | `channel` | lowest channel in `mask` |
+| 5 | 1 | `count` | number of channels in `mask` |
+| 6 | 2 | reserved | zero |
+| 8 | 4 | `mask` | uint32 LE, the channels that clipped since the previous clip event |
+
+- **Bit space:** the same as the polled clip flags (`REQ_CLEAR_CLIPS`, `REQ_GET_STATUS` 9): inputs first, then outputs (`CH_OUT_1` = `NUM_INPUT_CHANNELS`), the PDM sub last. RP2040 has 7 channels (2 in + 5 out), RP2350 17 (8 in + 9 out).
+- **Rate limit:** at most one event per 250 ms (`NOTIFY_CLIP_MIN_INTERVAL_MS`). Clips in between collect into the next event. A sustained clip therefore gives one event every 250 ms, and if no consumer drains the endpoint the newest unsent clip event absorbs the new channels instead of queueing more, so a clip storm cannot fill the ring.
+- **Polling is unchanged.** The event has its own latch, set by the same metering code. The polled flags stay sticky and are still cleared only by `REQ_CLEAR_CLIPS`; a clear does not affect the event, and the event does not clear the flags.
+- **Precision:** the latch is taken from the main loop. A clip on a core-1 output in the few cycles between the load and the store of that take is lost for its block; a clip that lasts longer than one audio block is always reported.
+
+### 2.5 `EXT_IDENTIFY` (0x0004)
+
+Finds a unit on the bench or in a rack: the on-board LED blinks fast for a while, and on request one short quiet tone plays on one output. The IN form also says what the unit is (`identify.h`).
+
+**OUT** takes `IdentifyRequest`, exactly 4 bytes:
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 1 | `seconds` | blink time; 0 stops a running blink; above 120 is shortened to 120 |
+| 1 | 1 | `tone_output` | output index for the tone, or `0xFF` for no tone (the default a host should send) |
+| 2 | 2 | reserved | zero |
+
+- **LED:** GPIO25, the Pico / Pico 2 module LED (the K340 board has no LED of its own; the module's is the one to look for). It blinks at 4 Hz (125 ms on, 125 ms off) instead of the loop-rate heartbeat, and the heartbeat resumes afterwards. A new request replaces a running one.
+- **Tone (off unless asked for):** a 1 kHz sine, -40 dBFS peak, 400 ms, through the test signal generator in normal mode, so the output's crossover, PEQ, gain, master volume, mute and limiter all apply. It is never louder than a -40 dBFS sine of program material on that output, and a tweeter output gets its high-pass as usual. It replaces the generator's configuration (read it back before restarting a measurement), sends the usual `SIGGEN_STATE` notifications, and ends by itself.
+- **Refused (STALL / `ERROR`):** `tone_output` neither `0xFF` nor below the output count, nonzero reserved bytes, or a tone while the signal generator is running (an identify never takes over a measurement). A blink-only request is never refused.
+- Applied from the main loop within one iteration; nothing is persisted.
+
+**IN** returns `IdentifyStatus`, 56 bytes, little-endian:
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 1 | `remaining_s` | blink time left, rounded up; 0 = not blinking |
+| 1 | 1 | `tone_output` | output of the last tone asked for since boot, `0xFF` if none |
+| 2 | 1 | `chip` | 0 = RP2040, 1 = RP2350 |
+| 3 | 1 | `chip_rev` | the SDK's `rp2040_chip_version()` (1-3 = B0-B2) or `rp2350_chip_version()` (2 = A2; A3/A4 report what the SDK decodes) |
+| 4 | 4 | `chip_id` | the raw `SYSINFO.CHIP_ID` register |
+| 8 | 16 | `board` | the build's `PICO_BOARD` (`pico`, `pico2`), NUL-padded |
+| 24 | 32 | `hw_rev` | the build's `DSPI_HW_REV` string, NUL-padded, at most 31 characters; empty when the build does not set it |
+
+`hw_rev` is a build-time string: a board build sets it with `-DDSPI_HW_REV="..."`. The firmware cannot sense the board revision itself, so the string is only as right as the build that set it.
+
+### 2.6 `EXT_RESET_INFO` (0x0005)
+
+IN only: why the unit last reset and how long it has been up (`reset_info.h`). The cause registers are latched first thing in `main()`.
+
+**IN** returns `ResetInfo`, 20 bytes, little-endian:
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 1 | `reason` | see the table below |
+| 1 | 1 | `flags` | bit 0 `PREV_UPTIME`: `prev_uptime_s` is valid |
+| 2 | 1 | `hang_count` | the same value as `CoreVregStatus.hang_count` (2.3) |
+| 3 | 1 | `chip` | 0 = RP2040, 1 = RP2350 |
+| 4 | 4 | `uptime_s` | this run's uptime |
+| 8 | 4 | `prev_uptime_s` | how long the run before this reset lasted, in 1 s steps (the core-voltage uptime breadcrumb); 0 when bit 0 is clear |
+| 12 | 4 | `chip_reset` | raw chip reset-cause register at boot: `VREG_AND_CHIP_RESET.CHIP_RESET` (RP2040) or `POWMAN.CHIP_RESET` (RP2350) |
+| 16 | 4 | `watchdog_reason` | raw `WATCHDOG.REASON` at boot (bit 0 timer, bit 1 force); bit 8 set when the SDK marker of our own `watchdog_enable()` was present |
+
+| `reason` | Name | RP2040 | RP2350 |
+|---|---|---|---|
+| 0 | `UNKNOWN` | no known cause bit | no known cause bit |
+| 1 | `POWER_ON` | `HAD_POR`: power-on **or brown-out**; the RP2040 does not tell them apart | `HAD_POR` |
+| 2 | `BROWNOUT` | never | `HAD_BOR` |
+| 3 | `RUN_PIN` | `HAD_RUN` | `HAD_RUN_LOW` |
+| 4 | `WATCHDOG` | our 8 s watchdog fired: a hang (also counted in `hang_count`) | same |
+| 5 | `SOFTWARE` | a requested watchdog reboot: host-requested reboot, the BOOTSEL round trip | same, plus the bootrom starting the app after a UF2 copy, and any other watchdog reset in `CHIP_RESET` |
+| 6 | `DEBUGGER` | `HAD_PSM_RESTART` | `HAD_DP_RESET_REQ`, `HAD_HZD_SYS_RESET_REQ`, `HAD_RESCUE` |
+| 7 | `GLITCH` | never | `HAD_GLITCH_DETECT` |
+
+- **Order:** a set `WATCHDOG.REASON` bit decides first (it is zero after any hardware reset, while the RP2040's `CHIP_RESET` keeps showing the power-on that preceded a watchdog reset). Our own watchdog timeout (bit 8) is `WATCHDOG`, any other watchdog reset `SOFTWARE`. Otherwise the cause bits are taken in the order of the table.
+- **Power-on and brown-out clear the scratch registers**, so `PREV_UPTIME` is clear and `hang_count` starts at 0 after them. After a watchdog or software reset `prev_uptime_s` says how long the previous run lasted.
+- **STM32:** the tree has no STM32 build; the platforms are RP2040 and RP2350.
+- The raw registers are there for diagnosis; a host should show `reason` and keep the raw words for a support report.
 
 ## 3. Transports
 
@@ -125,7 +214,7 @@ A host that sees bit 0 can recognise its own bulk write from the source byte and
 | USB MIDI (`DSPI_USB_MIDI`) | yes; same dispatcher, no special casing | `ERROR` |
 | UART / I2C control interfaces | yes; same dispatcher | `ERROR` |
 
-Notifications are unchanged. Only the pair map sends one, as a `PARAM_CHANGED` for its bulk-parameter offset. `EXT_NOTIFY_FEATURES` only describes notification behaviour; it sends nothing itself.
+The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip event (2.4.1) reaches every notification consumer. `EXT_NOTIFY_FEATURES` only describes notification behaviour; it sends nothing itself.
 
 ## 4. Implementation map
 
@@ -133,9 +222,13 @@ Notifications are unchanged. Only the pair map sends one, as a `PARAM_CHANGED` f
 |---|---|
 | `config.h` | `REQ_EXTENSION`, `EXT_*` IDs |
 | `vendor_commands.c` | `ext_ids[]` (the `EXT_LIST` table), `ext_set_len()`, `ext_handle_set()`, `ext_handle_get()`; the SETUP-stage length check and the status-stage STALL in `tud_vendor_control_xfer_cb` |
-| `notify.h` | `NOTIFY_FEAT_*`, `NOTIFY_FEATURES` (the `EXT_NOTIFY_FEATURES` value) |
+| `notify.h` | `NOTIFY_FEAT_*`, `NOTIFY_FEATURES` (the `EXT_NOTIFY_FEATURES` value), `NOTIFY_EVT_EXT_CLIP` |
+| `notify.c` | `notify_push_clip()`, `notify_clip_service()` (rate limit, merge into an unsent entry) |
+| `config.h` | `CLIP_LATCH()`, used by the metering sites in `audio_pipeline.c` and `pdm_generator.c` |
 | `crossfeed_map.h` | pair-map validation, normalization and encoding |
 | `core_vreg.{c,h}` | core voltage selection, trials, hang accounting |
+| `identify.{c,h}` | identify blink and tone, hardware description; `DSPI_HW_REV` in `CMakeLists.txt` |
+| `reset_info.{c,h}` | reset-cause capture and decoding; `reset_info_capture()` is the first call in `main()` |
 
 **Adding a sub-command:** pick the next free ID (`0x0001`-`0x7FFF` only after agreeing it with Weeb Labs). Add it to `config.h`, to `ext_ids[]` in ascending order and to `ext_set_len()` if it has an OUT form, then add cases to `ext_handle_set()` / `ext_handle_get()` and a row to section 2.
 
@@ -143,3 +236,6 @@ Notifications are unchanged. Only the pair map sends one, as a `PARAM_CHANGED` f
 
 - 2026-11-06: introduced. Replaces the fork's squatted opcodes `0x02` (`REQ_CROSSFEED_PAIR_MAP`), `0x4F` (`REQ_SET_CORE_VREG`) and `0x6F` (`REQ_GET_CORE_VREG`), which are removed with no aliases.
 - 2026-11-06: `0x0003` `EXT_NOTIFY_FEATURES` added (bit 0 `NOTIFY_FEAT_BULK_SOURCE`).
+- 2026-11-12: `EXT_NOTIFY_FEATURES` bit 1 `NOTIFY_FEAT_CLIP_EVENT` and the clip event `0xE0`; fork event IDs `0xE0`-`0xEF`.
+- 2026-11-12: `0x0004` `EXT_IDENTIFY` added.
+- 2026-11-12: `0x0005` `EXT_RESET_INFO` added.
