@@ -379,9 +379,17 @@ class LinkBlock(unittest.TestCase):
         n = self.c.wait_notify(lambda r: r.payload[1] == mc.NOTIFY_EVT_LINK_STATE, 0.5)
         self.assertIn("state=holdover class=L1 reason=LOS", mc.decode_notify(n.payload))
         self.assertEqual(struct.unpack_from("<II", self.ext(mc.EXT_LINK_STATUS).payload, 16), (1, 1))
+        # DIAG v1 (fixup lk): offset 32 trim scan, 40-55 the four bench counters of LK1 8.9.
+        diag = self.ext(mc.EXT_LINK_DIAG).payload
+        self.assertEqual(struct.unpack_from("<bbbBI", diag, 32), (-4, 5, 0, 2, 0x7FE0))   # trims -4..+5 = bits 5..14
+        self.assertEqual(struct.unpack_from("<4I", diag, 40), (3, 1, 2, 0))
+        self.assertEqual(diag[56:], bytes(8))
         self.assertEqual(self.put(mc.EXT_LINK_STATS_RESET, b"\x02"), mc.ST_ERROR)
         self.assertEqual(self.put(mc.EXT_LINK_STATS_RESET, b"\x01"), mc.ST_OK)
         self.assertEqual(struct.unpack_from("<6I", self.ext(mc.EXT_LINK_STATUS).payload, 16), (0,) * 6)
+        diag = self.ext(mc.EXT_LINK_DIAG).payload
+        self.assertEqual(struct.unpack_from("<4I", diag, 40), (0, 0, 0, 0))     # bench counters cleared
+        self.assertEqual(struct.unpack_from("<bbbB", diag, 32), (-4, 5, 0, 2))  # trim scan kept
         # Disabling the link turns it off with reason DISABLED.
         self.assertEqual(self.put(mc.EXT_LINK_CONFIG, bytes([0, 0xFF, 0, 0xFF, 0xFF, 0xFF, 3, 0])), mc.ST_OK)
         n = self.c.wait_notify(lambda r: r.payload[1] == mc.NOTIFY_EVT_LINK_STATE, 0.5)
@@ -421,7 +429,8 @@ class LinkBlock(unittest.TestCase):
         self.assertEqual(self.ext(mc.EXT_APPLY_AT_FRAME).payload[:3], bytes([0, 2, 2]))
         # Invalid arguments and reserved bytes are refused.
         for bad in (req(1_100_000, 9), req(1_100_000, 1, 1), req(1_100_000, 3, 10), req(1_100_000, 4, 0, 1),
-                    req(1_100_000, 5, 9, 10), req(1_100_000, 5, 0, 2048), req(1_100_000, 6, 3),
+                    req(1_100_000, 5, 9, 10), req(1_100_000, 5, 0, 2048),
+                    req(1_100_000, 6, 1), req(1_100_000, 6, 0),       # RATE: superframe path only
                     req(1_100_000, 1)[:12] + b"\x00\x00\x00\x01"):
             self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, bad), mc.ST_ERROR, bad.hex())
 
@@ -441,7 +450,8 @@ class LinkBlock(unittest.TestCase):
         self.assertEqual(got[10:13], bytes(3))          # los mask / usb_alt are IN-only
         for bad in (struct.pack("<HBBBBBBHHBBH", 0x0100, 1, 8, 1, 0, 0, 0xFF, 0, 0, 0, 0, 0),   # link 8 of 8
                     struct.pack("<HBBBBBBHHBBH", 1, 1, 9, 1, 0, 0, 0xFF, 0, 0, 0, 0, 0),        # 9 ch on L1
-                    struct.pack("<HBBBBBBHHBBH", 1, 3, 17, 2, 0, 0, 0xFF, 0, 0, 0, 0, 0),       # 17 ch on L3 96k
+                    struct.pack("<HBBBBBBHHBBH", 1, 3, 19, 2, 0, 0, 0xFF, 0, 0, 0, 0, 0),       # 19 ch on L3 96k
+                    struct.pack("<HBBBBBBHHBBH", 1, 3, 42, 0, 0, 0, 0xFF, 0, 0, 0, 0, 0),       # 42 ch on L3 44.1k
                     struct.pack("<HBBBBBBHHBBH", 1, 1, 8, 1, 4, 0, 0xFF, 0, 0, 0, 0, 0),        # test pattern 4
                     struct.pack("<HBBBBBBHHBBH", 1, 1, 8, 1, 0, 1, 0xFF, 0, 0, 0, 0, 0)):       # slot map 1
             self.assertEqual(self.put(mc.EXT_LINK_TX, bad), mc.ST_ERROR, bad.hex())
@@ -454,6 +464,60 @@ class LinkBlock(unittest.TestCase):
         self.assertEqual(self.put(mc.EXT_LINK_CONFIG, bytes([1, 0xFF, 0, 22, 0xFF, 0xFF, 3, 0])), mc.ST_ERROR)
         self.assertEqual(self.put(mc.EXT_LINK_CONFIG, bytes([1, 0xFF, 0, 0xFF, 0xFF, 0xFF, 3, 0])), mc.ST_OK)
         self.assertEqual(self.ext(mc.EXT_LINK_INFO).payload[0], 4)      # fan-out while its input is enabled
+
+    def test_lk7_capacity_is_link_max_channels(self):
+        # Fixup lk: the fake mirrors LK1's link_max_channels() (link_protocol_spec.md 5.7).
+        self.assertEqual(fd.MAX_CHANNELS, {(1, 0): 8, (2, 0): 19, (3, 0): 41, (1, 1): 8, (2, 1): 18,
+                                           (3, 1): 38, (1, 2): 3, (2, 2): 8, (3, 2): 18})
+        self.client("sender")
+        for cls, rate, c in ((3, 2, 18), (3, 0, 41), (2, 0, 19)):
+            tx = struct.pack("<HBBBBBBHHBBH", 0, cls, c, rate, 0, 0, 0xFF, 0xFF, 0, 0, 0, 0)
+            self.assertEqual(self.put(mc.EXT_LINK_TX, tx), mc.ST_OK, (cls, rate, c))
+
+    def test_lk7_sender_ctrl_msg_schedule(self):
+        # Fixup lk: EXT_LINK_CTRL_MSG follows link_tx_schedule() (LK1 6.4/6.5).
+        self.client("sender")
+        ln = self.dev.link
+        msg = lambda frame, op, arg=0, value=0, flags=0: struct.pack("<QBBhB3x", frame, op, arg, value, flags)
+        ln.frame = 40                                     # next superframe starts at 64
+        self.assertEqual(self.put(mc.EXT_LINK_CTRL_MSG, msg(95, 1)), mc.ST_ERROR)    # < 64 + 32
+        self.assertEqual(self.put(mc.EXT_LINK_CTRL_MSG, msg(96, 1)), mc.ST_OK)
+        self.assertEqual(self.put(mc.EXT_LINK_CTRL_MSG, msg(500, 2)), mc.ST_ERROR)   # one pending: refused
+        self.assertEqual(struct.unpack_from("<QB", self.ext(mc.EXT_LINK_CTRL_MSG).payload, 8), (96, 1))
+        self.assertEqual(self.put(mc.EXT_LINK_CTRL_MSG, msg(0, 0, flags=1)), mc.ST_OK)  # op 0: flags only
+        snap = self.ext(mc.EXT_LINK_CTRL_MSG).payload
+        self.assertEqual((snap[0] & 1, struct.unpack_from("<QB", snap, 8)), (1, (96, 1)))
+        ln.advance(56, self.dev)                           # F = 96: the apply has passed
+        self.assertEqual(struct.unpack_from("<QB", self.ext(mc.EXT_LINK_CTRL_MSG).payload, 8), (0, 0))
+        # RATE: multiple of 32, value 0, current C must fit the new rate (L1 8 ch: 96 kHz fits 3).
+        self.assertEqual(self.put(mc.EXT_LINK_CTRL_MSG, msg(2600, 6, 0)), mc.ST_ERROR)      # not % 32
+        self.assertEqual(self.put(mc.EXT_LINK_CTRL_MSG, msg(2592, 6, 0, 8)), mc.ST_ERROR)   # value != 0
+        self.assertEqual(self.put(mc.EXT_LINK_CTRL_MSG, msg(2592, 6, 2)), mc.ST_ERROR)      # 8 ch > 3
+        self.assertEqual(self.put(mc.EXT_LINK_CTRL_MSG, msg(2592, 6, 3)), mc.ST_ERROR)      # no rate 3
+        self.assertEqual(self.put(mc.EXT_LINK_CTRL_MSG, msg(2592, 6, 0)), mc.ST_OK)         # to 44.1 kHz
+        ln.advance(2592 - 96, self.dev)
+        self.assertEqual(self.ext(mc.EXT_LINK_CTRL_MSG).payload[1], 0)                     # rate code 0 now
+
+    def test_lk7_sender_tx_layout_change(self):
+        # Fixup lk: rate/C changes while running go in-band as RATE; a class change restarts at once.
+        self.client("sender")
+        ln = self.dev.link
+        tx = lambda cls, c, rate=1: struct.pack("<HBBBBBBHHBBH", 0x0001, cls, c, rate, 0, 0, 0xFF, 0xFE, 0, 0, 0, 0)
+        self.assertEqual(self.put(mc.EXT_LINK_TX, tx(2, 8)), mc.ST_OK)        # start: no apply needed
+        self.assertEqual(ln.injected, None)
+        ln.frame = 1000
+        self.assertEqual(self.put(mc.EXT_LINK_TX, tx(2, 16)), mc.ST_OK)       # grow C while running
+        snap = self.ext(mc.EXT_LINK_CTRL_MSG).payload
+        at, op, arg, value = struct.unpack_from("<QBBh", snap, 8)
+        self.assertEqual((op, arg, value, at % 32, at >= 1024 + 2400), (6, 1, 16, 0, True))
+        self.assertEqual((snap[2], self.ext(mc.EXT_LINK_TX).payload[3]), (8, 16))   # old in stream, new in IN
+        self.assertEqual(self.put(mc.EXT_LINK_TX, tx(2, 12)), mc.ST_ERROR)    # apply pending
+        self.assertEqual(self.put(mc.EXT_LINK_CTRL_MSG, struct.pack("<QBBhB3x", at + 320, 1, 0, 0, 0)), mc.ST_ERROR)
+        ln.advance(at - 1000, self.dev)
+        self.assertEqual(self.ext(mc.EXT_LINK_CTRL_MSG).payload[2], 16)       # switched at the target
+        self.assertEqual(self.put(mc.EXT_LINK_TX, tx(3, 16)), mc.ST_OK)       # class change: no RATE
+        snap = self.ext(mc.EXT_LINK_CTRL_MSG).payload
+        self.assertEqual((snap[3], snap[8 + 8]), (3, 0))
 
     def test_lk7_cli(self):
         rc, out = Scripts.run_main(None, mc, ["link", "--fake-link", "receiver"])

@@ -298,18 +298,18 @@ IN only, 52 bytes. On a receiver it describes the link input. On a sender, offse
 | 6 | 1 | `sender_id` | superframe byte 7 |
 | 7 | 1 | `sf_flags` | the superframe's flags byte (byte 2) as last received: bit 0 system mute, bit 1 rate change pending, bit 2 apply pending, bit 3 sender has a live USB stream, bit 4 test pattern, bit 5 sender is slaved |
 | 8 | 8 | `frame` | link frame counter F (u64); valid in states 2 and 3 (in 3 it is extrapolated), 0 otherwise |
-| 16 | 4 | `lock_count` | times the link reached state 2 |
-| 20 | 4 | `loss_count` | times it left state 2 for 1 or 3 |
-| 24 | 4 | `crc8_errors` | frame headers with a bad CRC-8 |
-| 28 | 4 | `crc16_errors` | decoded banks with a bad CRC-16 |
-| 32 | 4 | `bit_slips` | times the comma was not at the expected bit offset |
-| 36 | 4 | `superframe_errors` | superframes with a bad CRC-16 or magic |
+| 16 | 4 | `lock_count` | entries into LOCKED (state 2) |
+| 20 | 4 | `loss_count` | losses from LOCKED (to state 1 or 3); a loss while still searching is not counted |
+| 24 | 4 | `crc8_errors` | bad frame heads, aligned (state 1) and locked: a non-data symbol in the head or a CRC-8 failure |
+| 28 | 4 | `crc16_errors` | failed banks: a non-data symbol in a decoded bank or a CRC-16 failure |
+| 32 | 4 | `bit_slips` | commas found 1-2 bits away from the expected position. A comma that is missing altogether is not a slip; it is a flywheel frame, counted in `EXT_LINK_DIAG` `comma_errors` |
+| 36 | 4 | `superframe_errors` | rejected superframes (`link_protocol_spec.md` 8.6): a complete assembly that fails validity (codes 1-6), the class check (17) or, while aligned, the counter check (18); and, while locked, an assembly still incomplete at index 31 (16) |
 | 40 | 4 | `vcxo_ppm` | f32, the soft VCXO's current correction |
 | 44 | 4 | `phase_error_frames` | f32, the phase error e in frames (SYS2 3.1); 0 unless `EXT_LINK_PHASE.state` is 2 |
 | 48 | 2 | `fill_frames` | output ring fill in frames (the guard term) |
 | 50 | 2 | reserved | 0 |
 
-The counters run from boot or from the last `EXT_LINK_STATS_RESET` and wrap at 2^32.
+The counters are those of `link_protocol_spec.md` 8.9, which defines exactly what each one counts. They run from boot or from the last `EXT_LINK_STATS_RESET` and wrap at 2^32. The four bench counters of 8.9 (`comma_errors`, `counter_errors`, `code_errors`, `idle_errors`) are in `EXT_LINK_DIAG` (2.8.11).
 
 #### 2.8.3 `EXT_LINK_CONFIG` (0x8002)
 
@@ -381,14 +381,14 @@ Receivers only. **OUT**, 16 bytes, queues one operation for link frame `frame`:
 | 3 | `PRESET_LOAD` | slot 0-9 | 0 |
 | 4 | `MASTER_VOLUME` | 0 | dB x 100, -12800..0 |
 | 5 | `OUT_DELAY` | output index | delay in samples, 0..`MAX_DELAY_SAMPLES` - 1 (2047 on RP2350, 1023 on RP2040) |
-| 6 | `RATE` | rate code 0-2 | 0 |
+| 6 | `RATE` | refused here: a receiver follows the rate its superframes describe (`link_protocol_spec.md` 6.5). Only the sender schedules RATE (2.8.8, 2.8.9) | |
 | 7 | `CLICK` | output index | 0: a one-sample full-scale impulse on that output, for the scope (SYS2 3.5) |
 | 8 | `SYNC_PULSE` | 0 | 0: toggles the unit's sync GPIO |
 
-- **When.** The op acts on the samples of link frame `frame`, so it is heard `D_local` frames after that frame arrives, at the same moment on every phase-locked unit. `MUTE`, `UNMUTE`, `MASTER_VOLUME` and `CLICK` act on exactly that sample. `PRESET_LOAD`, `OUT_DELAY` and `RATE` start there and then proceed as their opcodes do (mute, ramp, refill).
+- **When.** The op acts on the samples of link frame `frame`, so it is heard `D_local` frames after that frame arrives, at the same moment on every phase-locked unit. `MUTE`, `UNMUTE`, `MASTER_VOLUME` and `CLICK` act on exactly that sample. `PRESET_LOAD` and `OUT_DELAY` start there and then proceed as their opcodes do (mute, ramp, refill). A `RATE` that arrives in the superframe is not an op of this queue: the receiver switches its layout at the frame boundary (`link_protocol_spec.md` 6.5) and re-plans its dividers as `perform_rate_change` does.
 - **Queue.** At most 4 ops are pending. An op whose frame has already passed is applied at once and reported `late`.
-- **Refused (STALL / `ERROR`):** an unknown `op`, an `arg` or `value` outside the table (unused fields must be 0), a nonzero reserved byte, a full queue, or `EXT_LINK_STATUS.state` other than 2 (without a lock there is no F).
-- **Two delivery paths.** Ops that should reach every unit go through the sender's superframe (`EXT_LINK_CTRL_MSG` OUT on the sender), which has no control-path latency. This sub-command is the per-unit path for values that differ between units.
+- **Refused (STALL / `ERROR`):** an unknown `op`, op 6 `RATE`, an `arg` or `value` outside the table (unused fields must be 0), a nonzero reserved byte, a full queue, or `EXT_LINK_STATUS.state` other than 2 (without a lock there is no F).
+- **Two delivery paths.** Ops that should reach every unit (and `RATE`, which only exists there) go through the sender's superframe (`EXT_LINK_CTRL_MSG` OUT on the sender), which has no control-path latency. This sub-command is the per-unit path for values that differ between units.
 
 **IN**, 16 bytes: `u8 pending` (ops queued), `u8 last_op`, `u8 last_result` (0 applied, 1 late, 2 cancelled, 3 refused at apply time, for example an empty preset slot), `u8` reserved, `u64 last_frame` (the target frame of the last op), `u32` reserved. All zero until the first op completes.
 
@@ -402,7 +402,7 @@ Sender builds only. IN / OUT, 16 bytes.
 |---|---|---|---|---|
 | 0 | 2 | `link_enable` | bit n = link output n sends (bits at or above `max_links` must be 0) | 0 |
 | 2 | 1 | `class` | 1-3, must be in `class_mask` | 1 |
-| 3 | 1 | `channels` | C, 1..the class's limit at the rate: 48 / 44.1 kHz L1 8, L2 18, L3 38; 96 kHz L1 3, L2 8, L3 16 (SYS2 2.2) | 8 |
+| 3 | 1 | `channels` | C, 1..`link_max_channels(class, rate_code)`, the protocol limit of `link_protocol_spec.md` 5.7 (the only capacity table: for example L3 at 96 kHz takes 18, L1/L2/L3 at 44.1 kHz take 8/19/41) | 8 |
 | 4 | 1 | `rate_code` | 0 = 44.1, 1 = 48, 2 = 96 kHz; normally follows the USB stream, and a change is announced with apply op `RATE` | 1 |
 | 5 | 1 | `test_pattern` | 0 audio, 1 PRBS-7 payload, 2 idle only, 3 1 kHz tone on all slots | 0 |
 | 6 | 1 | `slot_map_id` | 0 identity (USB channel i to slot i); others reserved | 0 |
@@ -413,13 +413,21 @@ Sender builds only. IN / OUT, 16 bytes.
 | 13 | 1 | `flags` | bit 0 system mute (superframe flag bit 0); bits 1-7 reserved, 0 | 0 |
 | 14 | 2 | reserved | 0 | 0 |
 
-A change to `class`, `channels` or `rate_code` while links run takes effect at a frame boundary that the sender announces in the superframe. Receivers re-detect the class or re-plan their dividers, as in SYS2 3.3.
+- **`class` change.** Not announced in-band (the protocol has no op for it, because it changes the line rate itself). While links run, the sender restarts every link output at the new line rate. The receivers lose lock (`0xE1`), re-detect the class and lock again. That is a dropout of tens of milliseconds, so a host changes the class only with the system muted.
+- **`rate_code` or `channels` change.** Carried in-band: while links run, the sender schedules apply op `RATE` at the first superframe boundary (a multiple of 32) at least 2400 frames (50 ms at 48 kHz) ahead, with `value` = the new C, or 0 when C is unchanged (`link_protocol_spec.md` 6.5). Receivers switch at that frame. The IN form shows the requested values at once; the superframe (`EXT_LINK_CTRL_MSG` IN) shows the old ones until the switch.
+- **Refused (STALL / `ERROR`):** `channels` above `link_max_channels` for the class and rate, a `class` outside `class_mask`, `rate_code` above 2, `test_pattern` above 3, a nonzero `slot_map_id`, enable or TX_DISABLE bits at or above `max_links`, a bad `sync_pin`, undefined flag bits or a nonzero reserved byte. Also refused: a `rate_code` or `channels` change while links run and an apply is already pending (the sender carries one apply at a time; wait for `EXT_LINK_CTRL_MSG` IN to show it gone).
 
 #### 2.8.9 `EXT_LINK_CTRL_MSG` (0x8008)
 
-**OUT** (sender only), 16 bytes: `u64 frame`, `u8 op`, `u8 arg`, `i16 value`, `u8 system_flags` (bit 0 system mute; other bits 0), `u8[3]` reserved. The sender repeats the op in superframe bytes 16-27 until frame `frame` has passed (SYS2 2.5, 3.4). Ops and arguments are those of 2.8.7. Op 0 here means "no apply" and clears a pending injection. The same refusals apply, except that the sender does not need a lock.
+**OUT** (sender only), 16 bytes: `u64 frame`, `u8 op`, `u8 arg`, `i16 value`, `u8 system_flags` (bit 0 system mute; other bits 0), `u8[3]` reserved. It schedules one apply for every unit on the link, following `link_protocol_spec.md` 6.4 and 6.5 (the reference is `link_tx_schedule()`):
 
-**IN** (every build), 24 bytes: a snapshot of the last valid superframe received (receiver) or sent (sender):
+- **Carriage.** The op travels in superframe bytes 16-27 of every superframe that *completes* before the target, that is when `superframe start + 32 <= frame`. The pending apply ends once the sender's F reaches `frame`.
+- **Lead.** `frame` must be at least `next superframe start + 32`, so that at least one full superframe carries it, where the next superframe start is the sender's current F rounded up to a multiple of 32. Use far more lead in practice (SYS2 3.3 uses 2400 frames) so that one or two corrupted superframes cost nothing.
+- **One at a time.** While an apply is pending, a second one is refused. It is not replaced, and there is no cancel. Op 0 ("none") schedules nothing: the write only sets `system_flags` and leaves a pending apply alone.
+- **Ops.** 1-5, 7 and 8 take the arguments of 2.8.7. Op 6 `RATE`: `arg` = the new rate code, `value` must be 0 (hosts change only the rate; the sender fills in C itself when `EXT_LINK_TX.channels` changes), `frame` must be a multiple of 32, and the current C must fit the new rate (`link_max_channels(class, arg)`).
+- **Refused (STALL / `ERROR`):** an unknown op, arguments outside those rules, too little lead, a RATE off a superframe boundary or one that does not fit, a pending apply, undefined `system_flags` bits or a nonzero reserved byte. The sender needs no lock.
+
+**IN** (every build), 24 bytes. On a receiver it is a snapshot of the last valid superframe received. On a sender it is the superframe content it is sending now, so a pending apply shows here as soon as it is accepted, and bytes 16-27 read 0 once the apply has ended:
 
 | Offset | Size | Field |
 |---|---|---|
@@ -432,11 +440,11 @@ All zero before the first superframe.
 
 #### 2.8.10 `EXT_LINK_STATS_RESET` (0x8009)
 
-OUT only, 1 byte: 1 clears the counters of `EXT_LINK_STATUS` (offsets 16-39) and the `EXT_LINK_DIAG` histogram. Any other value is refused. Lock state, F and configuration are untouched.
+OUT only, 1 byte: 1 clears the counters of `EXT_LINK_STATUS` (offsets 16-39) and the bench counters of `EXT_LINK_DIAG` (offsets 40-55). Any other value is refused. Lock state, F, the trim-scan result and configuration are untouched.
 
 #### 2.8.11 `EXT_LINK_DIAG` (0x800A)
 
-IN only, 64 bytes, for bench tools (`link_check.py`, SYS2 8a). Byte 0 is a layout version, and the rest may change when it changes, so apps must not parse it. Version 1:
+IN only, 64 bytes, for bench tools (`link_check.py`, SYS2 8a). Byte 0 is a layout version, and the rest may change when it changes, so apps must not parse it. The reply cannot grow beyond 64 bytes (the firmware's response buffer). The receiver's PIO program emits only bits, so there is no sampling-phase histogram. Instead the trim scan at link-up says how wide the clean sampling window is: a healthy link has a clean range centred on 0 within one step. Offsets 40-55 are the four bench counters of `link_protocol_spec.md` 8.9. Version 1:
 
 | Offset | Size | Field |
 |---|---|---|
@@ -445,7 +453,16 @@ IN only, 64 bytes, for bench tools (`link_check.py`, SYS2 8a). Byte 0 is a layou
 | 2 | 2 | reserved |
 | 4 | 12 | f32 servo terms: `ppm_ff` (rate feed-forward), `ppm_phase` (Kp x e), `integral` |
 | 16 | 16 | u32 RX ring write position (bytes), parser read position (bytes), output DMA words consumed, RX DMA transfer count |
-| 32 | 32 | u32[8] sampling-phase histogram (where in the bit cell the receiver re-phased; centred = healthy) |
+| 32 | 1 | i8 `trim_lo`: lowest clean sampling trim of the last link-up scan, -9..+9 (one step moves the sampling window 3.26 ns; LK2) |
+| 33 | 1 | i8 `trim_hi`: highest clean trim |
+| 34 | 1 | i8 `trim_used`: the trim in use |
+| 35 | 1 | u8 `scan_state`: 0 no scan, 1 running, 2 done, 3 done but no trim was clean |
+| 36 | 4 | u32 `clean_mask`: bit i set = trim i - 9 was clean |
+| 40 | 4 | u32 `comma_errors`: flywheel frames (a comma missing where expected) |
+| 44 | 4 | u32 `counter_errors`: HDR mismatches and F corrections by a superframe |
+| 48 | 4 | u32 `code_errors`: non-data symbols in heads and decoded banks |
+| 52 | 4 | u32 `idle_errors`: non-idle padding symbols |
+| 56 | 8 | reserved |
 
 #### 2.8.12 Link events `0xE1`, `0xE2`
 
@@ -461,7 +478,7 @@ Both events are v2 packets of 12 bytes. They are sent on every notification cons
 | 3 | 1 | `seq` |
 | 4 | 1 | `state` (as `EXT_LINK_STATUS.state`) |
 | 5 | 1 | `class` (0 unknown) |
-| 6 | 1 | `reason`: 0 `NONE`, 1 `LOCKED` (anchored and playing), 2 `LOS` (the LOS pin), 3 `HEADER_ERRORS` (3 consecutive bad headers), 4 `COMMA_LOST`, 5 `REANCHOR` (phase error beyond 0.5 frame after a loss, or a new `EXT_LINK_PHASE`), 6 `VCXO_LIMIT` (VCXO authority exceeded), 7 `DISABLED` (`enable` cleared or the input source changed) |
+| 6 | 1 | `reason`: 0 `NONE`, 1 `LOCKED` (anchored and playing), 2 `LOS` (the LOS pin), 3 `FRAME_ERRORS` (loss after 3 consecutive bad heads or failed frames, any mix, `link_protocol_spec.md` 8.8), 4 `COMMA_LOST` (no comma in reach while aligned, or all three failed frames were flywheel frames), 5 `REANCHOR` (phase error beyond 0.5 frame after a loss, or a new `EXT_LINK_PHASE`), 6 `VCXO_LIMIT` (VCXO authority exceeded), 7 `DISABLED` (`enable` cleared or the input source changed) |
 | 7 | 1 | reserved 0 |
 | 8 | 4 | F, low 32 bits (u32 LE), at the transition |
 
@@ -530,4 +547,5 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 - 2026-11-12: `0x0004` `EXT_IDENTIFY` added.
 - 2026-11-12: `0x0005` `EXT_RESET_INFO` added.
 - 2026-11-12: `0x0006` `EXT_FIRMWARE_FIXES` added (bit 0 `FW_FIX_BULK_DB_POWF`).
+- 2026-11-13: link block aligned with `link_protocol_spec.md` (review lk): counter definitions, `EXT_LINK_DIAG` offsets 32-63 (trim scan and bench counters instead of a histogram), per-unit `RATE` refused, `EXT_LINK_CTRL_MSG` scheduling rules, capacity from `link_max_channels()`, `class` changes not announced in-band, 0xE1 reason 3 renamed `FRAME_ERRORS`.
 - 2026-11-12: link block `0x8000`-`0x800A` specified (WP LK7, SYS2 5.3), with `EXT_NOTIFY_FEATURES` bits 2 and 3 and events `0xE1` / `0xE2`; `0x8000`-`0x80FF` becomes the fork's link range. No firmware implements it yet.

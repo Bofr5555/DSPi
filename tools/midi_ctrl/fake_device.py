@@ -54,8 +54,13 @@ LINK_FEAT_RX = 0x23                     # PHASE_LOCK | APPLY_AT_FRAME | LOS_PIN
 LINK_FEAT_TX = 0x38                     # FAN_OUT | TEST_PATTERNS | LOS_PIN
 D_LOCAL_MIN, D_LOCAL_MAX = 112, 1024    # 1 ms latency option (SYS2 3.2)
 APPLY_QUEUE = 4
-MAX_CHANNELS = {(1, 1): 8, (2, 1): 18, (3, 1): 38, (1, 2): 3, (2, 2): 8, (3, 2): 16}  # (class, rate) -> C
-MAX_CHANNELS.update({(k, 0): v for (k, r), v in list(MAX_CHANNELS.items()) if r == 1})
+# (class, rate code) -> C: a copy of link_max_channels() (link_protocol_spec.md 5.7, the only
+# capacity table); keep it in step with firmware/DSPi/link/link_codec.c.
+MAX_CHANNELS = {(1, 0): 8, (2, 0): 19, (3, 0): 41, (1, 1): 8, (2, 1): 18, (3, 1): 38,
+                (1, 2): 3, (2, 2): 8, (3, 2): 18}
+SF_LEN = 32                             # frames per superframe
+RATE_LEAD = 2400                        # frames of lead for a RATE the sender schedules itself
+OP_RATE = 6
 
 
 def link_pin_ok(p: int) -> bool:
@@ -80,11 +85,14 @@ class FakeLink:
         self.frame = 0
         self.sf_flags = 0
         self.counters = [0] * 6         # lock, loss, crc8, crc16, bit_slip, superframe
+        self.bench = [3, 1, 2, 0]       # DIAG: comma, counter, code, idle errors
         self.vcxo_ppm, self.phase_error, self.fill = 0.0, 0.0, 0
         self.queue = []                 # pending (frame, op, arg, value)
         self.last = (0, 0, 0)           # (op, result, frame)
         self.tx = bytearray(struct.pack("<HBBBBBBHHBBH", 0, 1, 8, 1, 0, 0, 0xFF, 0x00FF, 0, 0, 0, 0))
-        self.injected = None            # sender: last CTRL_MSG apply
+        self.injected = None            # sender: the pending superframe apply (frame, op, arg, value)
+        self.tx_layout = (1, 1, 8)      # sender: (class, rate, C) the stream carries now
+        self.tx_pending = None          # sender: the layout its own RATE switches to
 
     @property
     def role(self) -> int:
@@ -123,14 +131,16 @@ class FakeLink:
         # superframe bytes 2-7, 2 reserved, bytes 16-27, u32 F_low32 of its first frame
         if self.state == 0 and not self.sender:
             return bytes(24)
-        sf_frame = self.frame & ~31
+        sf_frame = self.frame & ~(SF_LEN - 1)
         target, op, arg, value = self.injected or (0, 0, 0, 0)
-        return (struct.pack("<BBBBBB", self.sf_flags, self.rate, self.chans, self.cls, self.hops, 0x5A)
+        cls, rate, chans = self.tx_layout if self.sender else (self.cls, self.rate, self.chans)
+        return (struct.pack("<BBBBBB", self.sf_flags, rate, chans, cls, self.hops, 0x5A)
                 + bytes(2) + struct.pack("<QBBh", target, op, arg, value) + struct.pack("<I", sf_frame & 0xFFFFFFFF))
 
     def diag(self) -> bytes:
+        # v1: offset 32 = trim scan (lo, hi, used, scan_state, clean_mask), 40-55 bench counters
         return (struct.pack("<BBH3f4I", 1, 7, 0, self.vcxo_ppm, 0.0, 0.0, 4096, 3072, 8192, 1 << 20)
-                + struct.pack("<8I", 0, 0, 3, 997, 1012, 4, 0, 0))
+                + struct.pack("<bbbBI4I8x", -4, 5, 0, 2, 0x3FF << 5, *self.bench))
 
     def get(self, sub: int) -> bytes | None:
         return {0x8000: self.info, 0x8001: self.status, 0x8002: lambda: bytes(self.config),
@@ -147,6 +157,7 @@ class FakeLink:
         return self.SET_LEN.get(sub)
 
     def _apply_ok(self, op: int, arg: int, value: int) -> bool:
+        """Arguments of ops 1-5, 7, 8 (2.8.7); RATE is checked by its callers."""
         if op in (1, 2, 8):
             return arg == 0 and value == 0
         if op == 3:
@@ -155,8 +166,6 @@ class FakeLink:
             return arg == 0 and -12800 <= value <= 0
         if op == 5:
             return arg < NUM_OUTPUTS and 0 <= value < MAX_DELAY_SAMPLES
-        if op == 6:
-            return arg <= 2 and value == 0
         if op == 7:
             return arg < NUM_OUTPUTS and value == 0
         return False
@@ -208,29 +217,65 @@ class FakeLink:
             if (mask >> 8 or not 1 <= cls <= 3 or rate > 2 or not 1 <= chans <= MAX_CHANNELS[(cls, rate)]
                     or test > 3 or smap or not link_pin_ok(sync) or txdis >> 8 or flags & ~1 or res):
                 return False
+            running = struct.unpack_from("<H", self.tx)[0] != 0
+            old_cls, old_rate, old_chans = self.tx_layout
+            if running and (rate, chans) != (old_rate, old_chans) and cls == old_cls:
+                if self.injected:
+                    return False                   # one apply at a time
+                at = (self._next_sf() + RATE_LEAD + SF_LEN - 1) & ~(SF_LEN - 1)
+                self.injected = (at, OP_RATE, rate, chans if chans != old_chans else 0)
+                self.tx_pending = (cls, rate, chans)
+            else:
+                # not running, or a class change: the outputs (re)start with the new layout at once
+                self.tx_layout = (cls, rate, chans)
             keep = self.tx[10:13]                  # IN-only: los mask, usb_alt
             self.tx[:] = p
             self.tx[10:13] = keep
             return True
         if sub == 0x8008:
+            # link_tx_schedule(): one pending apply, a full superframe of lead,
+            # RATE on a superframe boundary with value 0 and a layout that fits.
             frame, op, arg, value, sysflags = struct.unpack_from("<QBBhB", p)
-            if op > 8 or (op and not self._apply_ok(op, arg, value)) or sysflags & ~1 or any(p[13:]):
+            if op > 8 or sysflags & ~1 or any(p[13:]):
                 return False
-            self.injected = (frame, op, arg, value)
+            if op:
+                cls, _rate, chans = self.tx_layout
+                if op == OP_RATE:
+                    ok = arg <= 2 and value == 0 and frame % SF_LEN == 0 and chans <= MAX_CHANNELS[(cls, arg)]
+                else:
+                    ok = self._apply_ok(op, arg, value)
+                if not ok or self.injected or frame < self._next_sf() + SF_LEN:
+                    return False
+                self.injected = (frame, op, arg, value)
             self.sf_flags = (self.sf_flags & ~1) | sysflags
             return True
         if sub == 0x8009:
             if p[0] != 1:
                 return False
             self.counters = [0] * 6
+            self.bench = [0] * 4
             return True
         return False
 
+    def _next_sf(self) -> int:
+        return (self.frame + SF_LEN - 1) & ~(SF_LEN - 1)
+
     # -- model driving (tests) -------------------------------------------------
     def advance(self, frames: int, dev: "FakeDevice") -> None:
-        """Move F forward; due ops apply in frame order (late if already past when queued)."""
+        """Move F forward; due ops apply in frame order (late if already past when queued).
+
+        Sender: the pending superframe apply ends when F reaches its frame; a
+        RATE the sender scheduled itself switches the layout there.
+        """
         late = [q for q in self.queue if q[0] < self.frame]
         self.frame += frames
+        if self.injected and self.frame >= self.injected[0]:
+            if self.injected[1] == OP_RATE and self.tx_pending:
+                self.tx_layout, self.tx_pending = self.tx_pending, None
+            elif self.injected[1] == OP_RATE:
+                cls, _rate, chans = self.tx_layout
+                self.tx_layout = (cls, self.injected[2], chans)
+            self.injected = None
         due = sorted((q for q in self.queue if q[0] <= self.frame), key=lambda q: q[0])
         for q in due:
             self.queue.remove(q)

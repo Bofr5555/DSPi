@@ -120,7 +120,7 @@ NOTIFY_EVT_APPLY_RESULT = 0xE2
 LINK_ROLES = {0: "none", 1: "receiver", 2: "sender", 3: "repeater", 4: "fan-out"}
 LINK_STATES = {0: "off", 1: "searching", 2: "locked", 3: "holdover"}
 LINK_PHASE_STATES = {0: "free", 1: "anchoring", 2: "locked", 3: "re-anchor pending"}
-LINK_REASONS = {0: "NONE", 1: "LOCKED", 2: "LOS", 3: "HEADER_ERRORS", 4: "COMMA_LOST",
+LINK_REASONS = {0: "NONE", 1: "LOCKED", 2: "LOS", 3: "FRAME_ERRORS", 4: "COMMA_LOST",
                 5: "REANCHOR", 6: "VCXO_LIMIT", 7: "DISABLED"}
 LINK_FEATURES = ((1 << 0, "PHASE_LOCK"), (1 << 1, "APPLY_AT_FRAME"), (1 << 2, "REPEATER"),
                  (1 << 3, "FAN_OUT"), (1 << 4, "TEST_PATTERNS"), (1 << 5, "LOS_PIN"))
