@@ -62,6 +62,7 @@
 volatile AudioState audio_state = { .freq = 44100 };
 volatile bool bypass_master_eq = false;
 volatile SystemStatusPacket global_status = {0};
+volatile uint32_t clip_notify_latch = 0;   // see CLIP_LATCH (config.h)
 
 volatile bool eq_update_pending = false;
 volatile EqParamPacket pending_packet;

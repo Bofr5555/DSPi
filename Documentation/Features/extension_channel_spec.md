@@ -1,6 +1,6 @@
 # Extension Channel (`REQ_EXTENSION`, 0x00)
 
-*Last updated: 2026-11-06*
+*Last updated: 2026-11-12*
 *Status: implemented on the bofr fork, HW-untested*
 *Platforms: RP2040 + RP2350*
 
@@ -113,9 +113,32 @@ IN only: a `uint32` (little-endian) of flags that describe how the firmware fill
 | Bit | Name | Meaning when set |
 |---|---|---|
 | 0 | `NOTIFY_FEAT_BULK_SOURCE` | A bulk SET's `BULK_INVALIDATED` carries the SET's dispatch source (`HOST_SET` for USB vendor, `UART`, `I2C`, `MIDI`) instead of `BULK_SET`. An invalidation merged from causes with different sources carries `UNKNOWN`. A pending invalidation absorbs a new one only while nothing is queued after it. See `notification_protocol_v2_spec.md` §3.5.1. |
-| 1-31 | reserved | zero |
+| 1 | `NOTIFY_FEAT_CLIP_EVENT` | The device sends `NOTIFY_EVT_EXT_CLIP` (`0xE0`) when a clip flag sets (section 2.4.1). |
+| 2-31 | reserved | zero |
 
 A host that sees bit 0 can recognise its own bulk write from the source byte and drop the time-window echo heuristic it needs for older firmware.
+
+**Fork event IDs.** Event IDs `0xE0`-`0xEF` are the fork's, taken from the top of the discrete range because upstream assigns IDs upward from `0x01`. Each one is announced by a bit here, and a host decodes it only when that bit is set, so a later upstream use of the same ID on stock firmware cannot be misread.
+
+#### 2.4.1 `NOTIFY_EVT_EXT_CLIP` (0xE0)
+
+Sent on every notification consumer (USB EP 0x83, UART, USB MIDI) when one or more clip flags set. 12 bytes:
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 1 | `version` | 2 |
+| 1 | 1 | `event_id` | `0xE0` |
+| 2 | 1 | `flags` | 0 |
+| 3 | 1 | `seq` | the v2 sequence number |
+| 4 | 1 | `channel` | lowest channel in `mask` |
+| 5 | 1 | `count` | number of channels in `mask` |
+| 6 | 2 | reserved | zero |
+| 8 | 4 | `mask` | uint32 LE, the channels that clipped since the previous clip event |
+
+- **Bit space:** the same as the polled clip flags (`REQ_CLEAR_CLIPS`, `REQ_GET_STATUS` 9): inputs first, then outputs (`CH_OUT_1` = `NUM_INPUT_CHANNELS`), the PDM sub last. RP2040 has 7 channels (2 in + 5 out), RP2350 17 (8 in + 9 out).
+- **Rate limit:** at most one event per 250 ms (`NOTIFY_CLIP_MIN_INTERVAL_MS`). Clips in between collect into the next event. A sustained clip therefore gives one event every 250 ms, and if no consumer drains the endpoint the newest unsent clip event absorbs the new channels instead of queueing more, so a clip storm cannot fill the ring.
+- **Polling is unchanged.** The event has its own latch, set by the same metering code. The polled flags stay sticky and are still cleared only by `REQ_CLEAR_CLIPS`; a clear does not affect the event, and the event does not clear the flags.
+- **Precision:** the latch is taken from the main loop. A clip on a core-1 output in the few cycles between the load and the store of that take is lost for its block; a clip that lasts longer than one audio block is always reported.
 
 ## 3. Transports
 
@@ -125,7 +148,7 @@ A host that sees bit 0 can recognise its own bulk write from the source byte and
 | USB MIDI (`DSPI_USB_MIDI`) | yes; same dispatcher, no special casing | `ERROR` |
 | UART / I2C control interfaces | yes; same dispatcher | `ERROR` |
 
-Notifications are unchanged. Only the pair map sends one, as a `PARAM_CHANGED` for its bulk-parameter offset. `EXT_NOTIFY_FEATURES` only describes notification behaviour; it sends nothing itself.
+The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip event (2.4.1) reaches every notification consumer. `EXT_NOTIFY_FEATURES` only describes notification behaviour; it sends nothing itself.
 
 ## 4. Implementation map
 
@@ -133,7 +156,9 @@ Notifications are unchanged. Only the pair map sends one, as a `PARAM_CHANGED` f
 |---|---|
 | `config.h` | `REQ_EXTENSION`, `EXT_*` IDs |
 | `vendor_commands.c` | `ext_ids[]` (the `EXT_LIST` table), `ext_set_len()`, `ext_handle_set()`, `ext_handle_get()`; the SETUP-stage length check and the status-stage STALL in `tud_vendor_control_xfer_cb` |
-| `notify.h` | `NOTIFY_FEAT_*`, `NOTIFY_FEATURES` (the `EXT_NOTIFY_FEATURES` value) |
+| `notify.h` | `NOTIFY_FEAT_*`, `NOTIFY_FEATURES` (the `EXT_NOTIFY_FEATURES` value), `NOTIFY_EVT_EXT_CLIP` |
+| `notify.c` | `notify_push_clip()`, `notify_clip_service()` (rate limit, merge into an unsent entry) |
+| `config.h` | `CLIP_LATCH()`, used by the metering sites in `audio_pipeline.c` and `pdm_generator.c` |
 | `crossfeed_map.h` | pair-map validation, normalization and encoding |
 | `core_vreg.{c,h}` | core voltage selection, trials, hang accounting |
 
@@ -143,3 +168,4 @@ Notifications are unchanged. Only the pair map sends one, as a `PARAM_CHANGED` f
 
 - 2026-11-06: introduced. Replaces the fork's squatted opcodes `0x02` (`REQ_CROSSFEED_PAIR_MAP`), `0x4F` (`REQ_SET_CORE_VREG`) and `0x6F` (`REQ_GET_CORE_VREG`), which are removed with no aliases.
 - 2026-11-06: `0x0003` `EXT_NOTIFY_FEATURES` added (bit 0 `NOTIFY_FEAT_BULK_SOURCE`).
+- 2026-11-12: `EXT_NOTIFY_FEATURES` bit 1 `NOTIFY_FEAT_CLIP_EVENT` and the clip event `0xE0`; fork event IDs `0xE0`-`0xEF`.

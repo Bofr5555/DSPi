@@ -695,7 +695,7 @@ static void __not_in_flash_func(eq_worker_loop)() {
                 if (a > peak) peak = a;
             }
             global_status.peaks[CH_OUT_1 + out] = (uint16_t)(fminf(1.0f, peak) * 32767.0f);
-            if (peak > CLIP_THRESH_F) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
+            if (peak > CLIP_THRESH_F) CLIP_LATCH(1u << (CH_OUT_1 + out));
             rta_tap(RTA_TAP_OUTPUT, (uint8_t)out, buf_out[out], sample_count);
         }
 
@@ -909,7 +909,7 @@ static void __not_in_flash_func(eq_worker_loop)() {
                 if (a > peak) peak = a;
             }
             global_status.peaks[CH_OUT_1 + out] = peak_to_meter_q28(peak);
-            if (peak > CLIP_THRESH_Q28) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
+            if (peak > CLIP_THRESH_Q28) CLIP_LATCH(1u << (CH_OUT_1 + out));
             rta_tap(RTA_TAP_OUTPUT, (uint8_t)out, buf_out[out], sample_count);
         }
 

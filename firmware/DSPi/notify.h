@@ -101,6 +101,22 @@
 // 0, 0, name(32)]
 #define NOTIFY_EVT_DEVICE_NAME       0x10
 
+// 0xE0..0xEF: fork extension events (extension_channel_spec.md, section 2.4).
+// Upstream assigns event IDs upward from 0x01, so the fork takes IDs from the
+// top of the discrete range.  Each one is announced by an EXT_NOTIFY_FEATURES
+// bit; a host decodes it only when that bit is set.
+
+// Clip: one or more clip flags set since the previous clip event (bit space
+// of REQ_CLEAR_CLIPS / GET_STATUS 9: inputs, then outputs).  At most one
+// event per NOTIFY_CLIP_MIN_INTERVAL_MS; clips in between are merged into
+// the next one, and an unsent clip event absorbs new clips in place.  The
+// polled clip flags are unaffected (still sticky, still cleared on read).
+// Packet (12 bytes): [ver=2, evt=0xE0, flags=0, seq, channel, count, 0, 0,
+// mask_LE32]; channel = lowest set bit of mask, count = bits set in mask.
+// Announced by NOTIFY_FEAT_CLIP_EVENT.
+#define NOTIFY_EVT_EXT_CLIP          0xE0
+#define NOTIFY_CLIP_MIN_INTERVAL_MS  250
+
 // v2 protocol version byte (first byte of every v2 packet)
 #define NOTIFY_V2_VERSION            0x02
 
@@ -133,7 +149,11 @@ typedef enum {
 // always BULK_SET.
 #define NOTIFY_FEAT_BULK_SOURCE      (1u << 0)
 
-#define NOTIFY_FEATURES              (NOTIFY_FEAT_BULK_SOURCE)
+// NOTIFY_EVT_EXT_CLIP (0xE0) is sent when a clip flag sets, rate-limited to
+// one event per NOTIFY_CLIP_MIN_INTERVAL_MS.
+#define NOTIFY_FEAT_CLIP_EVENT       (1u << 1)
+
+#define NOTIFY_FEATURES              (NOTIFY_FEAT_BULK_SOURCE | NOTIFY_FEAT_CLIP_EVENT)
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -209,6 +229,15 @@ void notify_push_input_source_name(uint8_t source_id, const char *name, ParamSou
 // Board name stored (NOTIFY_EVT_DEVICE_NAME).  name is the 32-byte stored
 // entry.  Safe from any dispatch context.
 void notify_push_device_name(const char *name, ParamSource src);
+
+// Clip event (NOTIFY_EVT_EXT_CLIP).  push merges mask into the newest entry
+// when that is a clip event no consumer has taken yet, else appends one.
+void notify_push_clip(uint32_t mask);
+
+// Main loop: takes the clip latch (CLIP_LATCH, config.h) and pushes one clip
+// event when anything clipped and at least NOTIFY_CLIP_MIN_INTERVAL_MS have
+// passed since the last one.  now_ms is milliseconds since boot.
+void notify_clip_service(uint32_t now_ms);
 
 // ---------------------------------------------------------------------------
 // Consumers

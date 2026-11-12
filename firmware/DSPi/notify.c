@@ -101,6 +101,10 @@ static volatile uint8_t notify_current_source = PARAM_SRC_UNKNOWN;
 static volatile uint8_t notify_bulk_depth = 0;
 static volatile uint8_t notify_bulk_source = PARAM_SRC_UNKNOWN;
 
+// Clip event rate limit (notify_clip_service)
+static uint32_t clip_last_push_ms;
+static bool     clip_pushed_once;
+
 // Diagnostics
 volatile uint32_t notify_consumer_drops[NOTIFY_CONSUMER_COUNT];
 volatile uint32_t notify_overflow_count = 0;
@@ -198,6 +202,7 @@ void notify_init(void) {
     notify_bulk_source = PARAM_SRC_UNKNOWN;
     notify_overflow_count = 0;
     notify_drops_count = 0;
+    clip_pushed_once = false;
     bulk_params_collect(&param_shadow);
 }
 
@@ -467,6 +472,47 @@ void notify_push_device_name(const char *name, ParamSource src) {
     memcpy(&e.value[1], name, NOTIFY_INPUT_SOURCE_NAME_LEN);
     ring_push_locked(&e);
     restore_interrupts(flags);
+}
+
+// Merging into an unsent clip entry keeps a sustained clip from filling the
+// ring while no host drains it: the newest entry absorbs the new channels.
+void notify_push_clip(uint32_t mask) {
+    if (mask == 0) return;
+    uint32_t flags = save_and_disable_interrupts();
+    if (ring_coalesce_start_locked() != notify_head) {
+        NotifyRingEntry *last = &notify_ring[(uint8_t)(notify_head - 1) & NOTIFY_RING_MASK];
+        if (last->event_id == NOTIFY_EVT_EXT_CLIP) {
+            uint32_t m;
+            memcpy(&m, last->value, 4);
+            m |= mask;
+            memcpy(last->value, &m, 4);
+            restore_interrupts(flags);
+            return;
+        }
+    }
+    NotifyRingEntry e = {
+        .event_id = NOTIFY_EVT_EXT_CLIP,
+        .source   = PARAM_SRC_INTERNAL,
+    };
+    memcpy(e.value, &mask, 4);
+    ring_push_locked(&e);
+    restore_interrupts(flags);
+}
+
+void notify_clip_service(uint32_t now_ms) {
+    if (clip_notify_latch == 0) return;
+    if (clip_pushed_once && (uint32_t)(now_ms - clip_last_push_ms) < NOTIFY_CLIP_MIN_INTERVAL_MS)
+        return;   // keep collecting; the latch holds the channels
+    // Take and clear the latch.  Interrupts off covers the core-0 audio IRQ;
+    // a core-1 meter store landing between the load and the store is lost
+    // for this block only and comes back with the next clipping block.
+    uint32_t flags = save_and_disable_interrupts();
+    uint32_t mask = clip_notify_latch;
+    clip_notify_latch = 0;
+    restore_interrupts(flags);
+    notify_push_clip(mask);
+    clip_last_push_ms = now_ms;
+    clip_pushed_once = true;
 }
 
 void notify_push_bulk_invalidated(ParamSource src) {
@@ -746,6 +792,33 @@ uint16_t notify_peek_next_for(NotifyConsumer c, uint8_t *out_buf, uint16_t max_l
             out_buf[7] = 0;
             memcpy(&out_buf[8], &e.value[1], NOTIFY_INPUT_SOURCE_NAME_LEN);
             return 8 + NOTIFY_INPUT_SOURCE_NAME_LEN;
+        }
+
+        case NOTIFY_EVT_EXT_CLIP: {
+            // 12 bytes: lowest clipped channel, channel count, pad, pad,
+            // clip mask LE.
+            if (max_len < 12) return 0;
+            // Plain loop, not __builtin_ctz/popcount: those are libgcc
+            // calls into flash and this formatter is RAM-resident.
+            uint32_t m;
+            memcpy(&m, e.value, 4);
+            uint8_t first = 0xFF, count = 0;
+            for (uint8_t b = 0; b < 32; b++) {
+                if (m & (1u << b)) {
+                    if (first == 0xFF) first = b;
+                    count++;
+                }
+            }
+            out_buf[0] = NOTIFY_V2_VERSION;
+            out_buf[1] = NOTIFY_EVT_EXT_CLIP;
+            out_buf[2] = 0;
+            out_buf[3] = seq;
+            out_buf[4] = first;   // mask != 0: push drops empty masks
+            out_buf[5] = count;
+            out_buf[6] = 0;
+            out_buf[7] = 0;
+            memcpy(&out_buf[8], e.value, 4);
+            return 12;
         }
 
         default:

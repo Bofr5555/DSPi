@@ -1217,6 +1217,14 @@ typedef struct __attribute__((packed)) {
 extern uint8_t channel_band_counts[NUM_CHANNELS];
 extern volatile SystemStatusPacket global_status;
 
+// Clip latch for the clip notification (notify.h NOTIFY_EVT_EXT_CLIP).  The
+// metering sites set the same bits as global_status.clip_flags, but this copy
+// is consumed by notify_clip_service() only, so REQ_CLEAR_CLIPS and the status
+// polls keep their exact semantics and the event never waits for a clear.
+extern volatile uint32_t clip_notify_latch;
+#define CLIP_LATCH(bits) do { uint32_t _clip_b = (bits); \
+    global_status.clip_flags |= _clip_b; clip_notify_latch |= _clip_b; } while (0)
+
 // ----------------------------------------------------------------------------
 // Force time-critical functions into RAM. Under the XIP build, .time_critical
 // placement is the load-bearing RAM-residency mechanism on both platforms;

@@ -2178,6 +2178,7 @@ int main(void) {
         // deferred from update_master_volume() to here so we never call
         // usbd_edpt_xfer from within a control-transfer DATA stage.
         LOOP_PROF(LP_NOTIFY);
+        notify_clip_service(to_ms_since_boot(get_absolute_time()));
         usb_notify_tick();
 
         // External control transports: parse any complete UART/I2C frames
