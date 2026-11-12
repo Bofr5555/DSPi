@@ -495,6 +495,31 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define MASTER_VOL_MAX_DB           (0.0f)     // Unity gain (no attenuation)
 #define MASTER_VOL_DEFAULT_DB       (-20.0f)   // Power-on / fresh-device default
 
+// Gain ranges, enforced on every write path: the SET commands (any transport),
+// the bulk SET and preset load.  A non-finite value is refused by a SET and by
+// a bulk SET (nothing applied); a stored slot carrying one loads the minimum.
+// Finite values outside the range are clamped, and the notification carries
+// the clamped value.  The ranges are the host registry's (out.gain) and the
+// ones the bulk path's dB conversion always clamped to.
+#define OUTPUT_GAIN_MIN_DB          (-60.0f)
+#define OUTPUT_GAIN_MAX_DB          (20.0f)
+#define MATRIX_GAIN_MIN_DB          (-60.0f)
+#define MATRIX_GAIN_MAX_DB          (20.0f)
+#define PREAMP_MIN_DB               (-60.0f)
+#if PICO_RP2350
+#define PREAMP_MAX_DB               (24.0f)
+#else
+#define PREAMP_MAX_DB               (18.0f)    // the Q28 preamp multiplier overflows above +18.06 dB
+#endif
+
+// Clamp a finite dB value into [lo, hi]; NaN and both infinities become lo
+// (the quiet end).  Callers that must refuse non-finite input check first.
+static inline float gain_db_clamp(float db, float lo, float hi) {
+    if (db >= lo && db <= hi) return db;
+    if (db > hi && db <= 3.402823466e38f) return hi;   // finite, too high
+    return lo;                                          // too low, -inf, +inf, NaN
+}
+
 // User Volume Commands.  Mirror UAC1 host volume/mute, but as a vendor channel
 // so non-USB controllers (e.g. Console while SPDIF input is active, an external
 // hardware control surface) can drive the same value the OS slider would.

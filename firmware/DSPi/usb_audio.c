@@ -345,6 +345,7 @@ void get_default_channel_name(int ch, uint8_t input_source,
 void update_preamp(uint8_t ch, float db) {
     if (!isfinite(db)) return;  // Reject NaN/Inf — would propagate through entire audio path
     if (ch >= NUM_INPUT_CHANNELS) return;
+    db = gain_db_clamp(db, PREAMP_MIN_DB, PREAMP_MAX_DB);
     global_preamp_db[ch] = db;
     float linear = powf(10.0f, db / 20.0f);
     global_preamp_mul[ch]    = (int32_t)(linear * (float)(1 << 28));

@@ -91,16 +91,31 @@ extern MatrixMixer matrix_mixer;
 extern uint8_t output_pins[NUM_PIN_OUTPUTS];
 
 // ============================================================================
-// dB-TO-LINEAR CONVERSION (duplicated from flash_storage.c — it's static there)
+// dB-TO-LINEAR CONVERSION
 // ============================================================================
 
+// 10^(db/20).  This used to be a 4-term Taylor series (flash_storage.c had the
+// same one and replaced it): +35 dB instead of -60 dB at -60, +19.5 dB at -40,
+// -6.3 dB at -20, so a bulk SET with a deep cut on a preamp, crosspoint or
+// output played far louder than asked until the next preset load or reboot.
+// Callers pass values already clamped to their range (config.h).
 static float db_to_linear(float db) {
     if (db == 0.0f) return 1.0f;
-    if (db < -60.0f) db = -60.0f;
-    if (db > 20.0f) db = 20.0f;
-    float x = db * 0.1151292546f;  // ln(10)/20
-    float linear = 1.0f + x + x*x*0.5f + x*x*x*0.1666667f + x*x*x*x*0.0416667f;
-    return (linear < 0.0f) ? 0.0f : linear;
+    return powf(10.0f, db / 20.0f);
+}
+
+// A bulk SET carrying a non-finite gain is refused as a whole (nothing
+// applied), like a SET of one.
+static bool bulk_gains_finite(const WireBulkParams *in) {
+    if (!isfinite(in->global.preamp_gain_db)) return false;
+    for (int i = 0; i < NUM_INPUT_CHANNELS; i++)
+        if (!isfinite(in->preamp.preamp_db[i])) return false;
+    for (int inp = 0; inp < NUM_INPUT_CHANNELS; inp++)
+        for (int o = 0; o < NUM_OUTPUT_CHANNELS; o++)
+            if (!isfinite(in->crosspoints[inp][o].gain_db)) return false;
+    for (int o = 0; o < NUM_OUTPUT_CHANNELS; o++)
+        if (!isfinite(in->outputs[o].gain_db)) return false;
+    return true;
 }
 
 // ============================================================================
@@ -402,6 +417,8 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins, ParamSource src
     if (in->header.format_version != WIRE_FORMAT_VERSION ||
         in->header.payload_length != sizeof(WireBulkParams))
         return -4;
+    if (!bulk_gains_finite(in))
+        return -5;
 
     // Bracket the wholesale state rewrite.  Per-field writes are suppressed
     // and one BULK_INVALIDATED is emitted at notify_end_bulk(), tagged with
@@ -413,7 +430,7 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins, ParamSource src
     // Global params — preamp from the legacy single field (a baseline applied to
     // all inputs); overridden by the per-channel preamp section below.
     {
-        float db = in->global.preamp_gain_db;
+        float db = gain_db_clamp(in->global.preamp_gain_db, PREAMP_MIN_DB, PREAMP_MAX_DB);
         float linear = db_to_linear(db);
         for (int i = 0; i < NUM_INPUT_CHANNELS; i++) {
             global_preamp_db[i]      = db;
@@ -459,8 +476,9 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins, ParamSource src
         for (int o = 0; o < NUM_OUTPUT_CHANNELS; o++) {
             matrix_mixer.crosspoints[inp][o].enabled = in->crosspoints[inp][o].enabled;
             matrix_mixer.crosspoints[inp][o].phase_invert = in->crosspoints[inp][o].phase_invert;
-            matrix_mixer.crosspoints[inp][o].gain_db = in->crosspoints[inp][o].gain_db;
-            matrix_mixer.crosspoints[inp][o].gain_linear = db_to_linear(in->crosspoints[inp][o].gain_db);
+            float g = gain_db_clamp(in->crosspoints[inp][o].gain_db, MATRIX_GAIN_MIN_DB, MATRIX_GAIN_MAX_DB);
+            matrix_mixer.crosspoints[inp][o].gain_db = g;
+            matrix_mixer.crosspoints[inp][o].gain_linear = db_to_linear(g);
         }
     }
 
@@ -468,8 +486,9 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins, ParamSource src
     for (int o = 0; o < NUM_OUTPUT_CHANNELS; o++) {
         matrix_mixer.outputs[o].enabled = in->outputs[o].enabled;
         matrix_mixer.outputs[o].mute = in->outputs[o].mute;
-        matrix_mixer.outputs[o].gain_db = in->outputs[o].gain_db;
-        matrix_mixer.outputs[o].gain_linear = db_to_linear(in->outputs[o].gain_db);
+        float g = gain_db_clamp(in->outputs[o].gain_db, OUTPUT_GAIN_MIN_DB, OUTPUT_GAIN_MAX_DB);
+        matrix_mixer.outputs[o].gain_db = g;
+        matrix_mixer.outputs[o].gain_linear = db_to_linear(g);
         matrix_mixer.outputs[o].delay_ms = in->outputs[o].delay_ms;
         channel_delays_ms[CH_OUT_1 + o] = in->outputs[o].delay_ms;
     }
@@ -845,7 +864,7 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins, ParamSource src
 
     // Per-channel preamp — overrides the legacy single value set above.
     for (int i = 0; i < NUM_INPUT_CHANNELS; i++) {
-        float db = in->preamp.preamp_db[i];
+        float db = gain_db_clamp(in->preamp.preamp_db[i], PREAMP_MIN_DB, PREAMP_MAX_DB);
         float linear = db_to_linear(db);
         global_preamp_db[i]      = db;
         global_preamp_mul[i]     = (int32_t)(linear * (float)(1 << 28));

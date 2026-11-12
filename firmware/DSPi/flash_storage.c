@@ -4033,8 +4033,10 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 
     // Per-channel preamp — all inputs, direct.
     for (int i = 0; i < NUM_INPUT_CHANNELS; i++) {
-        global_preamp_db[i] = slot->preamp_db_per_ch[i];
-        float linear = db_to_linear(slot->preamp_db_per_ch[i]);
+        // Clamped (config.h): a slot saved before the clamps may hold any float.
+        float db = gain_db_clamp(slot->preamp_db_per_ch[i], PREAMP_MIN_DB, PREAMP_MAX_DB);
+        global_preamp_db[i] = db;
+        float linear = db_to_linear(db);
         global_preamp_mul[i] = (int32_t)(linear * (float)(1 << 28));
         global_preamp_linear[i] = linear;
     }
@@ -4220,15 +4222,18 @@ static void apply_slot_to_live(const PresetSlot *slot) {
         for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
             matrix_mixer.crosspoints[in][out].enabled = slot->matrix_crosspoints[in][out].enabled;
             matrix_mixer.crosspoints[in][out].phase_invert = slot->matrix_crosspoints[in][out].phase_invert;
-            matrix_mixer.crosspoints[in][out].gain_db = slot->matrix_crosspoints[in][out].gain_db;
-            matrix_mixer.crosspoints[in][out].gain_linear = db_to_linear(slot->matrix_crosspoints[in][out].gain_db);
+            float g = gain_db_clamp(slot->matrix_crosspoints[in][out].gain_db,
+                                    MATRIX_GAIN_MIN_DB, MATRIX_GAIN_MAX_DB);
+            matrix_mixer.crosspoints[in][out].gain_db = g;
+            matrix_mixer.crosspoints[in][out].gain_linear = db_to_linear(g);
         }
     }
     for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
         matrix_mixer.outputs[out].enabled = slot->matrix_outputs[out].enabled;
         matrix_mixer.outputs[out].mute = slot->matrix_outputs[out].mute;
-        matrix_mixer.outputs[out].gain_db = slot->matrix_outputs[out].gain_db;
-        matrix_mixer.outputs[out].gain_linear = db_to_linear(slot->matrix_outputs[out].gain_db);
+        float g = gain_db_clamp(slot->matrix_outputs[out].gain_db, OUTPUT_GAIN_MIN_DB, OUTPUT_GAIN_MAX_DB);
+        matrix_mixer.outputs[out].gain_db = g;
+        matrix_mixer.outputs[out].gain_linear = db_to_linear(g);
         matrix_mixer.outputs[out].delay_ms = slot->matrix_outputs[out].delay_ms;
         channel_delays_ms[CH_OUT_1 + out] = slot->matrix_outputs[out].delay_ms;
     }

@@ -791,8 +791,9 @@ static bool vendor_handle_set_body(tusb_control_request_t const *req) {
             if (buffer->data_len >= 4) {
                 float db;
                 memcpy(&db, vendor_rx_buf, 4);
+                if (!isfinite(db)) { handled = false; break; }   // refused, not clamped
                 for (int ch = 0; ch < NUM_INPUT_CHANNELS; ch++)
-                    update_preamp(ch, db);
+                    update_preamp(ch, db);                       // clamps to the range
             }
             break;
 
@@ -803,7 +804,8 @@ static bool vendor_handle_set_body(tusb_control_request_t const *req) {
             if (ch < NUM_INPUT_CHANNELS && buffer->data_len >= 4) {
                 float db;
                 memcpy(&db, vendor_rx_buf, 4);
-                update_preamp(ch, db);
+                if (!isfinite(db)) { handled = false; break; }   // refused, not clamped
+                update_preamp(ch, db);                           // clamps to the range
             }
             break;
         }
@@ -1350,6 +1352,8 @@ static bool vendor_handle_set_body(tusb_control_request_t const *req) {
             if (buffer->data_len >= sizeof(MatrixRoutePacket)) {
                 MatrixRoutePacket pkt;
                 memcpy(&pkt, vendor_rx_buf, sizeof(pkt));
+                if (!isfinite(pkt.gain_db)) { handled = false; break; }   // refused, not clamped
+                pkt.gain_db = gain_db_clamp(pkt.gain_db, MATRIX_GAIN_MIN_DB, MATRIX_GAIN_MAX_DB);
                 if (pkt.input < NUM_INPUT_CHANNELS && pkt.output < NUM_OUTPUT_CHANNELS) {
                     MatrixCrosspoint *xp = &matrix_mixer.crosspoints[pkt.input][pkt.output];
                     xp->enabled = pkt.enabled;
@@ -1419,6 +1423,8 @@ static bool vendor_handle_set_body(tusb_control_request_t const *req) {
             if (out < NUM_OUTPUT_CHANNELS && buffer->data_len >= 4) {
                 float db;
                 memcpy(&db, vendor_rx_buf, 4);
+                if (!isfinite(db)) { handled = false; break; }   // refused, not clamped
+                db = gain_db_clamp(db, OUTPUT_GAIN_MIN_DB, OUTPUT_GAIN_MAX_DB);
                 matrix_mixer.outputs[out].gain_db = db;
                 matrix_mixer.outputs[out].gain_linear = powf(10.0f, db / 20.0f);
                 uint16_t off = (uint16_t)(offsetof(WireBulkParams, outputs)
