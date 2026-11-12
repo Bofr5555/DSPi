@@ -140,7 +140,7 @@ class ClientAgainstFake(unittest.TestCase):
     def test_extension_channel(self):
         rep = self.c.get(mc.REQ_EXTENSION, mc.EXT_LIST)
         self.assertEqual(rep.status, mc.ST_OK)
-        self.assertEqual(struct.unpack("<3H", rep.payload), (1, 2, 3))
+        self.assertEqual(struct.unpack("<5H", rep.payload), (1, 2, 3, 4, 5))
         self.assertEqual(self.c.get(mc.REQ_EXTENSION, mc.EXT_LIST, wlength=2).payload, b"\x01\x00")
         k340 = bytes([0x02, 0x13, 0, 0])
         self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_CROSSFEED_PAIR_MAP, payload=k340).status, mc.ST_OK)
@@ -148,6 +148,25 @@ class ClientAgainstFake(unittest.TestCase):
         self.assertEqual(len(self.c.get(mc.REQ_EXTENSION, mc.EXT_CORE_VREG).payload), 16)
         feats = struct.unpack("<I", self.c.get(mc.REQ_EXTENSION, mc.EXT_NOTIFY_FEATURES).payload)[0]
         self.assertTrue(feats & mc.NOTIFY_FEAT_BULK_SOURCE)
+        self.assertTrue(feats & mc.NOTIFY_FEAT_CLIP_EVENT)
+        # EXT_IDENTIFY (FWX): 4-byte OUT, 56-byte IN; bad tone output refused.
+        self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_IDENTIFY, payload=bytes([10, 0xFF, 0, 0])).status, mc.ST_OK)
+        ident = self.c.get(mc.REQ_EXTENSION, mc.EXT_IDENTIFY).payload
+        self.assertEqual(len(ident), 56)
+        self.assertIn("blink_left=10s", mc.decode_identify(ident))
+        self.assertIn("hw_rev='Board rev A'", mc.decode_identify(ident))
+        self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_IDENTIFY, payload=bytes([5, 99, 0, 0])).status, mc.ST_ERROR)
+        self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_IDENTIFY, payload=bytes(3)).status, mc.ST_ERROR)
+        # EXT_RESET_INFO (FWX): IN only, 20 bytes.
+        ri = self.c.get(mc.REQ_EXTENSION, mc.EXT_RESET_INFO).payload
+        self.assertEqual(len(ri), 20)
+        self.assertIn("reason=WATCHDOG", mc.decode_reset_info(ri))
+        self.assertIn("prev_uptime=3600s", mc.decode_reset_info(ri))
+        self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_RESET_INFO, payload=bytes(1)).status, mc.ST_ERROR)
+        # The clip event decodes (FWX).
+        clip = bytes([2, 0xE0, 0, 7, 9, 2, 0, 0]) + struct.pack("<I", (1 << 9) | (1 << 12))
+        self.assertIn("EXT_CLIP", mc.decode_notify(clip))
+        self.assertIn("channel=9 count=2 mask=0x00001200", mc.decode_notify(clip))
         self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_NOTIFY_FEATURES, payload=bytes(4)).status, mc.ST_ERROR)
         # Refusals: wrong OUT length, OUT on the IN-only list, unknown sub-command.
         self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_CROSSFEED_PAIR_MAP, payload=k340[:3]).status, mc.ST_ERROR)

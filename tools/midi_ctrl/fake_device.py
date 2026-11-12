@@ -66,6 +66,8 @@ class FakeDevice:
         self.chunk_set = None       # bytes received so far, or None
         self.chunk_buf = bytearray()
         self.pair_map = bytes(4)    # EXT_CROSSFEED_PAIR_MAP (normalization not modelled)
+        self.identify_s = 0         # EXT_IDENTIFY blink time (no countdown modelled)
+        self.identify_tone = mc.IDENTIFY_TONE_NONE
 
     # -- output -----------------------------------------------------------
     def _emit(self, tag: int, frame: bytes) -> None:
@@ -220,17 +222,24 @@ class FakeDevice:
     def _extension(self, tag: int, is_get: bool, sub: int, payload: bytes, cap: int) -> None:
         # Extension channel (extension_channel_spec.md): unknown sub-command,
         # wrong direction or wrong OUT length -> ERROR (USB: STALL).
-        set_len = {mc.EXT_CROSSFEED_PAIR_MAP: 4, mc.EXT_CORE_VREG: 2}
+        set_len = {mc.EXT_CROSSFEED_PAIR_MAP: 4, mc.EXT_CORE_VREG: 2, mc.EXT_IDENTIFY: 4}
         if is_get:
             if sub == mc.EXT_LIST:
-                data = struct.pack("<3H", mc.EXT_CROSSFEED_PAIR_MAP, mc.EXT_CORE_VREG,
-                                   mc.EXT_NOTIFY_FEATURES)
+                data = struct.pack("<5H", mc.EXT_CROSSFEED_PAIR_MAP, mc.EXT_CORE_VREG,
+                                   mc.EXT_NOTIFY_FEATURES, mc.EXT_IDENTIFY, mc.EXT_RESET_INFO)
             elif sub == mc.EXT_CROSSFEED_PAIR_MAP:
                 data = self.pair_map
             elif sub == mc.EXT_CORE_VREG:
                 data = bytes([0x0D, 0, 0x0D, 0]) + bytes(12)   # live/default 1.20 V
             elif sub == mc.EXT_NOTIFY_FEATURES:
-                data = struct.pack("<I", mc.NOTIFY_FEAT_BULK_SOURCE)
+                data = struct.pack("<I", mc.NOTIFY_FEAT_BULK_SOURCE | mc.NOTIFY_FEAT_CLIP_EVENT)
+            elif sub == mc.EXT_IDENTIFY:
+                # RP2350 A2 on a pico2 build; the hw_rev string as a board build sets it
+                data = (struct.pack("<BBBBI", self.identify_s, self.identify_tone, 1, 2, 0x20004927)
+                        + b"pico2".ljust(16, b"\0") + b"Board rev A".ljust(32, b"\0"))
+            elif sub == mc.EXT_RESET_INFO:
+                # a warm reset after our watchdog fired: hang 1, previous run 3600 s
+                data = struct.pack("<BBBBIIII", 4, 1, 1, 1, 12, 3600, 0x01000000, 0x101)
             else:
                 return self._reply(tag, True, mc.ST_ERROR)
             return self._reply(tag, True, mc.ST_OK, data[:cap] if cap else data)
@@ -238,6 +247,13 @@ class FakeDevice:
             return self._reply(tag, False, mc.ST_ERROR)
         if sub == mc.EXT_CROSSFEED_PAIR_MAP:
             self.pair_map = bytes(payload)
+        elif sub == mc.EXT_IDENTIFY:
+            secs, tone = payload[0], payload[1]
+            if payload[2] or payload[3] or (tone != mc.IDENTIFY_TONE_NONE and tone >= 9):
+                return self._reply(tag, False, mc.ST_ERROR)
+            self.identify_s = min(secs, 120)
+            if tone != mc.IDENTIFY_TONE_NONE:
+                self.identify_tone = tone
         return self._reply(tag, False, mc.ST_OK)
 
 
