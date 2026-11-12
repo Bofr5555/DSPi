@@ -388,10 +388,6 @@ bool link_tx_frame(link_tx_t *tx, const int32_t *samples, link_bitw_t *w) {
     // stream starts inside a superframe (that partial one is still valid).
     if (f % LINK_SF_LEN == 0 || !tx->started) {
         uint64_t first = f & ~(uint64_t)(LINK_SF_LEN - 1u);
-        if (tx->apply_op == LINK_OP_RATE && f == tx->apply_frame) {
-            tx->rate = tx->apply_arg;
-            if (tx->apply_value) tx->channels = (uint8_t)tx->apply_value;
-        }
         // Carried while the superframe completes before the target.
         if (tx->apply_op != LINK_OP_NONE && first + LINK_SF_LEN > tx->apply_frame) {
             tx->apply_frame = 0;
@@ -428,5 +424,12 @@ bool link_tx_frame(link_tx_t *tx, const int32_t *samples, link_bitw_t *w) {
     unsigned total = link_frame_symbols(tx->cls, tx->rate, f);
     for (unsigned i = used; i < total; i++) ok = ok && put_sym(tx, w, LINK_BYTE_IDLE, false);
     tx->frame = f + 1u;
+    // A RATE switches the layout here, at the end of the frame before its
+    // target, so tx->rate and tx->channels describe the next frame before the
+    // caller fills its samples (the receiver switches at the same point).
+    if (tx->apply_op == LINK_OP_RATE && tx->frame == tx->apply_frame) {
+        tx->rate = tx->apply_arg;
+        if (tx->apply_value) tx->channels = (uint8_t)tx->apply_value;
+    }
     return ok;
 }

@@ -67,6 +67,12 @@ class TestLK1Anchors(unittest.TestCase):
         self.assertEqual(lc.layout_symbols(8), 30)
         self.assertEqual(lc.layout_symbols(18), 4 + 26 + 26 + 8)
 
+    def test_capacity_table_is_normative(self):
+        # spec 5.7: the one capacity table (L1, L2, L3 at 44.1 / 48 / 96 kHz)
+        want = {(1, 0): 8, (1, 1): 8, (1, 2): 3, (2, 0): 19, (2, 1): 18, (2, 2): 8,
+                (3, 0): 41, (3, 1): 38, (3, 2): 18}
+        self.assertEqual(lc.CAPACITY, want)
+
     def test_prbs7_period(self):
         bits = lc.bytes_to_bits(lc.prbs7(127 * 2), 127 * 16)
         self.assertEqual(bits[:127], bits[127:254])
@@ -172,6 +178,23 @@ class TestLK1Stream(unittest.TestCase):
         self.assertEqual({len(e[5]) for e in frames if e[1] >= 736}, {8})
         for e in frames:
             self.assertEqual(e[5], [lc.test_sample(e[1], ch, 9) for ch in range(len(e[5]))])
+
+    def test_rate_growing_channels(self):
+        # Review lk F1: the encoder must set the new C before the target frame's samples.
+        enc = lc.Encoder(2, 1, 8, 10)
+        self.assertTrue(enc.schedule(96, lc.OP_RATE, 1, 16))
+        seen = {}
+        while enc.frame < 130:
+            f = enc.frame
+            seen[f] = enc.channels
+            enc.frame_symbols([lc.test_sample(f, ch, 1) for ch in range(enc.channels)])
+        self.assertEqual((seen[95], seen[96]), (8, 16))
+        bits = lc.encode_stream(2, 1, 8, 10, 140, seed=14, schedule=(0, 96, lc.OP_RATE, 1, 16))
+        frames = [e for e in self._decode(bits, 2).events if e[0] == "frame"]
+        self.assertEqual({len(e[5]) for e in frames if e[1] >= 96}, {16})
+        for e in frames:
+            self.assertEqual(e[2], 0)
+            self.assertEqual(e[5], [lc.test_sample(e[1], ch, 14) for ch in range(len(e[5]))])
 
     def test_superframe_repeat_and_apply_carriage(self):
         enc = lc.Encoder(1, 1, 8, 10)

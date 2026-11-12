@@ -234,8 +234,8 @@ bool link_bitw_put(link_bitw_t *w, uint32_t v, unsigned n);
 
 typedef struct {
     uint8_t  cls;
-    uint8_t  rate;          // layout in effect
-    uint8_t  channels;
+    uint8_t  rate;          // layout of frame tx->frame (the next one encoded);
+    uint8_t  channels;      // a RATE changes both at the end of the frame before its target
     unsigned rd;            // running disparity carried from frame to frame
     uint64_t frame;         // F of the next frame to encode
     // Superframe content the caller owns: flags b0/b3/b4/b5, sender, hops.
@@ -266,8 +266,10 @@ bool link_tx_schedule(link_tx_t *tx, uint64_t at, uint8_t op, uint8_t arg, int16
 
 // Encode frame tx->frame into w (K28.5, head, banks, idles: exactly
 // link_frame_symbols() symbols) and advance to the next frame.  samples
-// holds tx->channels 24-bit samples; it is ignored while the PRBS flag is
-// set.  False if w is full (the frame is then incomplete).
+// holds tx->channels 24-bit samples (read tx->channels before each call: a
+// RATE changes it at the end of the call that encodes the frame before its
+// target); it is ignored while the PRBS flag is set.  False if w is full
+// (the frame is then incomplete).
 bool link_tx_frame(link_tx_t *tx, const int32_t *samples, link_bitw_t *w);
 
 #endif // LINK_CODEC_H

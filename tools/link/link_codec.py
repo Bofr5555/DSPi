@@ -98,6 +98,11 @@ def max_channels(cls, rate):
         c += 1
     return c
 
+
+# The protocol's capacity table (spec 5.7), the one source for senders, tools and fakes:
+# CAPACITY[(cls, rate)] is the largest C, from max_channels() as link_max_channels() in C.
+CAPACITY = {(c, r): max_channels(c, r) for c in sorted(CLASS_BAUD) for r in sorted(RATE_HZ)}
+
 # ---------------------------------------------------------------------------
 # 8b/10b, IEEE 802.3 clause 36 tables as printed (abcdei / fghj, RD- then RD+)
 # ---------------------------------------------------------------------------
@@ -319,15 +324,15 @@ class Encoder:
         self.apply = (at, op, arg, value)
         return True
 
+    def _hdr(self, f):
+        """HDR of frame f (a hook the crafted test vectors override)."""
+        return f & 0xFF
+
     def frame_symbols(self, samples):
         """Encode frame self.frame; return its symbols and advance."""
         f = self.frame
         if f % SF_LEN == 0 or self.sf is None:
             first = f - f % SF_LEN
-            if self.apply and self.apply[1] == OP_RATE and f == self.apply[0]:
-                self.rate = self.apply[2]
-                if self.apply[3]:
-                    self.channels = self.apply[3]
             if self.apply and first + SF_LEN > self.apply[0]:
                 self.apply = None
             self._pack_sf(first)
@@ -338,7 +343,7 @@ class Encoder:
             out.append(sym)
 
         put(BYTE_K28_5, True)
-        hdr, ctl = f & 0xFF, self.sf[f % SF_LEN]
+        hdr, ctl = self._hdr(f), self.sf[f % SF_LEN]
         for b in (hdr, ctl, crc8(bytes((hdr, ctl)))):
             put(b)
         c = self.channels
@@ -353,6 +358,11 @@ class Encoder:
         for _ in range(layout_symbols(c), frame_symbols(self.cls, self.rate, f)):
             put(BYTE_IDLE)
         self.frame = f + 1
+        # RATE: the layout of the target frame is set before the caller builds its samples.
+        if self.apply and self.apply[1] == OP_RATE and self.frame == self.apply[0]:
+            self.rate = self.apply[2]
+            if self.apply[3]:
+                self.channels = self.apply[3]
         return out
 
 
@@ -736,7 +746,8 @@ def corrupt(bits, ops):
         elif kind == "ins":
             bits.insert(pos, args[0])
         elif kind == "fill":
-            bits[pos:pos + args[0]] = [args[1]] * args[0]
+            n = max(0, min(args[0], len(bits) - pos))     # clamped at the end, as the C helper
+            bits[pos:pos + n] = [args[1]] * n
         else:
             raise ValueError(kind)
     return bits

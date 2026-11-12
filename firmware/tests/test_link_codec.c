@@ -321,9 +321,12 @@ static size_t encode_stream(const char *l, uint8_t *bits) {
             CHECK(link_tx_schedule(&tx, get_u64(l, "sched_at"), (uint8_t)get_u64(l, "sched_op"),
                                    (uint8_t)get_u64(l, "sched_arg"), (int16_t)get_i64(l, "sched_value")),
                   "schedule refused");
-        int32_t s[LINK_MAX_CHANNELS];
+        // Exactly tx->channels samples on the heap, so ASan sees any read past them
+        // (review lk F1: a RATE that grows C must not read the new C early).
+        int32_t *s = malloc(tx.channels * sizeof(int32_t));
         for (unsigned ch = 0; ch < tx.channels; ch++) s[ch] = test_sample(tx.frame, ch, seed);
         CHECK(link_tx_frame(&tx, s, &w), "bit buffer full");
+        free(s);
     }
     for (size_t i = 0; i < w.nbits; i++) bits[i] = (uint8_t)((words[i >> 5] >> (31u - (i & 31u))) & 1u);
     return w.nbits;

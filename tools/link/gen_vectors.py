@@ -30,9 +30,13 @@ def comma_at(bits, pos):
 class _TamperedEncoder(lc.Encoder):
     """An encoder whose superframe for one first-frame is altered (crafted vectors)."""
 
-    def __init__(self, *a, tamper=None, **kw):
+    def __init__(self, *a, tamper=None, hdr=None, **kw):
         super().__init__(*a, **kw)
         self.tamper = tamper
+        self.hdr_of = hdr
+
+    def _hdr(self, f):
+        return self.hdr_of(f) if self.hdr_of else super()._hdr(f)
 
     def _pack_sf(self, first):
         super()._pack_sf(first)
@@ -40,8 +44,8 @@ class _TamperedEncoder(lc.Encoder):
             self.sf = self.tamper(first, bytearray(self.sf))
 
 
-def tampered_stream(cls, rate, channels, first, frames, seed, tamper):
-    enc = _TamperedEncoder(cls, rate, channels, first, tamper=tamper)
+def tampered_stream(cls, rate, channels, first, frames, seed, tamper=None, hdr=None):
+    enc = _TamperedEncoder(cls, rate, channels, first, tamper=tamper, hdr=hdr)
     syms = []
     for _ in range(frames):
         f = enc.frame
@@ -242,6 +246,33 @@ def vectors():
                            "ins:0:1;" + ";".join("ins:0:%d" % ((i * 7) % 3 == 0) for i in range(300)),
                            **base))
 
+    # -- RATE that grows C (the encoder switches at the end of the frame before the target).
+    v.append(stream_vector("l2_rate_grow_8_to_16", cls=2, rate=1, channels=8, first=10, frames=140,
+                           seed=14, schedule=(0, 96, lc.OP_RATE, 1, 16)))
+    v.append(stream_vector("l1_rate_grow_96k3_to_441k8", cls=1, rate=2, channels=3, first=0,
+                           frames=140, seed=15, schedule=(5, 96, lc.OP_RATE, 0, 8)))
+
+    # -- Damage at 44.1 kHz (L1, frames alternate 34/35 symbols).
+    b441 = dict(cls=1, rate=0, channels=8, first=147 * 1000 + 5, frames=150, seed=16)
+
+    def fb441(index, symbol):
+        return frame_bit(1, 0, 8, b441["first"], index, symbol)
+
+    v.append(stream_vector("l1_441_bank_and_comma", "flip:%d;fill:%d:10:0"
+                           % (fb441(60, 9), fb441(70, 0)), **b441))
+    v.append(stream_vector("l1_441_slip_minus1_plus2", "del:%d;ins:%d:0;ins:%d:1"
+                           % (fb441(62, 15), fb441(80, 15), fb441(80, 17)), **b441))
+    v.append(stream_vector("l1_441_three_commas_lost_is_loss",
+                           ";".join("fill:%d:10:1" % fb441(i, 0) for i in (64, 65, 66)),
+                           **dict(b441, frames=180)))
+
+    # -- +2-bit slip at 48 kHz.
+    v.append(stream_vector("slip_plus_two_bits", "ins:%d:0;ins:%d:1" % (fb(50, 20), fb(50, 22)),
+                           **base))
+
+    # -- Fill past the end of the stream is clamped (test-helper parity).
+    v.append(stream_vector("fill_past_end", "fill:%d:5000:0" % fb(78, 3), **base))
+
     # -- Crafted streams the reference encoder cannot make.
     def sf_bad_crc(first, b):
         if first == 32 * 3:
@@ -257,6 +288,22 @@ def vectors():
                             "superframe at F=96 has a bad CRC-16: E1 while locked"))
     v.append(crafted_vector("sf_wrong_class", 1, tampered_stream(1, 1, 8, 0, 100, 13, sf_class),
                             "L1 timing but class byte 2: never locks, E17 per superframe"))
+
+    def hdr_wrong(f):
+        return (f + 0x40) & 0xFF if f == 70 else f & 0xFF
+
+    def sf_plus_256(first, b):
+        if first == 96:
+            frame = struct.unpack_from("<Q", b, 8)[0] + 256
+            b[8:16] = struct.pack("<Q", frame)
+            b[30:32] = struct.pack("<H", lc.crc16(bytes(b[:30])))
+        return bytes(b)
+
+    v.append(crafted_vector("hdr_mismatch", 1, tampered_stream(1, 1, 8, 0, 110, 17, hdr=hdr_wrong),
+                            "frame 70 sends a wrong HDR with a good CRC-8: flag n, counter_errors"))
+    v.append(crafted_vector("sf_frame_jump_256", 1,
+                            tampered_stream(1, 1, 8, 0, 200, 18, tamper=sf_plus_256),
+                            "superframe at 96 claims F+256 (HDRs still match): F corrected twice"))
     return v
 
 
