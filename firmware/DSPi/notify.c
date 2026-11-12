@@ -476,12 +476,18 @@ void notify_push_device_name(const char *name, ParamSource src) {
 
 // Merging into an unsent clip entry keeps a sustained clip from filling the
 // ring while no host drains it: the newest entry absorbs the new channels.
+// Never one a consumer has peeked: its packet is already formatted (a USB
+// transfer in flight), so the merged channels would be lost to it.
 void notify_push_clip(uint32_t mask) {
     if (mask == 0) return;
     uint32_t flags = save_and_disable_interrupts();
     if (ring_coalesce_start_locked() != notify_head) {
-        NotifyRingEntry *last = &notify_ring[(uint8_t)(notify_head - 1) & NOTIFY_RING_MASK];
-        if (last->event_id == NOTIFY_EVT_EXT_CLIP) {
+        uint8_t li = (uint8_t)(notify_head - 1) & NOTIFY_RING_MASK;
+        NotifyRingEntry *last = &notify_ring[li];
+        bool peeked = false;
+        for (int c = 0; c < NOTIFY_CONSUMER_COUNT; c++)
+            if (notify_peek_idx[c] == li) peeked = true;
+        if (last->event_id == NOTIFY_EVT_EXT_CLIP && !peeked) {
             uint32_t m;
             memcpy(&m, last->value, 4);
             m |= mask;

@@ -145,6 +145,20 @@ int main(void) {
         n = drain(p, NOTIFY_RING_SIZE);
         CHECK(n == 3 && p[0].evt == NOTIFY_EVT_EXT_CLIP && p[2].evt == NOTIFY_EVT_EXT_CLIP);
 
+        // An entry a consumer has peeked (a transfer in flight) is never
+        // merged into: the next clip is a new entry.
+        notify_init();
+        CLIP_LATCH(1u << 2);
+        notify_clip_service(9000);
+        CHECK(notify_peek_next_for(NOTIFY_CONSUMER_USB, buf, sizeof buf) == 12);
+        CLIP_LATCH(1u << 6);
+        notify_clip_service(9000 + NOTIFY_CLIP_MIN_INTERVAL_MS);
+        notify_commit_pop_for(NOTIFY_CONSUMER_USB);
+        CHECK(buf[8] == 0x04);                           // the in-flight packet: channel 2 only
+        len = notify_peek_next_for(NOTIFY_CONSUMER_USB, buf, sizeof buf);
+        CHECK(len == 12 && buf[4] == 6 && buf[8] == 0x40);
+        notify_commit_pop_for(NOTIFY_CONSUMER_USB);
+
         // The flag that announces the event.
         CHECK((NOTIFY_FEATURES & NOTIFY_FEAT_CLIP_EVENT) != 0);
     }
