@@ -89,8 +89,10 @@ EXT_CORE_VREG = 0x0002           # GET: CoreVregStatus (16 B); SET: {op, value}
 EXT_NOTIFY_FEATURES = 0x0003     # GET: uint32 LE NOTIFY_FEAT_* flags
 EXT_IDENTIFY = 0x0004            # GET: IdentifyStatus (56 B); SET: {seconds, tone_output, 0, 0}
 EXT_RESET_INFO = 0x0005          # GET: ResetInfo (20 B)
+EXT_FIRMWARE_FIXES = 0x0006      # GET: uint32 LE FW_FIX_* flags
 NOTIFY_FEAT_BULK_SOURCE = 1 << 0  # BULK_INVALIDATED of a bulk SET carries its dispatch source
 NOTIFY_FEAT_CLIP_EVENT = 1 << 1   # clip event 0xE0 (EXT_CLIP)
+FW_FIX_BULK_DB_POWF = 1 << 0      # a bulk SET converts dB with powf (no Taylor series)
 NOTIFY_EVT_EXT_CLIP = 0xE0
 IDENTIFY_TONE_NONE = 0xFF
 RESET_REASONS = {0: "UNKNOWN", 1: "POWER_ON", 2: "BROWNOUT", 3: "RUN_PIN", 4: "WATCHDOG",
@@ -669,6 +671,26 @@ def cmd_reset_info(args) -> int:
     return 0
 
 
+def decode_fixes(b: bytes) -> str:
+    """EXT_FIRMWARE_FIXES (extension_channel_spec.md 2.7)."""
+    if len(b) < 4:
+        return f"short reply {b.hex()}"
+    flags = struct.unpack_from("<I", b)[0]
+    names = [n for bit, n in ((FW_FIX_BULK_DB_POWF, "BULK_DB_POWF"),) if flags & bit]
+    return f"firmware fixes: 0x{flags:08X} {' '.join(names)}".rstrip()
+
+
+def cmd_fixes(args) -> int:
+    c = open_client(args)
+    rep = c.get(REQ_EXTENSION, EXT_FIRMWARE_FIXES)
+    if rep.status != ST_OK:
+        # Not listed (stock or older fork firmware): every fix reads as absent.
+        print(f"status={rep.status_name} (no EXT_FIRMWARE_FIXES: assume no fixes)")
+        return 1
+    print(decode_fixes(rep.payload))
+    return 0
+
+
 def cmd_bootloader(args) -> int:
     if not args.yes:
         print("This reboots the DSPi into its USB bootloader (it leaves USB audio and MIDI).")
@@ -722,6 +744,10 @@ def main(argv=None) -> int:
     p = sub.add_parser("reset-info", help="EXT_RESET_INFO: last reset cause, uptime, hang count")
     add_common_args(p)
     p.set_defaults(fn=cmd_reset_info)
+
+    p = sub.add_parser("fixes", help="EXT_FIRMWARE_FIXES: firmware bugs this build has fixed")
+    add_common_args(p)
+    p.set_defaults(fn=cmd_fixes)
 
     p = sub.add_parser("notify", help="print decoded 0x40 notification frames")
     add_common_args(p)

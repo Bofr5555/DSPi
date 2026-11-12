@@ -8,7 +8,7 @@ nothing installed). Wire format:
 
 | File | Purpose |
 |---|---|
-| `midi_ctrl.py` | codec, `RawMidiPort`, `Client`, CLI (`list`, `get`, `set`, `ext-list`, `identify`, `reset-info`, `notify`, `enter-bootloader`) |
+| `midi_ctrl.py` | codec, `RawMidiPort`, `Client`, CLI (`list`, `get`, `set`, `ext-list`, `identify`, `reset-info`, `fixes`, `notify`, `enter-bootloader`) |
 | `measure.py` | RTT, bulk 0xA0/0xA1 throughput, notification latency, optional vendor-interface concurrency; Markdown table |
 | `soak.py` | long run: meter 10 Hz, 0xA0 every 10 s, random volume in a given range, notification seq check, underrun counters |
 | `regress.sh` | before/after a flash: interfaces 0-2 identical, state image identical, ALSA view |
@@ -31,6 +31,8 @@ plain `get` / `set` with `req` 0x00 and the sub-command in `--wvalue`;
 `0x0003` (`EXT_NOTIFY_FEATURES`) is listed, the notification feature flags
 (`BULK_SOURCE`: a bulk SET's `BULK_INVALIDATED` carries the SET's source, so
 `notify` shows `src=MIDI` for a MIDI 0xA1 instead of `src=BULK_SET`).
+`fixes` reads `EXT_FIRMWARE_FIXES` (`0x0006`): `BULK_DB_POWF` means a bulk SET
+converts gains from dB correctly; `ERROR` (older firmware) means assume no fixes.
 
 `run.sh` passes at most one rawmidi node (`DSPI_MIDI_DEV`) and optionally one
 USB node (`DSPI_USB_DEV`, for `--vendor`), no network. Nothing here plays
