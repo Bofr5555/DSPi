@@ -84,6 +84,8 @@ add_executable(DSPi
     psybass.h
     core_vreg.c
     core_vreg.h
+    identify.c
+    identify.h
     subharm.c
     subharm.h
     tube.c
@@ -141,6 +143,13 @@ endif()
 set(DSPI_VREG_MV 1150 CACHE STRING "Default core voltage in mV: 1150, 1200, 1250 or 1300")
 set_property(CACHE DSPI_VREG_MV PROPERTY STRINGS 1150 1200 1250 1300)
 target_compile_definitions(DSPi PRIVATE DSPI_VREG_MV=${DSPI_VREG_MV})
+
+# Hardware revision string reported by EXT_IDENTIFY (identify.h), with the
+# PICO_BOARD the build targets.  Empty by default; a board build sets it,
+# e.g. -DDSPI_HW_REV="Board rev A".  At most 31 characters are reported.
+set(DSPI_HW_REV "" CACHE STRING "Hardware revision string reported by EXT_IDENTIFY (max 31 chars)")
+set_source_files_properties(identify.c PROPERTIES COMPILE_DEFINITIONS
+    "DSPI_HW_REV=\"${DSPI_HW_REV}\";DSPI_BOARD_NAME=\"${PICO_BOARD}\"")
 
 # DSPI_USB_MIDI: append a class-compliant USB MIDI function ("DSPi Control")
 # that carries the vendor command surface as SysEx, for hosts without access

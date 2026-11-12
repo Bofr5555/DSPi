@@ -47,6 +47,7 @@
 #include "input_source_names.h"
 #include "loopback.h"   // DSPI_LOOPBACK glitch counters (self-guarded; empty otherwise)
 #include "core_vreg.h"
+#include "identify.h"
 #include "usb_descriptors.h"
 #include "tusb.h"
 #include "pico/audio_spdif.h"
@@ -568,6 +569,7 @@ static const uint16_t ext_ids[] = {
     EXT_CROSSFEED_PAIR_MAP,
     EXT_CORE_VREG,
     EXT_NOTIFY_FEATURES,
+    EXT_IDENTIFY,
 };
 
 // Exact OUT payload length of a sub-command; 0 = no OUT form (STALL).
@@ -575,6 +577,7 @@ static uint16_t ext_set_len(uint16_t id) {
     switch (id) {
         case EXT_CROSSFEED_PAIR_MAP: return CROSSFEED_MAP_PAIRS;   // uint8[4]
         case EXT_CORE_VREG:          return 2;                     // {op, value}
+        case EXT_IDENTIFY:           return sizeof(IdentifyRequest);
         default:                     return 0;
     }
 }
@@ -614,6 +617,11 @@ static bool ext_handle_set(uint16_t id, const uint8_t *p, uint16_t len) {
             __dmb();
             core_vreg_req_pending = true;
             return true;
+        case EXT_IDENTIFY:
+            // Staged for the main loop, which owns the LED and the signal
+            // generator; refused (STALL) for a bad tone output or while the
+            // generator runs (identify.h).
+            return identify_request(p);
     }
     return false;
 }
@@ -652,6 +660,13 @@ static bool ext_handle_get(uint16_t id, uint16_t wLength, uint8_t *resp) {
             resp[2] = (uint8_t)(f >> 16);
             resp[3] = (uint8_t)(f >> 24);
             n = 4;
+            break;
+        }
+        case EXT_IDENTIFY: {
+            IdentifyStatus st;
+            identify_get_status(&st);
+            memcpy(resp, &st, sizeof(st));
+            n = sizeof(st);
             break;
         }
         default:

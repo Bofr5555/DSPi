@@ -53,8 +53,9 @@ IN replies are truncated to `wLength` like every other DSPi GET. On UART / I2C /
 | `0x0001` | `EXT_CROSSFEED_PAIR_MAP` | `uint8[4]` live map, normalized | `uint8[4]` map (exactly 4 bytes) |
 | `0x0002` | `EXT_CORE_VREG` | `CoreVregStatus`, 16 bytes | `{op, value}` (exactly 2 bytes) |
 | `0x0003` | `EXT_NOTIFY_FEATURES` | `uint32` LE notification-semantics flags | none (STALL) |
+| `0x0004` | `EXT_IDENTIFY` | `IdentifyStatus`, 56 bytes | `IdentifyRequest` (exactly 4 bytes) |
 
-Current firmware answers `EXT_LIST` with `01 00 02 00 03 00`.
+Current firmware answers `EXT_LIST` with `01 00 02 00 03 00 04 00`.
 
 ### 2.1 `EXT_LIST` (0x0000)
 
@@ -140,6 +141,37 @@ Sent on every notification consumer (USB EP 0x83, UART, USB MIDI) when one or mo
 - **Polling is unchanged.** The event has its own latch, set by the same metering code. The polled flags stay sticky and are still cleared only by `REQ_CLEAR_CLIPS`; a clear does not affect the event, and the event does not clear the flags.
 - **Precision:** the latch is taken from the main loop. A clip on a core-1 output in the few cycles between the load and the store of that take is lost for its block; a clip that lasts longer than one audio block is always reported.
 
+### 2.5 `EXT_IDENTIFY` (0x0004)
+
+Finds a unit on the bench or in a rack: the on-board LED blinks fast for a while, and on request one short quiet tone plays on one output. The IN form also says what the unit is (`identify.h`).
+
+**OUT** takes `IdentifyRequest`, exactly 4 bytes:
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 1 | `seconds` | blink time; 0 stops a running blink; above 120 is shortened to 120 |
+| 1 | 1 | `tone_output` | output index for the tone, or `0xFF` for no tone (the default a host should send) |
+| 2 | 2 | reserved | zero |
+
+- **LED:** GPIO25, the Pico / Pico 2 module LED (the K340 board has no LED of its own; the module's is the one to look for). It blinks at 4 Hz (125 ms on, 125 ms off) instead of the loop-rate heartbeat, and the heartbeat resumes afterwards. A new request replaces a running one.
+- **Tone (off unless asked for):** a 1 kHz sine, -40 dBFS peak, 400 ms, through the test signal generator in normal mode, so the output's crossover, PEQ, gain, master volume, mute and limiter all apply. It is never louder than a -40 dBFS sine of program material on that output, and a tweeter output gets its high-pass as usual. It replaces the generator's configuration (read it back before restarting a measurement), sends the usual `SIGGEN_STATE` notifications, and ends by itself.
+- **Refused (STALL / `ERROR`):** `tone_output` neither `0xFF` nor below the output count, nonzero reserved bytes, or a tone while the signal generator is running (an identify never takes over a measurement). A blink-only request is never refused.
+- Applied from the main loop within one iteration; nothing is persisted.
+
+**IN** returns `IdentifyStatus`, 56 bytes, little-endian:
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 1 | `remaining_s` | blink time left, rounded up; 0 = not blinking |
+| 1 | 1 | `tone_output` | output of the last tone asked for since boot, `0xFF` if none |
+| 2 | 1 | `chip` | 0 = RP2040, 1 = RP2350 |
+| 3 | 1 | `chip_rev` | the SDK's `rp2040_chip_version()` (1-3 = B0-B2) or `rp2350_chip_version()` (2 = A2; A3/A4 report what the SDK decodes) |
+| 4 | 4 | `chip_id` | the raw `SYSINFO.CHIP_ID` register |
+| 8 | 16 | `board` | the build's `PICO_BOARD` (`pico`, `pico2`), NUL-padded |
+| 24 | 32 | `hw_rev` | the build's `DSPI_HW_REV` string, NUL-padded, at most 31 characters; empty when the build does not set it |
+
+`hw_rev` is a build-time string: a board build sets it with `-DDSPI_HW_REV="..."`. The firmware cannot sense the board revision itself, so the string is only as right as the build that set it.
+
 ## 3. Transports
 
 | Transport | Reaches `0x00`? | Refusal |
@@ -161,6 +193,7 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 | `config.h` | `CLIP_LATCH()`, used by the metering sites in `audio_pipeline.c` and `pdm_generator.c` |
 | `crossfeed_map.h` | pair-map validation, normalization and encoding |
 | `core_vreg.{c,h}` | core voltage selection, trials, hang accounting |
+| `identify.{c,h}` | identify blink and tone, hardware description; `DSPI_HW_REV` in `CMakeLists.txt` |
 
 **Adding a sub-command:** pick the next free ID (`0x0001`-`0x7FFF` only after agreeing it with Weeb Labs). Add it to `config.h`, to `ext_ids[]` in ascending order and to `ext_set_len()` if it has an OUT form, then add cases to `ext_handle_set()` / `ext_handle_get()` and a row to section 2.
 
@@ -169,3 +202,4 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 - 2026-11-06: introduced. Replaces the fork's squatted opcodes `0x02` (`REQ_CROSSFEED_PAIR_MAP`), `0x4F` (`REQ_SET_CORE_VREG`) and `0x6F` (`REQ_GET_CORE_VREG`), which are removed with no aliases.
 - 2026-11-06: `0x0003` `EXT_NOTIFY_FEATURES` added (bit 0 `NOTIFY_FEAT_BULK_SOURCE`).
 - 2026-11-12: `EXT_NOTIFY_FEATURES` bit 1 `NOTIFY_FEAT_CLIP_EVENT` and the clip event `0xE0`; fork event IDs `0xE0`-`0xEF`.
+- 2026-11-12: `0x0004` `EXT_IDENTIFY` added.

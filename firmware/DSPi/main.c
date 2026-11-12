@@ -34,6 +34,7 @@
 #include "crossover.h"
 #include "flash_clkdiv.h"
 #include "core_vreg.h"
+#include "identify.h"
 #include "flash_storage.h"
 #include "pico/audio_i2s_multi.h"
 #include "adat_output.h"
@@ -3777,11 +3778,13 @@ int main(void) {
         // throttled).  No-op when DSPI_CLOCK_DIAG is 0.
         clock_diag_poll();
 
-        // LED heartbeat - toggle every ~1000 iterations
+        // LED heartbeat - toggle every ~1000 iterations, unless an identify
+        // request (EXT_IDENTIFY) is blinking it
+        bool led_identify = identify_service(to_ms_since_boot(get_absolute_time()));
         static uint32_t loop_counter = 0;
         if (++loop_counter >= 1000) {
             loop_counter = 0;
-            gpio_xor_mask(1u << 25);
+            if (!led_identify) gpio_xor_mask(1u << 25);
         }
     }
 }
