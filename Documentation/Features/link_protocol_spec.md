@@ -1,6 +1,6 @@
 # Multi-Unit Audio Link: Line Protocol
 
-*Protocol version: 1 (superframe byte 1). Status: normative, 2026-11-13 (WP LK1). Not yet used by any firmware
+*Protocol version: 1 (superframe byte 1). Status: normative, 2026-11-13 (WP LK1, fixup after review lk). Not yet used by any firmware
 image: the sender (WP LK4), the receiver input (LK5), phase lock (LK6) and the repeater (LK8) build on it.*
 
 The link carries the audio of a whole system from one sender (the master clock) to any number of receivers (a DSPi
@@ -222,9 +222,11 @@ C MUST satisfy `layout(C) <= min S_F` at the class and rate in effect, and `1 <=
 | L2 | 19 | 18 | 8 |
 | L3 | 41 | 38 | 18 |
 
-These are protocol limits. A sender MAY offer less (`EXT_LINK_TX` in `extension_channel_spec.md` 2.8.8 limits C to
-the 48 kHz values at 44.1 kHz and to whole banks, 16, on L3 at 96 kHz). Defaults are whole banks: 8 on L1, 16 on L2,
-32 on L3 at 48 kHz.
+**This table is normative and is the only capacity table** (coordinator decision, 2026-11-13). Code takes it from
+`link_max_channels(class, rate)` in C or `link_codec.CAPACITY[(class, rate)]` in Python, never from a copy:
+`EXT_LINK_TX.channels` (`extension_channel_spec.md` 2.8.8), the sender (LK4), the fake device and the clients
+accept exactly C = 1 .. this value. The SYS2 figures (16 on L3 at 96 kHz; the 48 kHz values at 44.1 kHz) are
+superseded. Defaults are whole banks: 8 on L1, 16 on L2, 32 on L3 at 48 kHz.
 
 ### 5.8 PRBS-7 test payload
 
@@ -308,12 +310,19 @@ What a unit does with ops 1-5, 7 and 8, the argument ranges and the late and ref
 
 The frame layout (rate and C) changes only at a superframe boundary N (`N mod 32 = 0`) announced with apply op RATE
 (arg = new rate code, value = new C or 0 for unchanged). From frame N on, the sender uses the new layout and the
-superframes describe it; receivers that saw the announcement switch at N too (8.5), so no frame is lost. A RATE op
+superframes describe it; receivers that saw the announcement switch at N too (8.5), so no frame is lost. Both ends
+switch at the same point: at the end of frame N - 1. The reference encoder's `tx->rate` and `tx->channels` always
+describe the next frame it will encode, so a sender reads them before it fills that frame's samples. A RATE op
 whose new layout does not fit (5.7) MUST NOT be sent, and a receiver ignores it. A receiver that missed the
 announcement loses lock at N and re-locks (8.8).
 
-`EXT_APPLY_AT_FRAME` and `EXT_LINK_CTRL_MSG` (2.8.7, 2.8.9) require value 0 for RATE: hosts change only the rate
-there. The sender puts the new C in `value` itself when its channel count changes (`EXT_LINK_TX`).
+RATE is the protocol's own op: it travels only in the superframe and acts on every unit of the link at once.
+**`EXT_APPLY_AT_FRAME` (per unit, 2.8.7) refuses op 6** (coordinator decision, 2026-11-13): a receiver follows the
+layout its stream carries and never re-plans for a rate the stream does not have. A host changes the rate on the
+sender, through `EXT_LINK_TX` or `EXT_LINK_CTRL_MSG` (2.8.8, 2.8.9), where RATE takes value 0; the sender puts the
+new C in `value` itself when its channel count changes. `EXT_LINK_CTRL_MSG` follows the carriage rules of 6.4 and
+this section (target at least one complete superframe ahead, RATE targets a multiple of 32, a layout that does not
+fit refused), as `link_tx_schedule()` does.
 
 ### 6.6 The frame counter
 
@@ -453,11 +462,31 @@ the next complete valid superframe: 32 to 63 frames after the line is good again
 | `crc16_errors` | failed banks (non-data symbol or CRC-16) | `crc16_errors` |
 | `bit_slips` | commas found 1-2 bits off | `bit_slips` |
 | `superframe_errors` | rejected superframes (8.6) | `superframe_errors` |
-| `comma_errors` | flywheel frames | `EXT_LINK_DIAG` (bench) |
-| `counter_errors` | HDR mismatches and F corrections | `EXT_LINK_DIAG` (bench) |
-| `code_errors` | non-data symbols in heads and decoded banks | `EXT_LINK_DIAG` (bench) |
-| `idle_errors` | non-idle padding symbols | `EXT_LINK_DIAG` (bench) |
+| `comma_errors` | flywheel frames | `EXT_LINK_DIAG` offset 40 (u32) |
+| `counter_errors` | HDR mismatches and F corrections | `EXT_LINK_DIAG` offset 44 (u32) |
+| `code_errors` | non-data symbols in heads and decoded banks | `EXT_LINK_DIAG` offset 48 (u32) |
+| `idle_errors` | non-idle padding symbols | `EXT_LINK_DIAG` offset 52 (u32) |
 | `frames` | frames delivered | |
+
+`EXT_LINK_DIAG` (`0x800A`, 64 bytes, `extension_channel_spec.md` 2.8.11) carries the four bench counters in its
+second half, which replaces the sampling-phase histogram of SYS2 (the PIO emits only bits, so there is no
+histogram). Bytes 32-63, as adopted from review lk:
+
+| Offset | Size | Field |
+|---|---|---|
+| 32 | i8 | `trim_lo`: lowest clean trim step of the last scan (-9..+9) |
+| 33 | i8 | `trim_hi`: highest clean trim step |
+| 34 | i8 | `trim_used`: trim step in use |
+| 35 | u8 | `scan_state`: 0 none, 1 running, 2 done, 3 nothing clean |
+| 36 | u32 | `clean_mask`: bit i set = trim step i - 9 decoded clean |
+| 40 | u32 | `comma_errors` |
+| 44 | u32 | `counter_errors` |
+| 48 | u32 | `code_errors` |
+| 52 | u32 | `idle_errors` |
+| 56 | 8 | reserved, 0 |
+
+The trim scan is LK2's (`link_rx_N` delay trim, 3.26 ns per step); `EXT_LINK_STATS_RESET` clears the four counters
+with the `EXT_LINK_STATUS` ones. 2.8.11 is the normative byte layout; this table must match it.
 
 The receiver's state maps to `EXT_LINK_STATUS.state` as SEARCH and ALIGNED = 1 (searching), LOCKED = 2; holdover
 (3) is a firmware state on top of SEARCH.
@@ -470,7 +499,7 @@ The receiver's state maps to `EXT_LINK_STATUS.state` as SEARCH and ALIGNED = 1 (
 |---|---|
 | `firmware/DSPi/link/link_codec.h`, `.c` | 8b/10b, CRCs, layout and `S_F`, superframe pack/unpack/repeat, PRBS-7, bit packing, the sender's frame encoder `link_tx_*` |
 | `firmware/DSPi/link/link_decoder.h`, `.c` | the receiver of section 8, `link_rx_*`, with an event callback |
-| `tools/link/link_codec.py` | the Python twin of both, written from this document's tables; plus the test helpers of 9.2 |
+| `tools/link/link_codec.py` | the Python twin of both, written from this document's tables; `CAPACITY` (5.7); the test helpers of 9.2 |
 | `tools/link/gen_vectors.py` | writes `firmware/tests/link_vectors.json` |
 | `tools/link/tests/test_link_codec.py` | Python tests: anchors, stream properties, receiver behaviour, the vector file |
 | `firmware/tests/test_link_codec.c` | C tests: the same anchors and properties, every vector, sample round trips |
@@ -509,7 +538,8 @@ the stream was crafted (for example a superframe with a bad CRC) and has a `note
   `h = (F mod 2^32) * 0x9E3779B1; h ^= (ch + 1) * 0x85EBCA77; h ^= seed; h ^= h >> 15; h *= 0x2C1B3C6D;
   h ^= h >> 12; h *= 0x297A2D39; h ^= h >> 15`, then bits 23..0 of h sign-extended.
 - **Damage (`corrupt`):** `;`-separated ops on the clean stream: `flip:P` inverts bit P, `del:P` deletes it,
-  `ins:P:B` inserts bit B before it, `fill:P:N:B` sets N bits from P to B. Positions refer to the clean stream; ops
+  `ins:P:B` inserts bit B before it, `fill:P:N:B` sets N bits from P to B (stopping at the end of the stream; it
+  never lengthens it). Positions refer to the clean stream; ops
   apply from the highest position down, equal positions in list order.
 - **Log:** the receiver's events, space-separated, then the counters:
   - `A<p>` entered ALIGNED with the comma ending at bit p; `L<F>` entered LOCKED at frame F;
@@ -521,10 +551,12 @@ the stream was crafted (for example a superframe with a bad CRC) and has a `note
   - finally `#lock,loss,crc8,crc16,slips,superframe,comma,counter,code,idle,frames`.
 
 The streams cover every class at 44.1, 48 and 96 kHz, a start at F = 0, F above 2^32 and 2^40, 1, 2, 3, 8, 16, 18,
-38 and 41 channels, PRBS-7, a bank mask, RATE changes 48 to 96 kHz (with C 16 to 8) and 48 to 44.1 kHz, an apply,
-and damage: a bit error in a bank, hold then zero, a bad head, a lost comma, slips of -2, -1, +1 bit, a 3-bit slip
-(loss), three lost commas (loss), a 2000-bit dropout, a stray comma inside the payload, a broken superframe byte,
-garbage before the stream, a superframe with a bad CRC and a wrong class byte.
+38 and 41 channels, PRBS-7, a bank mask, RATE changes 48 to 96 kHz (with C 16 to 8), 48 to 44.1 kHz, and two that
+grow C (8 to 16 on L2; 96 kHz 3 channels to 44.1 kHz 8 on L1), an apply, and damage: a bit error in a bank, hold then
+zero, a bad head, a lost comma, slips of -2, -1, +1 and +2 bits, a 3-bit slip (loss), three lost commas (loss), a
+2000-bit dropout, a stray comma inside the payload, a broken superframe byte, garbage before the stream, a fill past
+the end, damage at 44.1 kHz (bank, lost comma, -1 and +2 slips, three lost commas), and crafted streams: a superframe
+with a bad CRC, a wrong class byte, a wrong HDR with a good CRC-8, and a superframe that claims F + 256.
 
 ### 9.3 Running the tests
 
@@ -550,13 +582,13 @@ SYS2 section 2 is the design; these points make it precise or change it:
    2 idle symbols).
 3. **44.1 kHz frame lengths** follow the fixed formula of 5.6 keyed to F, so receivers and repeaters can predict
    them.
-4. **Capacity** is computed (5.7). L3 at 96 kHz fits 18 channels (SYS2 said 16, counting whole banks) and 44.1 kHz
-   fits more than 48 kHz.
+4. **Capacity** is computed (5.7) and is the only capacity table. L3 at 96 kHz fits 18 channels (SYS2 said 16,
+   counting whole banks) and 44.1 kHz fits 8 / 19 / 41, more than 48 kHz.
 5. **A missing comma is not an immediate loss** (SYS2 2.4 said it was; 3.3 treats a short loss as recoverable): the
    locked receiver flywheels, and loss is 3 consecutive failed frames (missing comma, bad head or HDR mismatch).
 6. **Bit slips** of 1-2 bits re-align without loss; larger slips go through loss and re-search.
 7. **Layout changes** (rate and C) happen only at superframe boundaries through apply op RATE, whose `value` carries
-   the new C (0 = unchanged).
+   the new C (0 = unchanged). RATE is never a per-unit op: `EXT_APPLY_AT_FRAME` refuses op 6.
 8. **Apply carriage:** carried in every superframe that completes before the target; at least one is required.
 9. **Running disparity** is generated correctly but not checked by receivers in version 1.
 10. **PRBS-7** is defined per frame (reset at each frame), so a bench receiver checks every frame on its own.
