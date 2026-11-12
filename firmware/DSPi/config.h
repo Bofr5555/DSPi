@@ -141,7 +141,8 @@ extern volatile uint32_t nominal_feedback_10_14;
 // OUT = set).  An unknown sub-command, a wrong direction or a wrong length
 // STALLs, exactly like an unknown opcode, so stock firmware (which STALLs 0x00)
 // reads as "no extensions".  IDs 0x0001-0x7FFF are coordinated with Weeb Labs
-// and listed in the spec; 0x8000-0xFFFF are experimental/private, never shipped.
+// and listed in the spec; 0x8000-0x80FF are the fork's link block (spec 2.8,
+// specified, not implemented); 0x8100-0xFFFF are experimental/private, never shipped.
 #define REQ_EXTENSION               0x00
 #define EXT_LIST                    0x0000  // IN: supported IDs, uint16 LE ascending (excl. 0), truncated to wLength
 #define EXT_CROSSFEED_PAIR_MAP      0x0001  // IN: uint8[4]; OUT: uint8[4] (crossfeed_map.h)

@@ -266,6 +266,215 @@ class Scripts(unittest.TestCase):
         self.assertIn("SOAK PASS", out)
 
 
+class LinkBlock(unittest.TestCase):
+    """LK7: link block 0x8000-0x800A and events 0xE1 / 0xE2 (extension_channel_spec.md 2.8)."""
+
+    RX_IDS = (1, 2, 3, 4, 5, 6, 0x8000, 0x8001, 0x8002, 0x8003, 0x8004, 0x8005, 0x8006,
+              0x8008, 0x8009, 0x800A)
+    TX_IDS = (1, 2, 3, 4, 5, 6, 0x8000, 0x8001, 0x8002, 0x8005, 0x8007, 0x8008, 0x8009, 0x800A)
+
+    def client(self, link):
+        self.dev = fd.FakeDevice(link=link)
+        self.c = mc.Client(fd.FakePort(self.dev, chunk=7), timeout=0.5)
+        return self.c
+
+    def ext(self, sub, wlength=0):
+        return self.c.get(mc.REQ_EXTENSION, sub, wlength=wlength)
+
+    def put(self, sub, payload):
+        return self.c.set(mc.REQ_EXTENSION, sub, payload=payload).status
+
+    def lock(self):
+        self.assertEqual(self.put(mc.EXT_LINK_CONFIG, bytes([1, 0xFF, 0, 0xFF, 0xFF, 0xFF, 3, 0])), mc.ST_OK)
+        self.dev.link_event(2, 1)
+        return self.c.wait_notify(lambda r: r.payload[1] == mc.NOTIFY_EVT_LINK_STATE, 0.5)
+
+    def test_lk7_no_link_refuses_ids(self):
+        # Today's firmware (and the fake by default): not listed, every ID refused, bits 2/3 clear.
+        self.client(None)
+        self.assertEqual(struct.unpack("<6H", self.ext(mc.EXT_LIST).payload), (1, 2, 3, 4, 5, 6))
+        for sub in range(0x8000, 0x800B):
+            self.assertEqual(self.ext(sub).status, mc.ST_ERROR, hex(sub))
+        self.assertEqual(self.put(mc.EXT_LINK_CONFIG, bytes(8)), mc.ST_ERROR)
+        self.assertEqual(self.put(mc.EXT_LINK_STATS_RESET, b"\x01"), mc.ST_ERROR)
+        feats = struct.unpack("<I", self.ext(mc.EXT_NOTIFY_FEATURES).payload)[0]
+        self.assertFalse(feats & (mc.NOTIFY_FEAT_LINK_STATE | mc.NOTIFY_FEAT_APPLY_RESULT))
+
+    def test_lk7_receiver_discovery_and_vectors(self):
+        self.client("receiver")
+        rep = self.ext(mc.EXT_LIST)
+        self.assertEqual(struct.unpack(f"<{len(rep.payload) // 2}H", rep.payload), self.RX_IDS)
+        self.assertEqual(self.ext(mc.EXT_LIST, wlength=64).payload, rep.payload)   # 32 B fit in 64
+        feats = struct.unpack("<I", self.ext(mc.EXT_NOTIFY_FEATURES).payload)[0]
+        self.assertEqual(feats, 0x0F)
+        # Byte-exact vectors from the spec (2.8.1, 2.8.3, 2.8.4, 2.8.5).
+        self.assertEqual(self.ext(mc.EXT_LINK_INFO).payload.hex(),
+                         "010107014008000000ff00002300000070000004000000000000000000000000")
+        self.assertEqual(self.ext(mc.EXT_LINK_CONFIG).payload.hex(), "00ff00ffffff0300")
+        self.assertEqual(self.ext(mc.EXT_LINK_SLOTS).payload.hex(), "0001020304050607")
+        self.assertEqual(self.ext(mc.EXT_LINK_PHASE).payload.hex(), "0100800000000000")
+        self.assertIn("role=receiver protocol=v1 classes=L1,L2,L3 max_links=1 max_channels=64 slots=8 "
+                      "rx_pin=GP0 tx_pin=none features=0x00000023 PHASE_LOCK APPLY_AT_FRAME LOS_PIN "
+                      "d_local=112..1024", mc.decode_link_info(self.ext(mc.EXT_LINK_INFO).payload))
+        # Sender-only forms are refused on a receiver; wrong direction / length too.
+        self.assertEqual(self.ext(mc.EXT_LINK_TX).status, mc.ST_ERROR)
+        self.assertEqual(self.put(mc.EXT_LINK_TX, bytes(16)), mc.ST_ERROR)
+        self.assertEqual(self.put(mc.EXT_LINK_CTRL_MSG, bytes(16)), mc.ST_ERROR)
+        self.assertEqual(self.put(mc.EXT_LINK_INFO, bytes(32)), mc.ST_ERROR)
+        self.assertEqual(self.ext(mc.EXT_LINK_STATS_RESET).status, mc.ST_ERROR)
+        self.assertEqual(self.ext(0x800B).status, mc.ST_ERROR)
+        self.assertEqual(self.ext(mc.EXT_LINK_STATUS, wlength=8).payload, bytes([0, 0, 0xFF, 0, 0, 0xFF, 0, 0]))
+
+    def test_lk7_receiver_config_slots_phase(self):
+        self.client("receiver")
+        cfg = bytes([1, 0, 1, 22, 21, 0xFF, 1, 0])          # GP0 in, L1, repeater GP22, LOS GP21
+        self.assertEqual(self.put(mc.EXT_LINK_CONFIG, cfg), mc.ST_OK)
+        self.assertEqual(self.ext(mc.EXT_LINK_CONFIG).payload, cfg)
+        self.assertEqual(self.ext(mc.EXT_LINK_INFO).payload[0], 3)      # repeater while tx_pin is set
+        for bad in (bytes([2, 0, 0, 0xFF, 0xFF, 0xFF, 0, 0]),           # enable > 1
+                    bytes([1, 0, 4, 0xFF, 0xFF, 0xFF, 0, 0]),           # class > 3
+                    bytes([1, 23, 0, 0xFF, 0xFF, 0xFF, 0, 0]),          # internal pin
+                    bytes([1, 29, 0, 0xFF, 0xFF, 0xFF, 0, 0]),          # VSYS sense, not on the header
+                    bytes([1, 0, 0, 0, 0xFF, 0xFF, 0, 0]),              # rx == tx
+                    bytes([1, 0, 0, 0xFF, 0xFF, 0xFF, 4, 0]),           # undefined flag
+                    bytes([1, 0, 0, 0xFF, 0xFF, 0xFF, 0, 1])):          # reserved
+            self.assertEqual(self.put(mc.EXT_LINK_CONFIG, bad), mc.ST_ERROR, bad.hex())
+        self.assertEqual(self.put(mc.EXT_LINK_CONFIG, cfg[:7]), mc.ST_ERROR)
+        self.assertEqual(self.ext(mc.EXT_LINK_CONFIG).payload, cfg)     # refusals change nothing
+        slots = bytes([4, 5, 0xFF, 0xFF, 11, 0xFF, 63, 0xFF])
+        self.assertEqual(self.put(mc.EXT_LINK_SLOTS, slots), mc.ST_OK)
+        self.assertEqual(self.ext(mc.EXT_LINK_SLOTS).payload, slots)
+        self.assertEqual(self.put(mc.EXT_LINK_SLOTS, bytes([64] + [0xFF] * 7)), mc.ST_ERROR)
+        phase = struct.pack("<BBHhBB", 1, 0, 176, -1, 0, 0)
+        self.assertEqual(self.put(mc.EXT_LINK_PHASE, phase), mc.ST_OK)
+        self.assertIn("mode=phase lock d_local=176 hops_offset=-1", mc.decode_link_phase(self.ext(mc.EXT_LINK_PHASE).payload))
+        for bad in (struct.pack("<BBHhBB", 2, 0, 128, 0, 0, 0), struct.pack("<BBHhBB", 1, 1, 128, 0, 0, 0),
+                    struct.pack("<BBHhBB", 1, 0, 111, 0, 0, 0), struct.pack("<BBHhBB", 1, 0, 1025, 0, 0, 0),
+                    struct.pack("<BBHhBB", 1, 0, 128, 65, 0, 0), struct.pack("<BBHhBB", 1, 0, 128, 0, 1, 0)):
+            self.assertEqual(self.put(mc.EXT_LINK_PHASE, bad), mc.ST_ERROR, bad.hex())
+        # state (byte 7) is ignored on OUT, so a read-modify-write works.
+        self.assertEqual(self.put(mc.EXT_LINK_PHASE, struct.pack("<BBHhBB", 0, 0, 128, 0, 0, 2)), mc.ST_OK)
+
+    def test_lk7_receiver_lock_loss_events(self):
+        self.client("receiver")
+        n = self.lock()
+        self.assertIsNotNone(n)
+        self.assertEqual(n.payload.hex(), "02e100000201010040420f00")
+        self.assertEqual(mc.decode_notify(n.payload),
+                         "v2 seq=  0 LINK_STATE state=locked class=L1 reason=LOCKED F_low32=1000000")
+        st = self.ext(mc.EXT_LINK_STATUS).payload
+        self.assertEqual(len(st), mc.LINK_STATUS_LEN)
+        self.assertIn("state=locked class=L1 rate=48k C=8 hops=0 los=n/a sender=0x5A sf_flags=0x08 F=1000000 "
+                      "locks=1 losses=0", mc.decode_link_status(st))
+        fc = self.ext(mc.EXT_FRAME_COUNTER).payload
+        self.assertEqual(struct.unpack("<QII", fc)[0], 1_000_000)
+        self.assertEqual(mc.decode_link_phase(self.ext(mc.EXT_LINK_PHASE).payload),
+                         "mode=phase lock d_local=128 hops_offset=0 state=locked")
+        # A new delay while locked re-anchors (0xE1 reason REANCHOR, state stays locked).
+        self.assertEqual(self.put(mc.EXT_LINK_PHASE, struct.pack("<BBHhBB", 1, 0, 176, 0, 0, 0)), mc.ST_OK)
+        n = self.c.wait_notify(lambda r: r.payload[1] == mc.NOTIFY_EVT_LINK_STATE, 0.5)
+        self.assertIn("state=locked class=L1 reason=REANCHOR", mc.decode_notify(n.payload))
+        # Long loss -> holdover; counters; reset.
+        self.dev.link_event(3, 2)
+        n = self.c.wait_notify(lambda r: r.payload[1] == mc.NOTIFY_EVT_LINK_STATE, 0.5)
+        self.assertIn("state=holdover class=L1 reason=LOS", mc.decode_notify(n.payload))
+        self.assertEqual(struct.unpack_from("<II", self.ext(mc.EXT_LINK_STATUS).payload, 16), (1, 1))
+        self.assertEqual(self.put(mc.EXT_LINK_STATS_RESET, b"\x02"), mc.ST_ERROR)
+        self.assertEqual(self.put(mc.EXT_LINK_STATS_RESET, b"\x01"), mc.ST_OK)
+        self.assertEqual(struct.unpack_from("<6I", self.ext(mc.EXT_LINK_STATUS).payload, 16), (0,) * 6)
+        # Disabling the link turns it off with reason DISABLED.
+        self.assertEqual(self.put(mc.EXT_LINK_CONFIG, bytes([0, 0xFF, 0, 0xFF, 0xFF, 0xFF, 3, 0])), mc.ST_OK)
+        n = self.c.wait_notify(lambda r: r.payload[1] == mc.NOTIFY_EVT_LINK_STATE, 0.5)
+        self.assertIn("state=off class=L0 reason=DISABLED", mc.decode_notify(n.payload))
+        self.assertEqual(struct.unpack("<QII", self.ext(mc.EXT_FRAME_COUNTER).payload)[0], 0)
+        diag = self.ext(mc.EXT_LINK_DIAG).payload
+        self.assertEqual((len(diag), diag[0]), (mc.LINK_DIAG_LEN, 1))
+        self.assertEqual(self.ext(mc.EXT_LINK_CTRL_MSG).payload, bytes(24))   # nothing received
+
+    def test_lk7_apply_at_frame(self):
+        self.client("receiver")
+        req = lambda frame, op, arg=0, value=0: struct.pack("<QBBh4x", frame, op, arg, value)
+        self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, req(1_002_400, 1)), mc.ST_ERROR)   # not locked
+        self.lock()
+        self.assertEqual(req(1_002_400, 4, 0, -2000).hex(), "a04b0f0000000000040030f800000000")
+        self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, req(1_002_400, 4, 0, -2000)), mc.ST_OK)
+        self.assertEqual(self.ext(mc.EXT_APPLY_AT_FRAME).payload.hex(), "01000000" + "00" * 12)
+        self.dev.link.advance(2400, self.dev)
+        n = self.c.wait_notify(lambda r: r.payload[1] == mc.NOTIFY_EVT_APPLY_RESULT, 0.5)
+        self.assertEqual(n.payload.hex(), "02e2000104000000a04b0f00")
+        self.assertIn("APPLY_RESULT op=MASTER_VOLUME result=applied frame_low32=1002400", mc.decode_notify(n.payload))
+        self.assertEqual(self.ext(mc.EXT_APPLY_AT_FRAME).payload.hex(), "00040000a04b0f000000000000000000")
+        # A frame already passed is applied at once and reported late.
+        self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, req(1_000_000, 7, 2)), mc.ST_OK)
+        n = self.c.wait_notify(lambda r: r.payload[1] == mc.NOTIFY_EVT_APPLY_RESULT, 0.5)
+        self.assertIn("op=CLICK result=late frame_low32=1000000", mc.decode_notify(n.payload))
+        # Queue of 4; a fifth is refused; CANCEL_ALL cancels each with an event.
+        for i in range(4):
+            self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, req(1_010_000 + i, 1 + i % 2)), mc.ST_OK)
+        self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, req(1_020_000, 8)), mc.ST_ERROR)
+        self.assertEqual(self.ext(mc.EXT_APPLY_AT_FRAME).payload[0], 4)
+        self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, req(0, 0)), mc.ST_OK)
+        got = []
+        while (n := self.c.wait_notify(lambda r: r.payload[1] == mc.NOTIFY_EVT_APPLY_RESULT, 0.2)):
+            got.append(n.payload[5])
+        self.assertEqual(got, [2, 2, 2, 2])
+        self.assertEqual(self.ext(mc.EXT_APPLY_AT_FRAME).payload[:3], bytes([0, 2, 2]))
+        # Invalid arguments and reserved bytes are refused.
+        for bad in (req(1_100_000, 9), req(1_100_000, 1, 1), req(1_100_000, 3, 10), req(1_100_000, 4, 0, 1),
+                    req(1_100_000, 5, 9, 10), req(1_100_000, 5, 0, 2048), req(1_100_000, 6, 3),
+                    req(1_100_000, 1)[:12] + b"\x00\x00\x00\x01"):
+            self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, bad), mc.ST_ERROR, bad.hex())
+
+    def test_lk7_sender(self):
+        self.client("sender")
+        rep = self.ext(mc.EXT_LIST)
+        self.assertEqual(struct.unpack(f"<{len(rep.payload) // 2}H", rep.payload), self.TX_IDS)
+        self.assertEqual(self.ext(mc.EXT_LINK_INFO).payload.hex(),
+                         "020107084000000014ff00003800000000000000000000000000000000000000")
+        for sub in (mc.EXT_LINK_SLOTS, mc.EXT_LINK_PHASE, mc.EXT_APPLY_AT_FRAME):
+            self.assertEqual(self.ext(sub).status, mc.ST_ERROR, hex(sub))
+        self.assertEqual(self.ext(mc.EXT_LINK_TX).payload.hex(), "00000108010000ffff00000000000000")
+        tx = struct.pack("<HBBBBBBHHBBH", 0x0003, 2, 16, 1, 1, 0, 21, 0x00FC, 0xFFFF, 9, 0, 0)
+        self.assertEqual(self.put(mc.EXT_LINK_TX, tx), mc.ST_OK)
+        got = self.ext(mc.EXT_LINK_TX).payload
+        self.assertEqual(got[:10], tx[:10])
+        self.assertEqual(got[10:13], bytes(3))          # los mask / usb_alt are IN-only
+        for bad in (struct.pack("<HBBBBBBHHBBH", 0x0100, 1, 8, 1, 0, 0, 0xFF, 0, 0, 0, 0, 0),   # link 8 of 8
+                    struct.pack("<HBBBBBBHHBBH", 1, 1, 9, 1, 0, 0, 0xFF, 0, 0, 0, 0, 0),        # 9 ch on L1
+                    struct.pack("<HBBBBBBHHBBH", 1, 3, 17, 2, 0, 0, 0xFF, 0, 0, 0, 0, 0),       # 17 ch on L3 96k
+                    struct.pack("<HBBBBBBHHBBH", 1, 1, 8, 1, 4, 0, 0xFF, 0, 0, 0, 0, 0),        # test pattern 4
+                    struct.pack("<HBBBBBBHHBBH", 1, 1, 8, 1, 0, 1, 0xFF, 0, 0, 0, 0, 0)):       # slot map 1
+            self.assertEqual(self.put(mc.EXT_LINK_TX, bad), mc.ST_ERROR, bad.hex())
+        msg = struct.pack("<QBBhB3x", 5_000_000, 1, 0, 0, 1)
+        self.assertEqual(self.put(mc.EXT_LINK_CTRL_MSG, msg), mc.ST_OK)
+        snap = self.ext(mc.EXT_LINK_CTRL_MSG).payload
+        self.assertEqual(len(snap), mc.LINK_CTRL_MSG_IN_LEN)
+        self.assertEqual((snap[0] & 1, struct.unpack_from("<QB", snap, 8)), (1, (5_000_000, 1)))
+        self.assertEqual(self.put(mc.EXT_LINK_CTRL_MSG, struct.pack("<QBBhB3x", 0, 9, 0, 0, 0)), mc.ST_ERROR)
+        self.assertEqual(self.put(mc.EXT_LINK_CONFIG, bytes([1, 0xFF, 0, 22, 0xFF, 0xFF, 3, 0])), mc.ST_ERROR)
+        self.assertEqual(self.put(mc.EXT_LINK_CONFIG, bytes([1, 0xFF, 0, 0xFF, 0xFF, 0xFF, 3, 0])), mc.ST_OK)
+        self.assertEqual(self.ext(mc.EXT_LINK_INFO).payload[0], 4)      # fan-out while its input is enabled
+
+    def test_lk7_cli(self):
+        rc, out = Scripts.run_main(None, mc, ["link", "--fake-link", "receiver"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("info:   role=receiver", out)
+        self.assertIn("status: state=locked class=L1 rate=48k C=8", out)
+        self.assertIn("slots:  0 1 2 3 4 5 6 7", out)
+        self.assertIn("phase:  mode=phase lock d_local=128 hops_offset=0 state=locked", out)
+        self.assertNotIn("tx:", out)
+        rc, out = Scripts.run_main(None, mc, ["link", "--fake-link", "sender"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("role=sender", out)
+        self.assertIn("tx:     00 00 01 08", out)
+        rc, out = Scripts.run_main(None, mc, ["link", "--fake"])
+        self.assertEqual(rc, 1)
+        self.assertIn("no link support", out)
+        rc, out = Scripts.run_main(None, mc, ["ext-list", "--fake-link", "receiver"])
+        self.assertIn("0x8000 0x8001", out)
+        self.assertIn("notify features: 0x0000000F BULK_SOURCE CLIP_EVENT LINK_STATE APPLY_RESULT", out)
+
+
 if __name__ == "__main__":
     unittest.main()
 

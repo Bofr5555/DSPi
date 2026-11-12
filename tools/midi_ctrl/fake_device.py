@@ -16,6 +16,9 @@ exercise midi_ctrl.py, measure.py and soak.py without a device:
     after a SET, src MIDI), 0x50 status, 0xB0/0xB2 stats, 0xF0 bootloader, 0x00
     extension channel (EXT_LIST, pair map, core-voltage status, notify
     feature flags);
+  * optional link block 0x8000-0x800A and events 0xE1 / 0xE2
+    (FakeDevice(link="receiver" | "sender"), `--link` in pty mode); without
+    it the IDs are refused like on today's firmware;
   * optional BUSY / BULK_LOCKED injection.
 
 In-process use: FakePort(FakeDevice()) has the RawMidiPort interface.
@@ -40,6 +43,200 @@ import midi_ctrl as mc
 WIRE_BULK_SIZE = 6136                   # WireBulkParams V32 (bulk_v32.bin)
 MASTER_VOL_OFFSET = 0x0AD4              # illustrative wire offset
 PLATFORM = bytes([1, 1, 0x16, 4, 1, 6, 0])   # RP2350, v1.1.6, 4 outputs
+NUM_OUTPUTS = 9                         # RP2350: 8 slots + PDM sub (EXT_IDENTIFY tone bound)
+PRESET_SLOTS = 10
+MAX_DELAY_SAMPLES = 2048                # RP2350 (config.h)
+
+# -- link block (extension_channel_spec.md 2.8) ------------------------------
+LINK_RX_IDS = (0x8000, 0x8001, 0x8002, 0x8003, 0x8004, 0x8005, 0x8006, 0x8008, 0x8009, 0x800A)
+LINK_TX_IDS = (0x8000, 0x8001, 0x8002, 0x8005, 0x8007, 0x8008, 0x8009, 0x800A)
+LINK_FEAT_RX = 0x23                     # PHASE_LOCK | APPLY_AT_FRAME | LOS_PIN
+LINK_FEAT_TX = 0x38                     # FAN_OUT | TEST_PATTERNS | LOS_PIN
+D_LOCAL_MIN, D_LOCAL_MAX = 112, 1024    # 1 ms latency option (SYS2 3.2)
+APPLY_QUEUE = 4
+MAX_CHANNELS = {(1, 1): 8, (2, 1): 18, (3, 1): 38, (1, 2): 3, (2, 2): 8, (3, 2): 16}  # (class, rate) -> C
+MAX_CHANNELS.update({(k, 0): v for (k, r), v in list(MAX_CHANNELS.items()) if r == 1})
+
+
+def link_pin_ok(p: int) -> bool:
+    return p == 0xFF or (p <= 28 and p not in (23, 24, 25))   # Pico 2 header GPIOs
+
+
+class FakeLink:
+    """Control-plane model of the link block: validation, state, counters.
+
+    No audio and no timing: tests move the model with lock(), lose(),
+    advance() and read the 0xE1 / 0xE2 notifications the device sends.
+    The 250 ms rate limit of 0xE1 is not modelled (one event per call).
+    """
+
+    def __init__(self, role: str):
+        self.sender = role == "sender"
+        self.ids = LINK_TX_IDS if self.sender else LINK_RX_IDS
+        self.config = bytearray([0, 0xFF, 0, 0xFF, 0xFF, 0xFF, 0x03, 0])
+        self.slots = bytearray(range(8))
+        self.mode, self.d_local, self.hops_offset, self.phase_state = 1, 128, 0, 0
+        self.state, self.cls, self.rate, self.chans, self.hops = 0, 0, 0xFF, 0, 0
+        self.frame = 0
+        self.sf_flags = 0
+        self.counters = [0] * 6         # lock, loss, crc8, crc16, bit_slip, superframe
+        self.vcxo_ppm, self.phase_error, self.fill = 0.0, 0.0, 0
+        self.queue = []                 # pending (frame, op, arg, value)
+        self.last = (0, 0, 0)           # (op, result, frame)
+        self.tx = bytearray(struct.pack("<HBBBBBBHHBBH", 0, 1, 8, 1, 0, 0, 0xFF, 0x00FF, 0, 0, 0, 0))
+        self.injected = None            # sender: last CTRL_MSG apply
+
+    @property
+    def role(self) -> int:
+        if self.sender:
+            return 4 if self.config[0] else 2
+        return 3 if self.config[3] != 0xFF else 1
+
+    # -- IN ------------------------------------------------------------------
+    def info(self) -> bytes:
+        rx = self.config[1] if self.config[1] != 0xFF else (20 if self.sender else 0)
+        return (struct.pack("<BBBBBBHBBH", self.role, 1, 0x07,
+                            8 if self.sender else 1, 64, 0 if self.sender else 8, 0, rx, self.config[3], 0)
+                + struct.pack("<IHH", LINK_FEAT_TX if self.sender else LINK_FEAT_RX,
+                              0 if self.sender else D_LOCAL_MIN, 0 if self.sender else D_LOCAL_MAX)
+                + bytes(12))
+
+    def status(self) -> bytes:
+        los = 0xFF if self.config[4] == 0xFF else (1 if self.state == 3 else 0)
+        return (struct.pack("<8BQ", self.state, self.cls, self.rate, self.chans, self.hops, los,
+                            0x5A if self.state else 0, self.sf_flags, self.frame)
+                + struct.pack("<6IffHH", *self.counters, self.vcxo_ppm, self.phase_error, self.fill, 0))
+
+    def phase(self) -> bytes:
+        below = int(self.d_local + self.hops_offset < D_LOCAL_MIN)
+        return struct.pack("<BBHhBB", self.mode, 0, self.d_local, self.hops_offset, below, self.phase_state)
+
+    def frame_counter(self) -> bytes:
+        f = self.frame if self.state in (2, 3) or self.sender else 0
+        return struct.pack("<QII", f, 12_345_678, (self.frame - 1000) & 0xFFFFFFFF)
+
+    def apply_status(self) -> bytes:
+        op, res, frame = self.last
+        return struct.pack("<BBBBQI", len(self.queue), op, res, 0, frame, 0)
+
+    def ctrl_msg(self) -> bytes:
+        # superframe bytes 2-7, 2 reserved, bytes 16-27, u32 F_low32 of its first frame
+        if self.state == 0 and not self.sender:
+            return bytes(24)
+        sf_frame = self.frame & ~31
+        target, op, arg, value = self.injected or (0, 0, 0, 0)
+        return (struct.pack("<BBBBBB", self.sf_flags, self.rate, self.chans, self.cls, self.hops, 0x5A)
+                + bytes(2) + struct.pack("<QBBh", target, op, arg, value) + struct.pack("<I", sf_frame & 0xFFFFFFFF))
+
+    def diag(self) -> bytes:
+        return (struct.pack("<BBH3f4I", 1, 7, 0, self.vcxo_ppm, 0.0, 0.0, 4096, 3072, 8192, 1 << 20)
+                + struct.pack("<8I", 0, 0, 3, 997, 1012, 4, 0, 0))
+
+    def get(self, sub: int) -> bytes | None:
+        return {0x8000: self.info, 0x8001: self.status, 0x8002: lambda: bytes(self.config),
+                0x8003: lambda: bytes(self.slots), 0x8004: self.phase, 0x8005: self.frame_counter,
+                0x8006: self.apply_status, 0x8007: lambda: bytes(self.tx), 0x8008: self.ctrl_msg,
+                0x800A: self.diag}.get(sub, lambda: None)()
+
+    # -- OUT -----------------------------------------------------------------
+    SET_LEN = {0x8002: 8, 0x8003: 8, 0x8004: 8, 0x8006: 16, 0x8007: 16, 0x8008: 16, 0x8009: 1}
+
+    def set_len(self, sub: int) -> int | None:
+        if sub not in self.ids or (sub == 0x8008 and not self.sender):
+            return None
+        return self.SET_LEN.get(sub)
+
+    def _apply_ok(self, op: int, arg: int, value: int) -> bool:
+        if op in (1, 2, 8):
+            return arg == 0 and value == 0
+        if op == 3:
+            return arg < PRESET_SLOTS and value == 0
+        if op == 4:
+            return arg == 0 and -12800 <= value <= 0
+        if op == 5:
+            return arg < NUM_OUTPUTS and 0 <= value < MAX_DELAY_SAMPLES
+        if op == 6:
+            return arg <= 2 and value == 0
+        if op == 7:
+            return arg < NUM_OUTPUTS and value == 0
+        return False
+
+    def set(self, sub: int, p: bytes, dev: "FakeDevice") -> bool:
+        if sub == 0x8002:
+            enable, rx, cls, tx, los, txdis, flags, res = p
+            pins = [x for x in (rx, tx, los, txdis) if x != 0xFF]
+            if (enable > 1 or cls > 3 or flags & ~0x03 or res or not all(map(link_pin_ok, (rx, tx, los, txdis)))
+                    or len(set(pins)) != len(pins) or (tx != 0xFF and self.sender)):
+                return False
+            was = self.config[0]
+            self.config[:] = p
+            if was and not enable and self.state:
+                dev.link_event(0, 7)
+            return True
+        if sub == 0x8003:
+            if any(x >= 64 and x != 0xFF for x in p):
+                return False
+            self.slots[:] = p
+            return True
+        if sub == 0x8004:
+            mode, res, d_local, hops_off, flags, _state = struct.unpack("<BBHhBB", p)
+            if mode > 1 or res or flags or not -64 <= hops_off <= 64 \
+                    or not D_LOCAL_MIN <= d_local + hops_off <= D_LOCAL_MAX:
+                return False
+            changed = (mode, d_local, hops_off) != (self.mode, self.d_local, self.hops_offset)
+            self.mode, self.d_local, self.hops_offset = mode, d_local, hops_off
+            if changed and self.state == 2 and self.phase_state == 2:
+                dev.link_event(2, 5)    # re-anchor on the new delay
+            return True
+        if sub == 0x8006:
+            frame, op, arg, value = struct.unpack_from("<QBBh", p)
+            if any(p[12:]) or op > 8:
+                return False
+            if op == 0:
+                for f, o, _a, _v in self.queue:
+                    self.last = (o, 2, f)
+                    dev.notify_apply(o, 2, f)
+                self.queue.clear()
+                return True
+            if not self._apply_ok(op, arg, value) or self.state != 2 or len(self.queue) >= APPLY_QUEUE:
+                return False
+            self.queue.append((frame, op, arg, value))
+            self.advance(0, dev)
+            return True
+        if sub == 0x8007:
+            mask, cls, chans, rate, test, smap, sync, txdis, _los, _alt, flags, res = struct.unpack("<HBBBBBBHHBBH", p)
+            if (mask >> 8 or not 1 <= cls <= 3 or rate > 2 or not 1 <= chans <= MAX_CHANNELS[(cls, rate)]
+                    or test > 3 or smap or not link_pin_ok(sync) or txdis >> 8 or flags & ~1 or res):
+                return False
+            keep = self.tx[10:13]                  # IN-only: los mask, usb_alt
+            self.tx[:] = p
+            self.tx[10:13] = keep
+            return True
+        if sub == 0x8008:
+            frame, op, arg, value, sysflags = struct.unpack_from("<QBBhB", p)
+            if op > 8 or (op and not self._apply_ok(op, arg, value)) or sysflags & ~1 or any(p[13:]):
+                return False
+            self.injected = (frame, op, arg, value)
+            self.sf_flags = (self.sf_flags & ~1) | sysflags
+            return True
+        if sub == 0x8009:
+            if p[0] != 1:
+                return False
+            self.counters = [0] * 6
+            return True
+        return False
+
+    # -- model driving (tests) -------------------------------------------------
+    def advance(self, frames: int, dev: "FakeDevice") -> None:
+        """Move F forward; due ops apply in frame order (late if already past when queued)."""
+        late = [q for q in self.queue if q[0] < self.frame]
+        self.frame += frames
+        due = sorted((q for q in self.queue if q[0] <= self.frame), key=lambda q: q[0])
+        for q in due:
+            self.queue.remove(q)
+            res = 1 if q in late else 0
+            self.last = (q[1], res, q[0])
+            dev.notify_apply(q[1], res, q[0])
 
 
 def default_bulk() -> bytes:
@@ -51,7 +248,7 @@ def default_bulk() -> bytes:
 
 
 class FakeDevice:
-    def __init__(self, mfr: bytes = mc.MFR_DEV, bulk: bytes | None = None):
+    def __init__(self, mfr: bytes = mc.MFR_DEV, bulk: bytes | None = None, link: str | None = None):
         self.mfr = mfr
         self.split = mc.SysexSplitter()
         self.out = bytearray()
@@ -68,6 +265,7 @@ class FakeDevice:
         self.pair_map = bytes(4)    # EXT_CROSSFEED_PAIR_MAP (normalization not modelled)
         self.identify_s = 0         # EXT_IDENTIFY blink time (no countdown modelled)
         self.identify_tone = mc.IDENTIFY_TONE_NONE
+        self.link = FakeLink(link) if link else None   # None: link IDs refused (today's firmware)
 
     # -- output -----------------------------------------------------------
     def _emit(self, tag: int, frame: bytes) -> None:
@@ -89,6 +287,30 @@ class FakeDevice:
         # A bulk SET's invalidation carries the SET's dispatch source (MIDI
         # here; NOTIFY_FEAT_BULK_SOURCE).  Older firmware sent BULK_SET (2).
         self.notify(bytes([2, 0x03, 0, self.seq & 0xFF, src, 0, 0, 0]))
+        self.seq += 1
+
+    def link_event(self, state: int, reason: int) -> None:
+        """Set the link state and send NOTIFY_EVT_LINK_STATE (0xE1)."""
+        ln = self.link
+        if state == 2 and ln.state != 2:
+            ln.counters[0] += 1
+            ln.cls, ln.rate, ln.chans, ln.hops = ln.cls or 1, 1, 8, 0
+            ln.frame = ln.frame or 1_000_000
+            ln.sf_flags |= 0x08
+        if state in (0, 3) and ln.state == 2:
+            ln.counters[1] += 1
+        ln.state = state
+        ln.phase_state = 2 if state == 2 and ln.mode == 1 else 0
+        if state == 0:
+            ln.cls, ln.rate, ln.chans = 0, 0xFF, 0
+        self.notify(bytes([2, mc.NOTIFY_EVT_LINK_STATE, 0, self.seq & 0xFF, state, ln.cls, reason, 0])
+                    + struct.pack("<I", ln.frame & 0xFFFFFFFF))
+        self.seq += 1
+
+    def notify_apply(self, op: int, result: int, frame: int) -> None:
+        """NOTIFY_EVT_APPLY_RESULT (0xE2) for one applied or cancelled op."""
+        self.notify(bytes([2, mc.NOTIFY_EVT_APPLY_RESULT, 0, self.seq & 0xFF, op, result, 0, 0])
+                    + struct.pack("<I", frame & 0xFFFFFFFF))
         self.seq += 1
 
     # -- input --------------------------------------------------------------
@@ -223,17 +445,23 @@ class FakeDevice:
         # Extension channel (extension_channel_spec.md): unknown sub-command,
         # wrong direction or wrong OUT length -> ERROR (USB: STALL).
         set_len = {mc.EXT_CROSSFEED_PAIR_MAP: 4, mc.EXT_CORE_VREG: 2, mc.EXT_IDENTIFY: 4}
+        if sub >= 0x8000:
+            return self._link_ext(tag, is_get, sub, payload, cap)
         if is_get:
             if sub == mc.EXT_LIST:
-                data = struct.pack("<6H", mc.EXT_CROSSFEED_PAIR_MAP, mc.EXT_CORE_VREG,
-                                   mc.EXT_NOTIFY_FEATURES, mc.EXT_IDENTIFY, mc.EXT_RESET_INFO,
-                                   mc.EXT_FIRMWARE_FIXES)
+                ids = (mc.EXT_CROSSFEED_PAIR_MAP, mc.EXT_CORE_VREG, mc.EXT_NOTIFY_FEATURES,
+                       mc.EXT_IDENTIFY, mc.EXT_RESET_INFO, mc.EXT_FIRMWARE_FIXES) + \
+                    (self.link.ids if self.link else ())
+                data = struct.pack(f"<{len(ids)}H", *ids)
             elif sub == mc.EXT_CROSSFEED_PAIR_MAP:
                 data = self.pair_map
             elif sub == mc.EXT_CORE_VREG:
                 data = bytes([0x0D, 0, 0x0D, 0]) + bytes(12)   # live/default 1.20 V
             elif sub == mc.EXT_NOTIFY_FEATURES:
-                data = struct.pack("<I", mc.NOTIFY_FEAT_BULK_SOURCE | mc.NOTIFY_FEAT_CLIP_EVENT)
+                feats = mc.NOTIFY_FEAT_BULK_SOURCE | mc.NOTIFY_FEAT_CLIP_EVENT
+                if self.link:
+                    feats |= mc.NOTIFY_FEAT_LINK_STATE | mc.NOTIFY_FEAT_APPLY_RESULT
+                data = struct.pack("<I", feats)
             elif sub == mc.EXT_IDENTIFY:
                 # RP2350 A2 on a pico2 build; the hw_rev string as a board build sets it
                 data = (struct.pack("<BBBBI", self.identify_s, self.identify_tone, 1, 2, 0x20004927)
@@ -257,6 +485,22 @@ class FakeDevice:
             self.identify_s = min(secs, 120)
             if tone != mc.IDENTIFY_TONE_NONE:
                 self.identify_tone = tone
+        return self._reply(tag, False, mc.ST_OK)
+
+
+    def _link_ext(self, tag: int, is_get: bool, sub: int, payload: bytes, cap: int) -> None:
+        # Link block: an ID the build does not list, the wrong direction or the
+        # wrong OUT length is refused like any unknown sub-command.
+        ln = self.link
+        if ln is None or sub not in ln.ids:
+            return self._reply(tag, is_get, mc.ST_ERROR)
+        if is_get:
+            data = ln.get(sub)
+            if data is None:
+                return self._reply(tag, True, mc.ST_ERROR)
+            return self._reply(tag, True, mc.ST_OK, data[:cap] if cap else data)
+        if ln.set_len(sub) != len(payload) or not ln.set(sub, payload, self):
+            return self._reply(tag, False, mc.ST_ERROR)
         return self._reply(tag, False, mc.ST_OK)
 
 
@@ -317,10 +561,17 @@ def main() -> int:
     ap.add_argument("--mfr", default="7d")
     ap.add_argument("--notify-every", type=float, default=0.0,
                     help="push a GPIO PARAM_CHANGED notification every N s")
+    ap.add_argument("--link", choices=("receiver", "sender"),
+                    help="add the link block 0x8000+ (a receiver starts locked)")
     args = ap.parse_args()
     if not args.pty:
         ap.error("only --pty mode is a standalone program; import FakeDevice otherwise")
-    serve_pty(FakeDevice(bytes.fromhex(args.mfr)), args.notify_every)
+    dev = FakeDevice(bytes.fromhex(args.mfr), link=args.link)
+    if args.link == "receiver":
+        dev.link.config[0] = 1
+        dev.link_event(2, 1)
+        dev.out.clear()
+    serve_pty(dev, args.notify_every)
     return 0
 
 
