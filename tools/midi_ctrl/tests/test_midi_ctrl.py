@@ -140,7 +140,7 @@ class ClientAgainstFake(unittest.TestCase):
     def test_extension_channel(self):
         rep = self.c.get(mc.REQ_EXTENSION, mc.EXT_LIST)
         self.assertEqual(rep.status, mc.ST_OK)
-        self.assertEqual(struct.unpack("<5H", rep.payload), (1, 2, 3, 4, 5))
+        self.assertEqual(struct.unpack("<6H", rep.payload), (1, 2, 3, 4, 5, 6))
         self.assertEqual(self.c.get(mc.REQ_EXTENSION, mc.EXT_LIST, wlength=2).payload, b"\x01\x00")
         k340 = bytes([0x02, 0x13, 0, 0])
         self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_CROSSFEED_PAIR_MAP, payload=k340).status, mc.ST_OK)
@@ -163,6 +163,12 @@ class ClientAgainstFake(unittest.TestCase):
         self.assertIn("reason=WATCHDOG", mc.decode_reset_info(ri))
         self.assertIn("prev_uptime=3600s", mc.decode_reset_info(ri))
         self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_RESET_INFO, payload=bytes(1)).status, mc.ST_ERROR)
+        # EXT_FIRMWARE_FIXES (FWFIX): IN only, uint32 LE, bit 0 = bulk dB via powf.
+        fx = self.c.get(mc.REQ_EXTENSION, mc.EXT_FIRMWARE_FIXES).payload
+        self.assertEqual(fx, b"\x01\x00\x00\x00")
+        self.assertEqual(mc.decode_fixes(fx), "firmware fixes: 0x00000001 BULK_DB_POWF")
+        self.assertEqual(mc.decode_fixes(bytes(4)), "firmware fixes: 0x00000000")
+        self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_FIRMWARE_FIXES, payload=bytes(4)).status, mc.ST_ERROR)
         # The clip event decodes (FWX).
         clip = bytes([2, 0xE0, 0, 7, 9, 2, 0, 0]) + struct.pack("<I", (1 << 9) | (1 << 12))
         self.assertIn("EXT_CLIP", mc.decode_notify(clip))
@@ -236,6 +242,9 @@ class Scripts(unittest.TestCase):
         self.assertIn("status=OK len=7", out)
         rc, out = self.run_main(mc, ["set", "0xD2", "--float", "-12", "--fake"])
         self.assertEqual(rc, 0)
+        rc, out = self.run_main(mc, ["fixes", "--fake"])   # FWFIX
+        self.assertEqual(rc, 0)
+        self.assertIn("firmware fixes: 0x00000001 BULK_DB_POWF", out)
         rc, out = self.run_main(mc, ["enter-bootloader", "--yes", "--fake"])
         self.assertEqual(rc, 0)
 

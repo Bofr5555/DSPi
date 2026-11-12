@@ -572,6 +572,7 @@ static const uint16_t ext_ids[] = {
     EXT_NOTIFY_FEATURES,
     EXT_IDENTIFY,
     EXT_RESET_INFO,
+    EXT_FIRMWARE_FIXES,
 };
 
 // Exact OUT payload length of a sub-command; 0 = no OUT form (STALL).
@@ -654,9 +655,11 @@ static bool ext_handle_get(uint16_t id, uint16_t wLength, uint8_t *resp) {
             n = sizeof(st);
             break;
         }
-        case EXT_NOTIFY_FEATURES: {
-            // Notification-semantics flags (notify.h NOTIFY_FEAT_*), uint32 LE.
-            uint32_t f = NOTIFY_FEATURES;
+        case EXT_NOTIFY_FEATURES:
+        case EXT_FIRMWARE_FIXES: {
+            // uint32 LE flags: notification semantics (notify.h NOTIFY_FEAT_*)
+            // or fixed firmware bugs (config.h FW_FIX_*).
+            uint32_t f = id == EXT_NOTIFY_FEATURES ? NOTIFY_FEATURES : FW_FIXES;
             resp[0] = (uint8_t)f;
             resp[1] = (uint8_t)(f >> 8);
             resp[2] = (uint8_t)(f >> 16);

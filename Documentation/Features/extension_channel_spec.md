@@ -55,8 +55,9 @@ IN replies are truncated to `wLength` like every other DSPi GET. On UART / I2C /
 | `0x0003` | `EXT_NOTIFY_FEATURES` | `uint32` LE notification-semantics flags | none (STALL) |
 | `0x0004` | `EXT_IDENTIFY` | `IdentifyStatus`, 56 bytes | `IdentifyRequest` (exactly 4 bytes) |
 | `0x0005` | `EXT_RESET_INFO` | `ResetInfo`, 20 bytes | none (STALL) |
+| `0x0006` | `EXT_FIRMWARE_FIXES` | `uint32` LE fixed-bug flags | none (STALL) |
 
-Current firmware answers `EXT_LIST` with `01 00 02 00 03 00 04 00 05 00`.
+Current firmware answers `EXT_LIST` with `01 00 02 00 03 00 04 00 05 00 06 00`.
 
 ### 2.1 `EXT_LIST` (0x0000)
 
@@ -206,6 +207,17 @@ IN only: why the unit last reset and how long it has been up (`reset_info.h`). T
 - **STM32:** the tree has no STM32 build; the platforms are RP2040 and RP2350.
 - The raw registers are there for diagnosis; a host should show `reason` and keep the raw words for a support report.
 
+### 2.7 `EXT_FIRMWARE_FIXES` (0x0006)
+
+IN only: a `uint32` LE of fixed firmware bugs a host may rely on (`config.h` `FW_FIX_*`, the value `FW_FIXES`). A host that would otherwise work around a bug checks the bit first. A host reads this only when `EXT_LIST` names `0x0006`; when it is not listed, the read fails, or the bit is clear, the host must assume the bug is present.
+
+| Bit | Name | Meaning |
+|---|---|---|
+| 0 | `FW_FIX_BULK_DB_POWF` | A bulk SET (`0xA1` / `0xA3`) converts preamp, crosspoint and output gains from dB with `powf`. Older firmware, and upstream, used a 4-term Taylor series there: -60 dB played at about +35 dB, -40 dB at +19.5 dB, -20 dB at -6.3 dB, until the next preset load or reboot. |
+| 1-31 | reserved | zero |
+
+Current firmware answers `01 00 00 00`.
+
 ## 3. Transports
 
 | Transport | Reaches `0x00`? | Refusal |
@@ -229,6 +241,7 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 | `core_vreg.{c,h}` | core voltage selection, trials, hang accounting |
 | `identify.{c,h}` | identify blink and tone, hardware description; `DSPI_HW_REV` in `CMakeLists.txt` |
 | `reset_info.{c,h}` | reset-cause capture and decoding; `reset_info_capture()` is the first call in `main()` |
+| `config.h` | `FW_FIX_*`, `FW_FIXES` (the `EXT_FIRMWARE_FIXES` value) |
 
 **Adding a sub-command:** pick the next free ID (`0x0001`-`0x7FFF` only after agreeing it with Weeb Labs). Add it to `config.h`, to `ext_ids[]` in ascending order and to `ext_set_len()` if it has an OUT form, then add cases to `ext_handle_set()` / `ext_handle_get()` and a row to section 2.
 
@@ -239,3 +252,4 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 - 2026-11-12: `EXT_NOTIFY_FEATURES` bit 1 `NOTIFY_FEAT_CLIP_EVENT` and the clip event `0xE0`; fork event IDs `0xE0`-`0xEF`.
 - 2026-11-12: `0x0004` `EXT_IDENTIFY` added.
 - 2026-11-12: `0x0005` `EXT_RESET_INFO` added.
+- 2026-11-12: `0x0006` `EXT_FIRMWARE_FIXES` added (bit 0 `FW_FIX_BULK_DB_POWF`).

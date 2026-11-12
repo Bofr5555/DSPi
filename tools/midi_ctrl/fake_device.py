@@ -225,8 +225,9 @@ class FakeDevice:
         set_len = {mc.EXT_CROSSFEED_PAIR_MAP: 4, mc.EXT_CORE_VREG: 2, mc.EXT_IDENTIFY: 4}
         if is_get:
             if sub == mc.EXT_LIST:
-                data = struct.pack("<5H", mc.EXT_CROSSFEED_PAIR_MAP, mc.EXT_CORE_VREG,
-                                   mc.EXT_NOTIFY_FEATURES, mc.EXT_IDENTIFY, mc.EXT_RESET_INFO)
+                data = struct.pack("<6H", mc.EXT_CROSSFEED_PAIR_MAP, mc.EXT_CORE_VREG,
+                                   mc.EXT_NOTIFY_FEATURES, mc.EXT_IDENTIFY, mc.EXT_RESET_INFO,
+                                   mc.EXT_FIRMWARE_FIXES)
             elif sub == mc.EXT_CROSSFEED_PAIR_MAP:
                 data = self.pair_map
             elif sub == mc.EXT_CORE_VREG:
@@ -240,6 +241,8 @@ class FakeDevice:
             elif sub == mc.EXT_RESET_INFO:
                 # a warm reset after our watchdog fired: hang 1, previous run 3600 s
                 data = struct.pack("<BBBBIIII", 4, 1, 1, 1, 12, 3600, 0x01000000, 0x101)
+            elif sub == mc.EXT_FIRMWARE_FIXES:
+                data = struct.pack("<I", mc.FW_FIX_BULK_DB_POWF)
             else:
                 return self._reply(tag, True, mc.ST_ERROR)
             return self._reply(tag, True, mc.ST_OK, data[:cap] if cap else data)

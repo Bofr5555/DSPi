@@ -916,6 +916,7 @@ extensions". IDs `0x0001`-`0x7FFF` are coordinated with Weeb Labs;
 | 0x0001 | `EXT_CROSSFEED_PAIR_MAP` | 4 bytes, live map (normalized) | exactly 4 bytes; byte p = pair p: 0x00 = default (2p, 2p+1), else (right << 4) \| left; an invalid map is ignored (ACK, no change); notify on write |
 | 0x0002 | `EXT_CORE_VREG` | 16-byte `CoreVregStatus` | exactly 2 bytes `{op, value}`: op 0 SET (persisted; 0 = build default, else vreg code >= build default), 1 TRIAL (RAM only), 2 TRIAL_END, 3 AUTO (0/1), 4 CLEAR; invalid STALLs |
 | 0x0003 | `EXT_NOTIFY_FEATURES` | `uint32` LE flags: bit 0 `NOTIFY_FEAT_BULK_SOURCE` (a bulk SET's `BULK_INVALIDATED` carries the SET's transport source; section 18) | STALL |
+| 0x0006 | `EXT_FIRMWARE_FIXES` | `uint32` LE fixed-bug flags: bit 0 `FW_FIX_BULK_DB_POWF` (a bulk SET converts gains from dB with `powf`, not the old Taylor series) | STALL |
 
 Vreg codes: `0x0C` = 1.15 V, `0x0D` = 1.20 V, `0x0E` = 1.25 V, `0x0F` = 1.30 V.
 
@@ -1059,7 +1060,7 @@ with no OUT data, issued as an IN transfer (returns a status/echo byte).
 
 | Hex | Name | Dir | Internal mapping |
 |-----|------|-----|------------------|
-| 0x00 | EXTENSION | W / R | wValue = sub-command; `ext_handle_set()` / `ext_handle_get()` (section 17.3, `Features/extension_channel_spec.md`). 0x0000 `EXT_LIST` R; 0x0001 `EXT_CROSSFEED_PAIR_MAP` W/R -> `crossfeed_config.pair_map` (one store, notify on write); 0x0002 `EXT_CORE_VREG` W -> `core_vreg_req_pending` -> `core_vreg_apply_request()` (+ directory write), R -> `core_vreg_get_status()`; 0x0003 `EXT_NOTIFY_FEATURES` R -> `NOTIFY_FEATURES` (`notify.h`). Unknown / wrong direction / wrong OUT length STALLs |
+| 0x00 | EXTENSION | W / R | wValue = sub-command; `ext_handle_set()` / `ext_handle_get()` (section 17.3, `Features/extension_channel_spec.md`). 0x0000 `EXT_LIST` R; 0x0001 `EXT_CROSSFEED_PAIR_MAP` W/R -> `crossfeed_config.pair_map` (one store, notify on write); 0x0002 `EXT_CORE_VREG` W -> `core_vreg_req_pending` -> `core_vreg_apply_request()` (+ directory write), R -> `core_vreg_get_status()`; 0x0003 `EXT_NOTIFY_FEATURES` R -> `NOTIFY_FEATURES` (`notify.h`); 0x0006 `EXT_FIRMWARE_FIXES` R -> `FW_FIXES` (`config.h`). Unknown / wrong direction / wrong OUT length STALLs |
 | 0x42 | SET_EQ_PARAM | W | copy payload to `pending_packet`, validate ch/band; `eq_update_pending` -> write `filter_recipes`/`xover_recipes` + `dsp_compute_coefficients()` / `xover_design_filter()` |
 | 0x43 | GET_EQ_PARAM | R | read `filter_recipes[ch][band]` / `xover_recipes[ch][band-20]`; wValue packs ch/band/param(0..4); returns 4-byte scalar |
 | 0x44 | SET_PREAMP | W | legacy: `update_preamp(ch, db)` for all input channels (dB->linear->Q28) |
