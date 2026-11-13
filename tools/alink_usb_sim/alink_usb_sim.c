@@ -119,7 +119,7 @@ static uint32_t fs = FS;
 // --------------------------------------------------------------------------
 
 static double local_us(double t) { return t * 1e6 * (1.0 + cur->xtal_ppm * 1e-6); }
-uint32_t alink_usb_port_now48(void) { return (uint32_t)(uint64_t)(local_us(T) * 48.0); }
+uint32_t alink_usb_port_now48(void) { return (uint32_t)(uint64_t)local_us(T) * 48u; }
 uint32_t alink_usb_port_now_us(void) { return (uint32_t)(uint64_t)local_us(T); }
 uint32_t alink_usb_port_irq_save(void) { return 0; }
 void alink_usb_port_irq_restore(uint32_t s) { (void)s; }
@@ -238,10 +238,12 @@ static void unit_sof(unit_t *u) {
     unit_sel(u);
     double tsof = sof_time + u->hub_ns * 1e-9 + (urand() - 0.5) * 20e-9;
     if (!u->rp2040) {
+        // RP2350: the PHY counter gives the ticks since the SOF exactly, but
+        // "now" is time_us_32() * 48: whole microseconds.
         double lat = 1e-6 + urand() * 3e-6;
-        uint32_t tsof48 = (uint32_t)(uint64_t)(local_us(tsof) * 48.0);
         uint32_t since = (uint32_t)(lat * 48e6);
-        alink_usb_tb_sof(&alink_usb_tb, host_f11, tsof48 + since, since);
+        uint32_t now48 = (uint32_t)(uint64_t)local_us(tsof + lat) * 48u;
+        alink_usb_tb_sof(&alink_usb_tb, host_f11, now48, since);
     } else {
         double lat = 1e-6 + urand() * 3e-6;
         if (urand() < 0.02) lat += 30e-6 + urand() * 200e-6;
@@ -277,7 +279,7 @@ static void unit_complete(unit_t *u) {
     double lat = 1e-6 + urand() * 2e-6;
     if (u->rp2040 && urand() < 0.02) lat += 30e-6 + urand() * 200e-6;
     double tt = T + lat;
-    uint32_t now48 = u->rp2040 ? (uint32_t)(uint64_t)local_us(tt) * 48u : (uint32_t)(uint64_t)(local_us(tt) * 48.0);
+    uint32_t now48 = (uint32_t)(uint64_t)local_us(tt) * 48u;
     alink_usb_tb_stamp(&alink_usb_tb, now48);
     u->pend = u->inflight;
     u->pend.frame = alink_usb_tb.stamp;

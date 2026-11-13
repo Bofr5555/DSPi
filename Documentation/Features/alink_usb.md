@@ -13,7 +13,7 @@ audio-link receivers (`link_receiver.md` section 8), with the USB bus as the lin
 | Item of USBL1 section 5 | Where | RP2040 | RP2350 |
 |---|---|---|---|
 | U1 SOF-locked clock (`EXT_ALINK_USB` mode 1) | `alink_usb_core.c` service, `input_servo` | yes | yes |
-| U3 USB-frame time base | `alink_usb_core.h` (`alink_usb_tb_*`), `alink_usb.c` SOF hook, `usb_audio.c` stamp hook | ISR entry time (1-4 us) | `SOF_TIMESTAMP_LAST` (21 ns) |
+| U3 USB-frame time base | `alink_usb_core.h` (`alink_usb_tb_*`), `alink_usb.c` SOF hook, `usb_audio.c` stamp hook | ISR entry time (1-4 us) | `SOF_TIMESTAMP_RAW - _LAST` against the 1 us timer |
 | U4 phase lock over USB (mode 2) | `alink_usb_core.c`, `link/link_phase.c`, the anchor in `main.c` | yes | yes |
 | U5 apply at frame on the USB time base | `EXT_APPLY_AT_FRAME` time base 1/2 | yes, except CLICK | yes |
 | U5 SYNC_PULSE GPIO at that SOF | bench builds `-DDSPI_ALINK_USB_GPIO=<pin>` | yes | yes |
@@ -42,7 +42,7 @@ RP2350-only: CLICK (the RP2040's fixed-point pipeline has no click injection) an
 ## 2. The time base
 
 `alink_usb_tb_sof()` runs first in `uac1_driver_sof()` (USB IRQ): it extends the 11-bit frame number to a 32-bit count
-N (N mod 2048 = the bus frame), takes the SOF instant (RP2350: `now - (SOF_TIMESTAMP_RAW - SOF_TIMESTAMP_LAST)`;
+N (N mod 2048 = the bus frame), takes the SOF instant (RP2350: `now - (SOF_TIMESTAMP_RAW - SOF_TIMESTAMP_LAST)`, exact to the PHY's 21 ns but taken against `time_us_32()`, so each instant carries up to 1 us of read quantisation that the servo averages away;
 RP2040: the interrupt entry, or the clean pair's prediction when the entry was late) and keeps the latest *clean* pair
 (N, t): RP2350 when fewer than 33 SOFs were merged (the PHY counter has not wrapped), RP2040 when the interval was 1 ms
 within 3 us. Time is in uint32 ticks of 1/48 us, so the ISR needs no 64-bit arithmetic. A gap of over 1 s is flagged

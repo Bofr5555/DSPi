@@ -64,7 +64,7 @@ in every mode. K340: GP22 is Pico pin 29 (free on the K340; probe the module pad
 The number every later claim rests on: the mean offset on one hub. Under 1 us passes.
 
 The interrupt jitter does not enter the phase lock: the RP2350 takes the SOF instant from the PHY's own timestamp
-(`SOF_TIMESTAMP_LAST`, 21 ns), the RP2040 from clean interrupt entries (within 3 us of 1 ms apart), averaged by the servo.
+(`SOF_TIMESTAMP_RAW - _LAST`, read against the 1 us timer), the RP2040 from clean interrupt entries (within 3 us of 1 ms apart), averaged by the servo.
 
 ## 3. E2: rate lock (mode 1)
 
@@ -112,7 +112,7 @@ per run), then `tools/link/run.sh skew_xcorr.py /work/rec/clicks.wav --mode clic
 
 | Measurement | Expected | Pass |
 |---|---|---|
-| CLICK skew, mean | within +-1 us between two RP2350 units on one hub (simulation 0.005 sample = 0.1 us; the bench adds the E0 mean and the DACs' group-delay difference); about 2.5 us RP2350 vs RP2040 | under 20.8 us; target under 10 us |
+| CLICK skew, mean | within +-1 us between two RP2350 units on one hub (simulation 0.009 sample = 0.2 us; the bench adds the E0 mean and the DACs' group-delay difference); about 3 us RP2350 vs RP2040 | under 20.8 us; target under 10 us |
 | CLICK skew, spread over 20 clicks | under 0.1 sample | half a sample |
 | `ST`: phase error | +-0.05 sample | |
 
@@ -178,16 +178,16 @@ units +12 / -18 ppm, B booted 3.7 s after A, D 192, 48 kHz):
 
 | Scenario | max skew, last 10 s | latency A / B (samples) | notes |
 |---|---|---|---|
-| two RP2350 | 0.013 sample (0.27 us) | 191.82 / 191.82 | locked 5.1 s / 9.7 s after boot |
-| two RP2040 (ISR time, 2 % late entries) | 0.023 (0.48 us) | 191.93 / 191.92 | |
-| RP2350 + RP2040 | 0.12 (2.5 us) | 191.82 / 191.92 | the RP2040's interrupt entry, a fixed offset |
-| host +100 / -100 ppm | 0.021 / 0.008 | 191.81 / 191.83 | locked 15-19 s after boot (VCXO slew) |
+| two RP2350 | 0.026 sample (0.53 us) | 191.81 / 191.81 | locked 5.1 s / 9.6 s after boot |
+| two RP2040 (ISR time, 2 % late entries) | 0.036 (0.76 us) | 191.94 / 191.94 | |
+| RP2350 + RP2040 | 0.14 (3.0 us) | 191.81 / 191.93 | the RP2040's interrupt entry, a fixed offset |
+| host +100 / -100 ppm | 0.025 / 0.033 | 191.82 / 191.81 | locked 15-19 s after boot (VCXO slew) |
 | host +-300, +-400 ppm | | | rejected (state 6), VCXO parked |
-| 0.5 % of packets skipped | 0.022 | 191.82 / 191.81 | silence in place, no re-anchor |
-| stream on B stopped 2 s and restarted | 0.025 | 191.82 / 191.81 | no re-anchor |
-| SOF gone 120 ms, frame number jumps | 0.032 | 191.82 / 191.81 | one re-anchor each |
-| CLICK on one bus frame | | | 0.005 sample apart |
-| 96 kHz, D 288 | 0.029 | 287.79 / 287.78 | |
+| 0.5 % of packets skipped | 0.040 | 191.82 / 191.83 | silence in place, no re-anchor |
+| stream on B stopped 2 s and restarted | 0.022 | 191.82 / 191.83 | no re-anchor |
+| SOF gone 120 ms, frame number jumps | 0.013 | 191.82 / 191.82 | one new anchor each |
+| CLICK on one bus frame | | | 0.009 sample apart |
+| 96 kHz, D 288 | 0.036 | 287.8 / 287.8 | |
 | mode 1 (contrast) | | 59.7 / 57.6 | arbitrary, per start |
 
 Latencies read about 0.2 sample short of D in the model (the output DMA's quarter-frame word in the fill reading), the

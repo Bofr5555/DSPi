@@ -537,7 +537,7 @@ A unit whose input source is USB can run as an alink USB-direct unit: it locks i
 
 - Every device on one host sees the same 1 ms SOF with the same 11-bit frame number (the *bus frame*). The unit counts SOFs into a 32-bit frame count **N** with `N mod 2048 = bus frame`. Units started at different times count from different origins, always by multiples of 2048.
 - The **sample index** is `S = spf * N + k`, `spf` = samples per frame (48 at 48 kHz, 96 at 96 kHz), k = 0..spf-1. The host's packet in frame N carries `S = spf*N .. spf*N + spf - 1`. The sample *arriving now* is `F_arr = spf * (N + time since the SOF of N / 1 ms)`. Equal S means the same bus instant on every unit; only the bus frame (N mod 2048) is comparable between units without a read.
-- The SOF instant is taken from the RP2350's `SOF_TIMESTAMP_LAST` (21 ns) or from the RP2040's interrupt entry (about 1-4 us). Each OUT packet is stamped with its frame in the interrupt that completes it.
+- The SOF instant is taken from the RP2350's `SOF_TIMESTAMP_RAW - SOF_TIMESTAMP_LAST` (the PHY's 21 ns, read against the 1 us timer) or from the RP2040's interrupt entry (about 1-4 us). Each OUT packet is stamped with its frame in the interrupt that completes it.
 - 44.1 kHz has no whole number of samples per frame: rate lock only (mode 1 behaviour).
 - N is 32 bits: it wraps after 49.7 days, which costs one re-anchor.
 
@@ -587,7 +587,7 @@ IN only, 64 bytes.
 | 40 | 4 | `stream_shift` | i32 samples: silence the unit inserted for missing packets minus late samples it dropped, since that packet. The stream's content now plays `stream_shift` samples later than its first packet's placement implies |
 | 44 | 4 | `stream_samples` | stream samples placed since that packet |
 | 48 | 4 | `anchors` | anchors completed since boot |
-| 52 | 4 | `reanchors` | re-anchors since boot (phase error, new D or mode, an output reset by a preset load, flash write or rate change, a time-base jump) |
+| 52 | 4 | `reanchors` | re-anchors since boot (phase error, new D or mode, an output reset by a preset load, flash write or rate change). A time-base jump (`0xE3` `SOF_LOST`) ends the timeline without counting here; the next anchor counts in `anchors` |
 | 56 | 4 | `missed_samples` | silence inserted for missing packets while streaming, since boot |
 | 60 | 4 | `late_samples` | samples dropped because their packet came too late, since boot |
 
