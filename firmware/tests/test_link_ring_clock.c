@@ -58,6 +58,7 @@ static void run_meas(unsigned cls, uint32_t fs, double ppm, uint32_t svc_lo, uin
     uint64_t t0 = 1000000u, t = t0, next_svc = t0, next_poll = t0 + 137u;
     uint64_t pub_us = 0, pub_bits = 0;
     *good_fast = *good_long = *old_fast = 0.0;
+    uint64_t long_from = 0;
     while (t < t0 + 20000000u) {
         if (next_svc <= next_poll) {
             t = next_svc;
@@ -70,6 +71,7 @@ static void run_meas(unsigned cls, uint32_t fs, double ppm, uint32_t svc_lo, uin
             if (!pub_us) continue;
             uint64_t old_win = good.win_us;
             link_meas_sample(&good, pub_us, pub_bits, k);
+            if (good.long_valid && !long_from) long_from = t;
             link_meas_sample(&old, t, pub_bits, k);
             // After a second of settling: worst error of the smoothed fast
             // window and of the long window, in ppm.
@@ -88,6 +90,9 @@ static void run_meas(unsigned cls, uint32_t fs, double ppm, uint32_t svc_lo, uin
         }
     }
     CHECK(good.long_valid, "L%u: long window valid after 20 s", cls);
+    // -- WP LK6 -- valid from a 2 s span (link_ring_clock.h LINK_MEAS_LONG_MIN_US).
+    CHECK(long_from > 0 && long_from - t0 <= LINK_MEAS_LONG_MIN_US + LINK_MEAS_WINDOW_US + 5000u,
+          "L%u: long window valid after %.3f s", cls, (double)(long_from - t0) * 1e-6);
     CHECK(link_meas_hz(&good) == good.hz_long, "L%u: the servo takes the long window", cls);
 }
 

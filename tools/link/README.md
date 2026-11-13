@@ -14,6 +14,9 @@ no devices). Protocol: `Documentation/Features/link_protocol_spec.md`.
 | `bench.sh`, `Containerfile.bench` | runs `bench.py` in a container venv with only the named tty devices passed in |
 | `tests/test_bench_tool.py` | `bench.py` against simulated bench boards and a pty |
 | `sender_usb.py` | the link sender's extension block over Linux usbfs (WP LK4): `EXT_LINK_TX`, `EXT_LINK_CTRL_MSG`, `EXT_FRAME_COUNTER`, `EXT_LINK_DIAG`; used by `bench.py sender` / `sender-diag` (`Documentation/Bench/link_sender_bench.md`) |
+| `skew_xcorr.py` | test (e) of SYS2 8 (WP LK6): the skew between two receivers from one stereo recording, by cross-correlation (programme material) or by impulse (the CLICK train), sub-sample, with the interface's own channel skew calibrated out; PASS under one link sample; `--selftest`; `Documentation/Bench/link_phase_bench.md` |
+| `bench.py clicks` | test (e): one CLICK apply a second through the sender's superframe (WP LK6) |
+| `tests/test_skew_xcorr.py`, `tests/test_bench_clicks.py` | the two above on synthetic recordings and a stub sender |
 | `tests/test_sender_tool.py` | `bench.py sender` against a simulated RX board and LK7's `FakeLink("sender")` |
 
 ```sh

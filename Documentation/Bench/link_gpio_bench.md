@@ -187,7 +187,7 @@ The receiver is configured over the extension channel (`extension_channel_spec.m
 
 ```sh
 M="./run.sh midi_ctrl.py"              # in tools/midi_ctrl, DSPI_MIDI_DEV=/dev/snd/midiCxD0 exported
-$M ext-list                             # lists 0x8000 0x8001 0x8002 0x8003 0x8008 0x8009 0x800a
+$M ext-list                             # lists 0x8000-0x8006 0x8008 0x8009 0x800a (0x8004-0x8006: LK6)
 $M set 0x00 --wvalue 0x8002 --payload 01ff00ffffff0300   # EXT_LINK_CONFIG: enable, GP0, class auto
 $M set 0x00 --wvalue 0x8003 --payload 0001020304050607   # EXT_LINK_SLOTS: link channels 0-7 -> inputs 0-7
 $M set 0xE0 --u8 7                      # REQ_SET_INPUT_SOURCE: LINK
@@ -200,6 +200,9 @@ $M set 0x52                             # REQ_SAVE_OUTPUT_CONFIG: keep the link 
 On link-up the receiver detects the class (about 12 ms per class tried), runs the trim scan (a few hundred frames
 per trim step: L1 19 steps, L2 9, L3 3, about 0.1-0.4 s), locks, matches the pipeline to the stream's rate, prefills
 and plays. Its STATUS counters and its trim scan should match what a bench RX board reports on the same wire.
+With LK6, the default `EXT_LINK_PHASE` (phase lock, `d_local` 128) needs the 1 ms latency option
+(`set 0x03 --u8 2`); under the default 4 ms option 128 is below `d_local_min` and the unit runs the fill servo
+(`D_BELOW_MIN`). Two phase-locked receivers: `link_phase_bench.md`.
 A save (`REQ_SAVE_OUTPUT_CONFIG`, a preset save) stalls the main loop longer than the receiver's ring holds (4 ms at
 L3, 16 ms at L1), so expect one loss and re-lock per flash write; other main-loop stalls up to those limits must not
 show as losses (`Documentation/Features/link_receiver.md` section 2).

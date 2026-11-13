@@ -10,6 +10,7 @@ Documentation/Bench/link_gpio_bench.md.
   bench.py id PORT [PORT...]                       who is who
   bench.py cmd PORT 'stat'                         one console command
   bench.py loop PORT [--cls L1] [--rate 48k] [--minutes 11]
+  bench.py clicks --usb /dev/bus/usb/BBB/DDD [--count 60]   test (e): CLICK train (LK6)
                                                    one board, TX pin wired to RX pin
   bench.py pair --tx PORT --rx PORT [...]          two boards
   bench.py impair --tx PORT --imp PORT --rx PORT   three boards, IMPAIR in the middle
@@ -670,6 +671,42 @@ def scenario_sender(rep, dev, rx, args, out):
         step_unplug(rep, rx, label)
 
 
+# ---------------------------------------------------------------------------
+# Test (e) of SYS2 8: a CLICK train through the sender's superframe (WP LK6)
+# ---------------------------------------------------------------------------
+
+OP_CLICK = 7
+
+
+def run_clicks(dev, count, period, output, lead, out, sleep=time.sleep):
+    """Schedule `count` CLICK applies (op 7 on receiver output `output`), one
+    per `period` seconds, each `lead` frames after the sender's F.  Every
+    phase-locked receiver plays a full-scale one-sample impulse on that frame,
+    `d_local` frames later, at the same instant (extension_channel_spec.md
+    2.8.7, 2.8.9).  The sender carries one apply at a time, so each waits for
+    the previous one to end.  Returns the target frames."""
+    su = _sender_usb()
+    targets = []
+    for i in range(count):
+        t0 = time.monotonic()
+        deadline = t0 + max(2.0, 4.0 * period)
+        while True:
+            target = dev.frame() + lead
+            try:
+                dev.ctrl(target, OP_CLICK, output, 0)
+                break
+            except su.SenderRefused:
+                if time.monotonic() > deadline:
+                    raise
+                sleep(0.02)     # the previous apply is still pending
+        targets.append(target)
+        out(f"click {i + 1}/{count}: CLICK on output {output} at frame {target}")
+        rest = period - (time.monotonic() - t0)
+        if rest > 0:
+            sleep(rest)
+    return targets
+
+
 def open_sender_usb(path):
     return _sender_usb().SenderUsb(path)
 
@@ -728,6 +765,12 @@ def main(argv=None, opener=open_bench, out=print, usb_opener=open_sender_usb):
     p.add_argument("--usb", required=True)
     p.add_argument("--pattern", choices=("audio", "prbs", "idle", "tone"),
                    help="first set EXT_LINK_TX.test_pattern")
+    p = sub.add_parser("clicks", help="test (e): a CLICK train through the sender's superframe (WP LK6)")
+    p.add_argument("--usb", required=True, help="the sender's /dev/bus/usb/BBB/DDD node")
+    p.add_argument("--count", type=int, default=60)
+    p.add_argument("--period", type=float, default=1.0, help="seconds between clicks (default 1)")
+    p.add_argument("--output", type=int, default=0, help="receiver output that clicks (0-7)")
+    p.add_argument("--lead", type=int, default=4800, help="frames ahead of the sender's F (default 4800 = 0.1 s)")
     p = sub.add_parser("sender")
     p.add_argument("--rx", required=True)
     p.add_argument("--usb", help="the sender's /dev/bus/usb/BBB/DDD node (else: the bench image's defaults)")
@@ -749,6 +792,12 @@ def main(argv=None, opener=open_bench, out=print, usb_opener=open_sender_usb):
         tag = until.get(word, "OK")
         for line in b.command(args.line, until=(tag, "ERR"), timeout=60.0):
             out(line)
+        return 0
+
+    if args.mode == "clicks":
+        if not 0 <= args.output <= 7 or args.lead < 64 or args.count < 1:
+            ap.error("--output 0-7, --lead at least 64 frames, --count at least 1")
+        run_clicks(usb_opener(args.usb), args.count, args.period, args.output, args.lead, out)
         return 0
 
     if args.mode == "sender-diag":

@@ -58,6 +58,12 @@ const OutputLatencyOption *output_latency_resolve(uint8_t id, uint8_t source);
 // Ring fill target, in frames, an option gives at a rate (ring ceiling applied).
 uint32_t output_latency_target_frames(const OutputLatencyOption *opt, uint32_t fs);
 
+// Block cap (frames) an option gives at a rate: its batch plus one frame.
+uint32_t output_latency_block_cap(const OutputLatencyOption *opt, uint32_t fs);
+
+// The rings' writable span in frames (both output types share it).
+uint32_t output_latency_ring_span(void);
+
 // Stored request (an unknown ID records the default) and the option in force.
 void output_latency_request(uint8_t id);
 uint8_t output_latency_requested(void);

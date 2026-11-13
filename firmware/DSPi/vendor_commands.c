@@ -582,6 +582,9 @@ static const uint16_t ext_ids[] = {
     EXT_LINK_STATUS,
     EXT_LINK_CONFIG,
     EXT_LINK_SLOTS,
+    EXT_LINK_PHASE,
+    EXT_FRAME_COUNTER,
+    EXT_APPLY_AT_FRAME,
     EXT_LINK_CTRL_MSG,
     EXT_LINK_STATS_RESET,
     EXT_LINK_DIAG,
@@ -597,6 +600,8 @@ static uint16_t ext_set_len(uint16_t id) {
 #if DSPI_LINK
         case EXT_LINK_CONFIG:        return LINK_CFG_LEN;
         case EXT_LINK_SLOTS:         return LINK_SLOTS_LEN;
+        case EXT_LINK_PHASE:         return LINK_PHASE_LEN;
+        case EXT_APPLY_AT_FRAME:     return LINK_APPLY_LEN;
         case EXT_LINK_STATS_RESET:   return 1;
 #endif
         default:                     return 0;
@@ -660,6 +665,10 @@ static bool ext_handle_set(uint16_t id, const uint8_t *p, uint16_t len) {
         }
         case EXT_LINK_SLOTS:
             return link_input_set_slots(p);
+        case EXT_LINK_PHASE:
+            return link_input_set_phase(p);
+        case EXT_APPLY_AT_FRAME:
+            return link_input_apply(p);
         case EXT_LINK_STATS_RESET:
             return link_input_stats_reset(p[0]);
 #endif
@@ -717,6 +726,9 @@ static bool ext_handle_get(uint16_t id, uint16_t wLength, uint8_t *resp) {
         case EXT_LINK_STATUS:   link_input_get_status(resp);   n = LINK_STATUS_LEN;   break;
         case EXT_LINK_CONFIG:   memcpy(resp, link_config, LINK_CFG_LEN);  n = LINK_CFG_LEN;   break;
         case EXT_LINK_SLOTS:    memcpy(resp, link_slots, LINK_SLOTS_LEN); n = LINK_SLOTS_LEN; break;
+        case EXT_LINK_PHASE:    link_input_get_phase(resp);    n = LINK_PHASE_LEN;    break;
+        case EXT_FRAME_COUNTER: link_input_get_frame_counter(resp); n = LINK_FRAME_COUNTER_LEN; break;
+        case EXT_APPLY_AT_FRAME: link_input_get_apply(resp);   n = LINK_APPLY_LEN;    break;
         case EXT_LINK_CTRL_MSG: link_input_get_ctrl_msg(resp); n = LINK_CTRL_MSG_LEN; break;
         case EXT_LINK_DIAG:     link_input_get_diag(resp);     n = LINK_DIAG_LEN;     break;
 #endif

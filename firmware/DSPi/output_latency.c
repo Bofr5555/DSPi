@@ -12,6 +12,10 @@
 
 #include <stddef.h>
 
+#if defined(DSPI_LINK) && DSPI_LINK
+#include "link_input.h"     // -- WP LK6 -- phase-locked prefill target
+#endif
+
 #define LOW_BATCH_US    333u    // 16 frames at 48 kHz
 #define STD_BATCH_US   1000u    // one USB packet
 
@@ -86,6 +90,14 @@ uint32_t output_latency_target_frames(const OutputLatencyOption *opt, uint32_t f
     return want < ceiling ? want : ceiling;
 }
 
+uint32_t output_latency_block_cap(const OutputLatencyOption *opt, uint32_t fs) {
+    return BLOCK_CAP(opt->batch_us, fs);
+}
+
+uint32_t output_latency_ring_span(void) {
+    return PICO_AUDIO_SPDIF_RING_FRAMES - PICO_AUDIO_SPDIF_ERASE_AHEAD;
+}
+
 void output_latency_request(uint8_t id) {
     requested_id = output_latency_find(id) ? id : OUTPUT_LATENCY_DEFAULT;
 }
@@ -100,4 +112,9 @@ void output_latency_apply(uint32_t fs, uint8_t source) {
     input_batch_frames = BATCH_FRAMES(opt->batch_us, fs);
     output_ring_block_cap = BLOCK_CAP(opt->batch_us, fs);
     output_ring_target_frames = output_latency_target_frames(opt, fs);
+#if defined(DSPI_LINK) && DSPI_LINK
+    // -- WP LK6 -- A phase-locked link input prefills to its delay instead.
+    if (source == INPUT_SOURCE_LINK)
+        output_ring_target_frames = link_input_ring_target(output_ring_target_frames, output_ring_block_cap);
+#endif
 }

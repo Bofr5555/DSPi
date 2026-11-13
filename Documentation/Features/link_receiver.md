@@ -1,7 +1,8 @@
 # Link receiver: INPUT_SOURCE_LINK on DSPi
 
-*Status: implemented by WP LK5 (2026-11-13), fixups LK45F after review lk45. RP2350 builds with `DSPI_LINK` (on by
-default). Host-tested and emulated, not yet run on hardware.*
+*Status: implemented by WP LK5 (2026-11-13), fixups LK45F after review lk45; phase lock, apply at frame and holdover
+by WP LK6 (section 8). RP2350 builds with `DSPI_LINK` (on by default). Host-tested, emulated and simulated, not yet run
+on hardware.*
 
 The receiver decodes the multi-unit link (`link_protocol_spec.md`) on one GPIO and feeds its 8 slots to the pipeline's
 8 input channels, like the 8-channel ADAT input. The code is `firmware/DSPi/link_input.c` (its header describes
@@ -18,9 +19,10 @@ reference receiver). It is configured and observed through the link block of the
   locked, follows the rate, counts and reports as usual (`EXT_LINK_STATUS.sf_flags` shows the bits), but its inputs
   play silence. Audio returns with the first superframe that clears the bit. A bench PRBS test therefore loses
   nothing, and the outputs stay quiet. Accepted by the coordinator 2026-11-13.
-- A loss stops delivery at once and the main loop mutes, then goes round the drain, prefill and in-sync start again
-  once the receiver re-locks, as for ADAT. A `RATE` in the stream does the same around the rate change. A failed bank
-  holds its last samples for one frame, then plays zeros (the protocol's rule).
+- A loss stops delivery at once. Phase-locked (section 8), the unit enters a muted holdover and resumes on the same
+  timeline. Otherwise the main loop mutes, then goes round the drain, prefill and in-sync start again once the
+  receiver re-locks, as for ADAT. A `RATE` in the stream always takes the full path around the rate change. A failed
+  bank holds its last samples for one frame, then plays zeros (the protocol's rule).
 
 ## 2. Main-loop stalls
 
@@ -47,8 +49,10 @@ re-acquires the same way. Other stalls up to the table's limits must not show as
 ## 3. Clock
 
 The sender owns the clock. The receiver measures the wire rate from the RX DMA position against the timer and feeds
-it to `input_servo_apply()` as the S/PDIF and ADAT slave inputs do: 32 ms windows smoothed, then an 8-16 s
-dual-anchor window. The position and the time it was read are published together by whoever ran the decode
+it to `input_servo_apply()` as the S/PDIF and ADAT slave inputs do: 32 ms windows smoothed, then a dual-anchor window
+that is used from a 2 s span and grows to 8-16 s (WP LK6: from 2 s instead of 8 s, about 1 ppm at L1 then, where the
+32 ms windows wander by several ppm). In phase lock (section 8) the servo's second term is the phase error, not the
+ring fill. The position and the time it was read are published together by whoever ran the decode
 service, and the measurement uses that pair, never the poll's own time. That matters for the Core-1 option (section
 5), where core 1 publishes at its own moments; with the poll's time every 32 ms window was off by up to a few percent
 and the servo rejected it (review lk45 finding 1). `test_link_ring_clock` checks both placements: under 100 ppm per
@@ -81,19 +85,24 @@ has never run on hardware.
 The link's RAM-resident set is about 5.4 KB. `.data` against the budget of 100352 B in `check_ram_placement.py`
 (after LK45F):
 
-| Build | `.data` | Headroom |
-|---|---|---|
-| RP2350 default | 98776 | 1576 |
-| RP2350 K340 (`DSPI_USB_MIDI`, 1.20 V) | 98896 | 1456 |
-| RP2350 `DSPI_LINK_DECODE_CORE1` | 99256 | 1096 |
-| RP2350 `DSPI_LINK=OFF` | 93456 | 6896 |
+| Build | `.data` after LK45F | after LK6 | Headroom |
+|---|---|---|---|
+| RP2350 default | 98776 | 99072 | 1280 |
+| RP2350 K340 (`DSPI_USB_MIDI`, 1.20 V) | 98896 | 99192 | 1160 |
+| RP2350 `DSPI_LINK_DECODE_CORE1` | 99256 | 99624 | 728 |
+| RP2350 `DSPI_LINK=OFF` | 93456 | 93480 | 6872 |
 
 The budget stays as it is (coordinator 2026-11-13). So later link work must fit about 1.5 KB of hot code on the
 default and K340 builds:
 
-- **LK6** (phase lock): keep the hot part small (the apply-at-frame executor and the output-position sampling; the
-  servo tick and events stay in flash like `input_servo`). Store `EXT_LINK_PHASE` in the 7 reserved bytes of the V26
-  link block (`flash_storage.c`) rather than bumping the directory to V27.
+- **LK6** (phase lock) took 296 B: the decode service's published reference (104 B), the CLICK injection in the
+  pipeline's three finalize paths (about 100 B), the servo hook and a veneer. The phase servo, the anchor, the holdover
+  and the apply executor run from flash (`check_ram_placement.py` whitelists them as `LINK_COLD`), and the two link
+  event serialisers moved to flash too (`notify_push_link_state`, `notify_push_apply_result`: 134 B back).
+  `EXT_LINK_PHASE` is stored in 6 of the V26 link block's 7 reserved bytes (no V27).
+- Note: `deliver()` (the steady-state copy into the pipeline) is inlined into `link_input_poll()` and so runs from
+  flash, as it did after LK5. `check_ram_placement.py` lists `deliver` as an optional root and warns that it is
+  absent.
 - **LK8** (repeater): a per-frame re-encoder in RAM (the sender's `snd_frame` is about 2-3 KB with its glue) does not
   fit. It must run from flash or live in a separate image; LK8 decides which.
 
@@ -102,3 +111,87 @@ default and K340 builds:
 `0xE1` reason `COMMA_LOST` (4) means the frames that failed since the last poll that saw the decoder locked were all
 flywheel frames (comma missing, no bad head); anything else is `FRAME_ERRORS` (3). Before LK45F the counters since
 lock were used, so one head error early on made every later loss read `FRAME_ERRORS`.
+
+## 8. Phase lock, apply at frame, holdover (WP LK6)
+
+The code is `firmware/DSPi/link/link_phase.[ch]` (portable C, the same code in the host simulation) and its glue in
+`link_input.c`. Control: `EXT_LINK_PHASE`, `EXT_FRAME_COUNTER`, `EXT_APPLY_AT_FRAME`, event `0xE2`
+(`extension_channel_spec.md` 2.8.5-2.8.7, 2.8.12).
+
+**The target.** In mode 1 (the default) link frame F leaves the outputs exactly `D = d_local + hops_offset` frames after
+its comma arrived, so units with the same D play the same frame at the same moment. Mode 0 is LK5's behaviour: the
+fill servo, whatever latency the prefill left.
+
+**The measurement.** The receiver writes the decoded frames into the output rings in F order. `next_w` is the F of the
+next frame written, and `fill` is how many written frames have not played yet, so the frame playing now is
+`next_w - fill`. The phase error is `e = F_arr - (next_w - fill) - D`, where F_arr, the frame arriving now, comes from
+the RX DMA position against the decoder's last reference (frame F, comma end at bit p, published with the ring
+position). Both positions are DMA counters read together with interrupts off. So e is exact to about a tenth of a frame
+(one 32-bit RX word, a quarter-frame output DMA word), and it needs no model of the decode, FIFO or batch delays.
+Anything that moves the audio moves `next_w` or `fill`: a block refused by the rings, an underrun's skip, inserted
+silence. e shows it.
+
+**The anchor** (SYS2 3.1, 3.3):
+
+1. Lock (class, trim scan, superframe), then the VCXO pull-in. The drain waits until the VCXO is within 1 ppm of the
+   rate feed-forward (`link_input_rate_ready()`), so the anchor does not drift away while the VCXO still slews at
+   6.7 ppm/s. Meanwhile rows are dropped, so the decoder stays current. This takes up to 10 s from a 50 ppm crystal
+   offset, and the outputs stay muted.
+2. Drain, then prefill the rings to `D - block_cap - 16` frames (the latency option's target when that is larger).
+   `output_latency_apply()` asks `link_input_ring_target()` for the LINK source.
+3. Start the outputs when `F_arr - first = D` (first = the first frame written). The last millisecond is waited in
+   place (`link_input_anchor_ready()`), so the start lands to a fraction of a frame.
+4. Verify, still muted: within half a frame the soft mute lapses and the audio fades in. A late start (a long
+   main-loop pass) is corrected by whole frames, dropping rows or inserting silence, at most twice; otherwise it
+   re-anchors.
+
+**The servo**, once per 75 ms tick: `ppm = feed-forward + PI(e)` (`input_servo_apply_trim()`, slew-limited like the
+fill servo). KP 4 ppm per frame of smoothed error (a time constant of about 5 s at 48 kHz, 2.6 s at 96), KI 0.01 ppm
+per tick per frame, the IIR 0.3 s. The host test's plant model settles a 0.45-frame error without overshoot; the
+VCXO's 0.11 ppm step leaves a limit cycle under 0.05 frame. Phase-locked, an error beyond 2 frames (an underrun's skip,
+for example) re-anchors (`0xE1` reason `REANCHOR`). With `EXT_LINK_CONFIG.flags` bit 1 clear, PHASE.state becomes 3
+(pending) instead, and the servo pulls the phase in while the audio plays.
+
+**`d_local_min` / `d_local_max`** (`EXT_LINK_INFO` 16-19) follow the latency option and the rate: min = ring target +
+block cap + 16 (SYS2 3.2), max = the rings' writable span (448 frames) - block cap. At 48 kHz: 1 ms option 81..431,
+4 ms option 257..399. At 96 kHz the 1 ms option gives 145..415, so D 128 needs a larger value there. A write outside
+the range is refused. If the option or the rate moves the range under the stored delay, the unit runs in mode-0
+behaviour and PHASE flags `D_BELOW_MIN` (or, above the maximum, just state 0).
+
+**Loss and holdover** (SYS2 3.3). A loss while phase-locked does not reset the pipeline:
+
+- state 3 (holdover), `0xE1` with reason `FRAME_ERRORS` or `COMMA_LOST`, soft mute. The VCXO trim is held (no servo
+  tick without a lock).
+- The outputs keep running: silence keeps the rings at their fill, so the timeline (`next_w`) advances at the held
+  rate. `EXT_LINK_STATUS.frame` is extrapolated.
+- On relock at the same rate the first rows are placed by F on that timeline: late rows are dropped, a gap is filled
+  with silence. Then the verification runs. Within half a frame the audio fades in again with no re-anchor (the
+  simulation resumes after a 2 s dark line at the same latency); otherwise it re-anchors. A new rate, a gap larger
+  than the rings or another stream (F far off) takes the full reset.
+- Pending apply ops still act on their frames during the holdover (on silence). When the receiver stops, they are
+  cancelled (`0xE2` result 2).
+
+**Apply at frame.** Both paths feed one 4-deep queue in frame order: `EXT_APPLY_AT_FRAME` (per unit) and the apply
+that valid superframes carry (taken once; `RATE` stays the decoder's). An op acts on the samples of its frame as they
+enter the pipeline. The delivery splits the block so that the frame is the first sample the pipeline processes after
+the op. MUTE/UNMUTE (`user_mute`), MASTER_VOLUME, OUT_DELAY (`channel_delays_ms`) and PRESET_LOAD (the main loop's
+deferred load) start there. CLICK sets a one-sample full-scale impulse on that output, injected after delay and
+limiter in the finalize step of the core that owns the output. An op whose frame has already been written runs at once
+and reports `late` (1). On a receiver, SYNC_PULSE reports `refused` (3): `EXT_LINK_CONFIG` has no sync GPIO. So does
+CLICK on the PDM sub (output 8), which is not finalized as PCM. Every result sends `0xE2` with the op's target frame.
+`CANCEL_ALL` reports each pending op as `cancelled` (2).
+
+**Persistence.** `EXT_LINK_PHASE` (mode, d_local, hops_offset) is saved by `REQ_SAVE_OUTPUT_CONFIG` in the V26 link
+block (`phase_version` 1 plus 5 bytes in its reserved area); older saves read as the factory values (1, 128, 0).
+
+**Verification on the host** (WP LK6):
+
+- `firmware/tests/test_link_phase.c` covers the validation, the limits, the anchor, verification and re-anchor
+  decisions, holdover placement, the servo against a plant model at 44.1/48/96 kHz, and the apply queue with the 2.8.7
+  examples.
+- `tools/link_phase_sim/run.sh` runs two receivers fed by LK4's encoder: `link_fast`, `link_phase` and a line-for-line
+  copy of the glue, with a modelled line, crystals, VCXO and rings. It checks identical alignment (skew under 0.05
+  frame) with different boot times, clock offsets, a 1 ms and a 2 s loss, and L3 at 96 kHz, and contrasts mode 0
+  (3.7 frames apart).
+- `run.sh pio` checks the simulation's line against LK2's PIO model.
+- The bench procedure is `Documentation/Bench/link_phase_bench.md`.

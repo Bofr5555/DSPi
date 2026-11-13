@@ -24,8 +24,17 @@
  * measurement uses that pair: link/link_ring_clock.h) and fed to
  * input_servo_apply() exactly as the S/PDIF and ADAT slave inputs do.  The
  * superframe's rate code drives perform_rate_change() through
- * link_input_check_rate_change().  Phase lock (EXT_LINK_PHASE) is LK6's: see
- * the seams at the end.
+ * link_input_check_rate_change().
+ *
+ * Phase lock (WP LK6, link/link_phase.h): in EXT_LINK_PHASE mode 1 the
+ * outputs play link frame F exactly d_local + hops_offset frames after it
+ * arrived.  The anchor prefills the rings to about that delay and starts the
+ * outputs when the delay is reached (link_input_anchor_ready()); the servo
+ * then holds the measured phase error at zero instead of the ring fill.  A
+ * loss while phase-locked is a muted holdover on the same timeline; the
+ * relock resumes without a re-anchor when the phase still matches.  Apply at
+ * frame N (EXT_APPLY_AT_FRAME, the superframe's apply) acts on that frame's
+ * samples as they enter the pipeline.
  *
  * Decoder placement: the decode service fills a row FIFO that the core-0 poll
  * drains into the pipeline.  By default core 0 runs it inside the poll; with
@@ -40,13 +49,14 @@
 #include <stdint.h>
 
 #include "audio_input.h"
+#include "link/link_phase.h"
 
 // EXT_LINK_STATUS.state values (extension_channel_spec.md 2.8.2).
 typedef enum {
     LINK_INPUT_OFF       = 0,   // not running (source not LINK, or enable 0)
     LINK_INPUT_SEARCHING = 1,   // class detection, trim scan, comma search, waiting for a superframe
     LINK_INPUT_LOCKED    = 2,   // decoding audio
-    LINK_INPUT_HOLDOVER  = 3,   // LK6
+    LINK_INPUT_HOLDOVER  = 3,   // phase-locked loss: muted, silence on the timeline, VCXO held
 } LinkInputState;
 
 // NOTIFY_EVT_LINK_STATE reasons (2.8.12).
@@ -64,6 +74,7 @@ typedef enum {
 #define LINK_STATUS_LEN     52
 #define LINK_CTRL_MSG_LEN   24
 #define LINK_DIAG_LEN       64
+#define LINK_FRAME_COUNTER_LEN 16
 
 // Deferred restart (main loop): set when EXT_LINK_CONFIG changes something the
 // running receiver uses, or enable flips while LINK is the source.
@@ -126,12 +137,31 @@ void link_input_decode_service(void);
 void link_input_core1_service(void);
 #endif
 
-// --- Seams for LK6 (phase lock) ---------------------------------------------
 // F of the frame the decoder is on, valid while LOCKED.
 uint64_t link_input_get_frame(bool *valid);
-// Called with the number of frames just handed to process_input_block() and
-// the FIFO depth left behind them; LK6 replaces the weak default (no-op).
-void link_input_on_delivered(uint32_t frames, uint32_t queued);
+
+// --- Phase lock and apply at frame (WP LK6) ---------------------------------
+// Boot, after preset_load_link_config(): the stored EXT_LINK_PHASE.
+void link_input_load_phase(void);
+bool link_input_set_phase(const uint8_t p[LINK_PHASE_LEN]);
+void link_input_get_phase(uint8_t out[LINK_PHASE_LEN]);
+void link_input_get_frame_counter(uint8_t out[LINK_FRAME_COUNTER_LEN]);
+bool link_input_apply(const uint8_t p[LINK_APPLY_LEN]);
+void link_input_get_apply(uint8_t out[LINK_APPLY_LEN]);
+// output_latency_apply() for the LINK source: the ring target to prefill
+// (the phase-locked delay less the block cap and decode margin, or target).
+uint32_t link_input_ring_target(uint32_t target, uint32_t block_cap);
+// Main loop, LINK prefill handshake: the outputs were drained (the rings are
+// empty); then, once the prefill is at its target, true when the outputs may
+// start (phase-locked: spins up to a few frames for the exact moment); and
+// the outputs were started.
+// Before the drain: phase-locked, true once the VCXO has pulled in to the
+// stream's rate (SYS2 3.3: pull-in, then anchor), so the anchor does not
+// drift away while the VCXO is still slewing.  Always true otherwise.
+bool link_input_rate_ready(void);
+void link_input_on_drain(void);
+bool link_input_anchor_ready(void);
+void link_input_on_enabled(void);
 
 #endif // DSPI_LINK
 

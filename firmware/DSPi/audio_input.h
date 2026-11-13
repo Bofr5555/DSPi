@@ -368,6 +368,11 @@ bool adat_input_pin_acceptable(uint8_t pin);
 #define LINK_RX_PIN_DEFAULT 0       // "build default" for rx_pin 0xFF (receiver: GP0)
 extern uint8_t link_config[LINK_CFG_LEN];
 extern uint8_t link_slots[LINK_SLOTS_LEN];
+// EXT_LINK_PHASE's persisted part (WP LK6): mode, d_local (u16 LE),
+// hops_offset (i16 LE); factory 1, 128, 0.  Same lifecycle as link_config.
+#define LINK_PHASE_STORE_LEN 5
+extern uint8_t link_phase_store[LINK_PHASE_STORE_LEN];
+void link_phase_store_defaults(uint8_t p[LINK_PHASE_STORE_LEN]);
 // Factory values: disabled, default pin, auto class, no repeater/LOS/TX_DISABLE,
 // mute on loss + automatic re-anchor; identity slots.
 void link_config_defaults(uint8_t cfg[LINK_CFG_LEN], uint8_t slots[LINK_SLOTS_LEN]);
