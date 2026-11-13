@@ -10,6 +10,7 @@ prints the start-offset correction of 2.9.3 (U6).  Standard library only.
   python3 tools/alink_usb/alink_usb_status.py st_a.bin
   python3 tools/alink_usb/alink_usb_status.py st_a.bin st_b.bin
   python3 tools/alink_usb/alink_usb_status.py --hex 0201c00000000005
+  python3 tools/alink_usb/alink_usb_status.py --diag diag.bin    (EXT_ALINK_USB_DIAG, 0x8012)
 """
 import struct
 import sys
@@ -44,6 +45,22 @@ def config(b):
           f"D {d}, status flags 0x{sf:02x}, state {name(STATES, st)}")
 
 
+ENDS = ["SOF lost", "gap > 1 s", "discontinuity", "host rejected", "rate/config", "re-anchor: phase",
+        "re-anchor: output reset", "re-anchor: other", "stop"]
+
+
+def diag(b):
+    ver, last, rides, holds = struct.unpack("<BBHH", b[:6])
+    ends = struct.unpack("<9H", b[6:24])
+    sus, res, rst, unp = struct.unpack("<4H", b[24:32])
+    lf, lus, ldev, lride, mpass, mquiet, mlate, hold = struct.unpack("<IIiIIIII", b[32:64])
+    print(f"diag v{ver}: last end {ENDS[last] if last < len(ENDS) else 'none'}; holdovers {holds}, ridden {rides}")
+    print("timeline ends: " + ", ".join(f"{n} {c}" for n, c in zip(ENDS, ends) if c) if any(ends) else "timeline ends: none")
+    print(f"USB events: suspend {sus}, resume {res}, bus reset {rst}, unplug {unp}")
+    print(f"last absence: {lf} frames, {lus} us, clock - frames {ldev:+d} us; longest ridden {lride} us; running holdover {hold} us")
+    print(f"max main-loop pass {mpass} us, max time without a SOF interrupt {mquiet} us, max SOF interrupt latency {mlate} us")
+
+
 def frame_counter(b):
     f, t, o, tb, _r, bus = struct.unpack("<QIIBBH", b[:20])
     base = {0: "alink F", 1: "USB S", 0xFF: "none"}.get(tb, f"? {tb}")
@@ -62,6 +79,10 @@ def offset(a, b):
 
 
 def main(argv):
+    if len(argv) >= 2 and argv[0] == "--diag":
+        for p in argv[1:]:
+            diag(open(p, "rb").read())
+        return 0
     if len(argv) >= 2 and argv[0] == "--hex":
         blobs = [bytes.fromhex(x) for x in argv[1:]]
     else:

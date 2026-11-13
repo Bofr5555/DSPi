@@ -83,7 +83,39 @@ enum {
     ALINK_USB_RS_GAP       = 5,  // packets missing while streaming: silence on the timeline, muted, fade back in
     ALINK_USB_RS_DISABLED  = 6,  // mode 0 written or the input source left USB
     ALINK_USB_RS_CONFIG    = 7,  // mode 2 cannot phase-lock (rate, D range): runs rate-locked
+    ALINK_USB_RS_HOLDOVER  = 8,  // no SOF for 50 ms: the time base is extrapolated, the timeline kept (WP USB2)
+    ALINK_USB_RS_RESUMED   = 9,  // SOF back within the ride-through limit, frame and time consistent
 };
+
+// EXT_ALINK_USB_DIAG: why a timeline (or the time base) ended (WP USB2).
+enum {
+    ALINK_USB_END_SOF_LOST = 0,  // no SOF for longer than the ride-through limit, or no estimate to ride on
+    ALINK_USB_END_LONG_GAP,      // a gap of over 1 s between two passes' SOFs outside a ride-through
+    ALINK_USB_END_DISCONT,       // frame count and clock disagree (F2), or on the return from a ride-through
+    ALINK_USB_END_REJECTED,      // host beyond 295 ppm
+    ALINK_USB_END_CONFIG,        // rate change or D / mode no longer allows the phase lock
+    ALINK_USB_END_RE_PHASE,      // re-anchor: phase error, failed verification
+    ALINK_USB_END_RE_OUTPUTS,    // re-anchor: the output rings were reset (preset load, flash write, ...)
+    ALINK_USB_END_RE_OTHER,      // re-anchor: placement far off, hold stall, EXT_ALINK_USB write
+    ALINK_USB_END_STOP,          // mode 0 or the source left USB
+    ALINK_USB_END_N
+};
+
+typedef struct {
+    uint16_t ends[ALINK_USB_END_N];
+    uint16_t rides;              // SOF absences ridden through
+    uint16_t holdovers;          // SOF absences entered (ridden or not)
+    uint16_t suspends, resumes, mounts, umounts;   // firmware: suspend, resume, bus reset, unplug events
+    uint8_t  last_cause;         // ALINK_USB_END_*, 0xFF none
+    uint32_t last_frames;        // the last absence: frames counted on the bus
+    uint32_t last_us;            // its duration by the unit's clock
+    int32_t  last_dev_us;        // clock minus frames (host rate) at the return, us
+    uint32_t longest_ride_us;
+    uint32_t max_pass_us;        // longest main-loop pass (USB source), since the last clear
+    uint32_t max_isr_quiet_us;   // longest time without a SOF interrupt entry seen by the main loop
+    uint32_t max_isr_late_us;    // longest SOF interrupt entry after its SOF (RP2350 exact; RP2040 predicted)
+    uint32_t last_pass_us;       // internal: the previous service call
+} alink_usb_diag_t;
 
 #define ALINK_USB_HOST_MAX_PPM     295.0f    // VCXO authority 300 ppm less trim headroom
 #define ALINK_USB_HOST_HYST_PPM    10.0f     // accepted again below MAX - HYST
@@ -95,6 +127,9 @@ enum {
 #define ALINK_USB_EVENT_MIN_MS     250u
 #define ALINK_USB_GAP_MUTE_MS      20u       // a stream gap mutes this long, then fades back in
 #define ALINK_USB_ANCHOR_MUTE_MS   20u       // soft mute refresh while anchoring
+#define ALINK_USB_RIDE_MAX_MS      10000u    // a SOF absence is ridden through this long (WP USB2)
+#define ALINK_USB_EST_GAP_MAX      12000u    // the estimator keeps its anchors across a verified absence
+#define ALINK_USB_DIAG_LEN         64
 #define ALINK_USB_STOP_FRAMES      16u       // a GAP this close before alt 0 was the stream's end
 #define ALINK_USB_DECODE_MARGIN    16u       // D - (cap + margin) is the hold threshold
 
@@ -115,12 +150,15 @@ typedef struct {
     volatile uint32_t t;        // its time, t48 (best estimate)
     volatile uint32_t n_c;      // latest clean pair: frame and exact time
     volatile uint32_t t_c;
-    volatile uint32_t seq;      // bumped on every SOF
-    volatile uint32_t sofs;     // SOFs seen
+    volatile uint32_t isr;      // t48 of the latest SOF interrupt entry (WP USB2 diagnostics)
     volatile bool     valid;    // n, t hold a SOF
     volatile bool     have_c;   // n_c, t_c hold a clean pair
-    volatile bool     long_gap; // a gap of over 1 s: the extension may have missed wraps
     volatile uint32_t stamp;    // frame of the last OUT packet, ALINK_USB_FRAME_NONE none
+    // Firmware only, kept here to share one address with the stamp in the USB
+    // IRQ (WP USB2): the OUT arm flag and TinyUSB events by DCD_EVENT_* id
+    // ([1] bus reset, [2] unplugged, [4] suspend, [5] resume).
+    volatile bool     out_wait;
+    volatile uint32_t ev[16];   // indexed by event id without a mask: ids run to USBD_EVENT_FUNC_CALL (8)
 } alink_usb_tb_t;
 
 // One SOF.  f11: SOF frame number; now: t48 at the call; since: t48 ticks
@@ -135,13 +173,11 @@ static inline void alink_usb_tb_sof(alink_usb_tb_t *tb, uint32_t f11, uint32_t n
         tb->t = t;
         tb->valid = true;
         tb->have_c = false;
-        tb->seq++;
-        tb->sofs++;
+        tb->isr = now;
         return;
     }
     uint32_t delta = (f11 - tb->n) & 0x7FFu;
     uint32_t el = t - tb->t;
-    if (el > 1000u * ALINK_USB_T48_FRAME) tb->long_gap = true;
     uint32_t n = tb->n + delta;
     bool clean;
     uint32_t t_est = t;
@@ -165,8 +201,7 @@ static inline void alink_usb_tb_sof(alink_usb_tb_t *tb, uint32_t f11, uint32_t n
         tb->t_c = t;
         tb->have_c = true;
     }
-    tb->seq++;
-    tb->sofs++;
+    tb->isr = now;
 }
 
 // The OUT packet completed now (t48): its frame is the latest SOF's, or the
@@ -241,6 +276,10 @@ typedef struct {
     bool     held;                           // hp: the newest placed packet, written when the next arrives
     bool     fade_in;                        // the next packet written fades in (after silence)
     alink_usb_pkt_t hp;
+    // Ride-through of SOF absences (WP USB2) and diagnostics.
+    bool     dark;                           // no SOF for 50 ms: extrapolating
+    uint32_t dark_n, dark_t, dark_us;        // the last SOF before it, and when it began (us)
+    alink_usb_diag_t diag;
     // SOF discontinuity check (review usb1 F2), main loop: the pair seen last.
     bool     exact;                          // SOF times from the PHY (RP2350): 100 us limit, else 0.5 ms
     bool     seen_valid;
@@ -316,6 +355,10 @@ void alink_usb_cancel_all(alink_usb_t *us);
 // The 0xE2 frame field of a USB op: bus frame (bits 0-10) and the sample in
 // it (bits 16-23).
 uint32_t alink_usb_bus_form(const alink_usb_t *us, uint64_t s);
+
+// EXT_ALINK_USB_DIAG (64 bytes) and its OUT (1 byte, 1 = clear).
+void alink_usb_get_diag(const alink_usb_t *us, uint8_t o[ALINK_USB_DIAG_LEN]);
+bool alink_usb_clear_diag(alink_usb_t *us, uint8_t v);
 
 // EXT_ALINK_USB_STATUS (64 bytes).
 void alink_usb_get_status(alink_usb_t *us, uint8_t o[ALINK_USB_STATUS_LEN]);

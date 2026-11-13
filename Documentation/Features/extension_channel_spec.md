@@ -61,14 +61,15 @@ IN replies are truncated to `wLength` like every other DSPi GET. On UART / I2C /
 | `0x8005`, `0x8006` | `EXT_FRAME_COUNTER`, `EXT_APPLY_AT_FRAME` | also on builds with the alink USB-direct block, on the USB time base (2.9.4) | 2.9.4 |
 | `0x8010` | `EXT_ALINK_USB` | 8 bytes (2.9.2) | 8 bytes (2.9.2) |
 | `0x8011` | `EXT_ALINK_USB_STATUS` | 64 bytes (2.9.3) | none (STALL) |
+| `0x8012` | `EXT_ALINK_USB_DIAG` | 64 bytes (2.9.6) | 1 byte: 1 clears (2.9.6) |
 
-Firmware without the alink and the alink USB-direct block answers `EXT_LIST` with `01 00 02 00 03 00 04 00 05 00 06 00`. An RP2040 build (USB-direct block, no alink) answers `01 00 02 00 03 00 04 00 05 00 06 00 05 80 06 80 10 80 11 80`.
+Firmware without the alink and the alink USB-direct block answers `EXT_LIST` with `01 00 02 00 03 00 04 00 05 00 06 00`. An RP2040 build (USB-direct block, no alink) answers `01 00 02 00 03 00 04 00 05 00 06 00 05 80 06 80 10 80 11 80 12 80`.
 
 ### 2.1 `EXT_LIST` (0x0000)
 
 The IN-only discovery read. A host can read 64 bytes (room for 32 IDs) and use the reply length to count the IDs. On stock firmware this read STALLs.
 
-- **Order.** The IDs come in ascending order, so an alink build lists `0x8000`-`0x800A` after `0x0006`. A receiver build answers `01 00 02 00 03 00 04 00 05 00 06 00 00 80 01 80 02 80 03 80 04 80 05 80 06 80 08 80 09 80 0a 80 10 80 11 80` (18 IDs, 36 bytes; the last two are the alink USB-direct block, 2.9); a sender build lists the IDs of the table in 2.8.
+- **Order.** The IDs come in ascending order, so an alink build lists `0x8000`-`0x800A` after `0x0006`. A receiver build answers `01 00 02 00 03 00 04 00 05 00 06 00 00 80 01 80 02 80 03 80 04 80 05 80 06 80 08 80 09 80 0a 80 10 80 11 80 12 80` (19 IDs, 38 bytes; the last three are the alink USB-direct block, 2.9); a sender build lists the IDs of the table in 2.8.
 - **The list is the contract.** An ID that is not listed STALLs (`ERROR` on UART / I2C / MIDI) in both directions, including the alink IDs on firmware without the alink. A host never probes unlisted IDs, and it reads a feature's own flags (`EXT_NOTIFY_FEATURES`, `EXT_ALINK_INFO.features`) before relying on the details.
 - **Limit.** The firmware builds the reply in its 64-byte response buffer, so the list holds at most 32 IDs. Adding a 33rd needs a bigger buffer first.
 
@@ -540,6 +541,8 @@ A unit whose input source is USB can run as an alink USB-direct unit: it locks i
 - Every device on one host sees the same 1 ms SOF with the same 11-bit frame number (the *bus frame*). The unit counts SOFs into a 32-bit frame count **N** with `N mod 2048 = bus frame`. Units started at different times count from different origins, always by multiples of 2048.
 - The **sample index** is `S = spf * N + k`, `spf` = samples per frame (48 at 48 kHz, 96 at 96 kHz), k = 0..spf-1. The host's packet in frame N carries `S = spf*N .. spf*N + spf - 1`. The sample *arriving now* is `F_arr = spf * (N + time since the SOF of N / 1 ms)`. Equal S means the same bus instant on every unit; only the bus frame (N mod 2048) is comparable between units without a read.
 - The SOF instant is taken from the RP2350's `SOF_TIMESTAMP_RAW - SOF_TIMESTAMP_LAST` (the PHY's 21 ns, read against the 1 us timer) or from the RP2040's interrupt entry (about 1-4 us). Each OUT packet is stamped with its frame in the interrupt that completes it: a completion seen less than 100 us after the latest SOF belongs to the frame before. **Limitation, both chips:** the PHY timestamps the SOF, not the packet, so a completion whose interrupt is held off more than 100 us past the next SOF (flash writes, long interrupt-off sections) is stamped one frame late; the packet is then treated as late (its samples dropped, faded) and the frame before it as lost. Such hold-offs come with operations that re-anchor anyway; in steady state it is rare (the review's simulation: at most a few per 400 hold-offs of 400 us).
+- The frame number and the SOF time are taken together in the SOF interrupt: if another SOF lands between the DCD's read of the frame number and the timestamp reads (an interrupt about a frame late), the RP2350 takes the new SOF whole; the RP2040 reads the frame number right after the time (WP USB2; before, such an entry could read as a 1 ms or 43.7 ms discontinuity and end the timeline).
+- No SOF for 50 ms is ridden through for up to 10 s (2.9.6).
 - A SOF whose frame count and clock disagree (a SOF stall with the frame number frozen, a small frame jump: more than 100 us off on the RP2350, 0.5 ms on the RP2040) is a discontinuity, handled as `SOF_LOST`: the timeline ends and the unit anchors again once the rate estimate is back. On the RP2040 a period of more than 16 frames with interrupts off (a flash write) can also read as one (a spurious `SOF_LOST`); such operations re-anchor anyway.
 - 44.1 kHz has no whole number of samples per frame: rate lock only (mode 1 behaviour).
 - N is 32 bits: it wraps after 49.7 days, which costs one re-anchor.
@@ -575,7 +578,7 @@ IN only, 64 bytes.
 | 0 | 1 | `state` | 0 off (mode 0, or the source is not USB), 1 no SOF (not configured, suspended, unplugged: no time base), 2 pull-in (measuring the host, VCXO slewing), 3 rate-locked (mode 1, or mode 2 that cannot phase-lock: see `status_flags`), 4 anchoring (mode 2: drain, prefill, start, verify; muted), 5 phase-locked (mode 2, with or without a stream), 6 rejected (host beyond 295 ppm: stock behaviour) |
 | 1 | 1 | `phase_state` | as `EXT_ALINK_PHASE.state`: 0 free, 1 anchoring, 2 locked, 3 re-anchor pending (`AUTO_REANCHOR` clear) |
 | 2 | 1 | `rate_code` | 0 = 44.1 kHz, 1 = 48 kHz, 2 = 96 kHz, `0xFF` other |
-| 3 | 1 | `flags` | bit 0 `HW_TIMESTAMP` (RP2350 SOF timestamps), bit 1 `STREAM` (the host has the audio interface at alt > 0), bit 2 `NOMINAL_FEEDBACK` (the host follows the SOF-locked clock), bit 3 `TIME_BASE` (SOF seen within 50 ms) |
+| 3 | 1 | `flags` | bit 0 `HW_TIMESTAMP` (RP2350 SOF timestamps), bit 1 `STREAM` (the host has the audio interface at alt > 0), bit 2 `NOMINAL_FEEDBACK` (the host follows the SOF-locked clock), bit 3 `TIME_BASE` (a usable time base: SOF seen within 50 ms, or a holdover running), bit 4 `HOLDOVER` (no SOF for over 50 ms: the time base is extrapolated and the timeline kept, up to 10 s; WP USB2) |
 | 4 | 4 | `host_ppm` | f32, the host's SOF rate against the unit's crystal (+ = host fast); 0 until measured |
 | 8 | 4 | `vcxo_ppm` | f32, the soft VCXO's correction |
 | 12 | 4 | `phase_error` | f32, e in samples; 0 unless `phase_state` is 2 or 3 |
@@ -640,7 +643,7 @@ Announced by `EXT_NOTIFY_FEATURES` bit 4 `NOTIFY_FEAT_ALINK_USB`; sent on every 
 | 0-3 | 4 | `2, 0xE3, 0, seq` |
 | 4 | 1 | `state` (as `EXT_ALINK_USB_STATUS.state`) |
 | 5 | 1 | `phase_state` |
-| 6 | 1 | `reason`: 0 `NONE`, 1 `LOCKED` (rate lock reached in mode 1, or phase-locked and playing in mode 2), 2 `HOST_RANGE` (state 6 entered, or the host back in range), 3 `SOF_LOST` (no SOF for 50 ms, or a gap of over 1 s: the timeline ends, it re-anchors when the bus returns), 4 `REANCHOR`, 5 `GAP` (one or more packets missing while streaming: the packet before fades out over 1 ms, silence on the timeline, the packet after fades in over 1 ms; a loss of more than about three frames is also muted 20 ms), 6 `DISABLED` (mode 0 written, or the source left USB), 7 `CONFIG` (mode 2 cannot phase-lock: 44.1 kHz or D outside the limits; it runs rate-locked) |
+| 6 | 1 | `reason`: 0 `NONE`, 1 `LOCKED` (rate lock reached in mode 1, or phase-locked and playing in mode 2), 2 `HOST_RANGE` (state 6 entered, or the host back in range), 3 `SOF_LOST` (the time base ended: no SOF for over 10 s, an inconsistent return from a holdover, a discontinuity, a gap of over 1 s, or no SOF for 50 ms while anchoring or without a rate estimate; the timeline ends and the unit anchors again when the bus is back), 4 `REANCHOR`, 5 `GAP` (one or more packets missing while streaming: the packet before fades out over 1 ms, silence on the timeline, the packet after fades in over 1 ms; a loss of more than about three frames is also muted 20 ms), 6 `DISABLED` (mode 0 written, or the source left USB), 7 `CONFIG` (mode 2 cannot phase-lock: 44.1 kHz or D outside the limits; it runs rate-locked), 8 `HOLDOVER` (no SOF for 50 ms: extrapolating, timeline kept; WP USB2), 9 `RESUMED` (SOF back within 10 s, frames and time consistent: same timeline, no anchor) |
 | 7 | 1 | reserved, 0 |
 | 8 | 4 | S now, low 32 bits |
 
@@ -648,7 +651,35 @@ Sent on every change of `state` and with every reason other than `NONE`, at most
 
 Example: `02 e3 00 07 05 02 01 00 00 b4 c4 04`: phase-locked, reason `LOCKED`, S low 32 = 0x04c4b400.
 
-#### 2.9.6 Host recipe
+#### 2.9.6 SOF absences and `EXT_ALINK_USB_DIAG` (0x8012) (WP USB2)
+
+**Holdover.** When no SOF has been seen for 50 ms and the unit has a rate estimate and is not in the middle of an anchor, it does not end its time base any more: it keeps the timeline running on the arrival extrapolated from the last clean SOF at the measured host rate (0.1 ppm is 1 us in 10 s), holds the VCXO, and reports `HOLDOVER` (STATUS flags bit 4, `0xE3` reason 8). When SOF returns within 10 s, the frames counted on the bus since the last SOF must match the elapsed time at the host rate, modulo the 2048-frame wraps the 11-bit frame number cannot show (they are restored): within 100 us (RP2350) / 0.5 ms (RP2040) the unit continues on the same timeline with no anchor and no estimator restart (`0xE3` reason 9 `RESUMED`) - this is what a host does that suspends a port, stalls SOF generation or restarts a hub with its frame counter running. Otherwise (a counter that restarted or froze, over 10 s) the time base ends as before (`SOF_LOST`) and the unit anchors again. Packets do not arrive without SOF, so a stream that was playing is a faded gap (2.9.2).
+
+**`EXT_ALINK_USB_DIAG`** - why a unit lost its timeline. IN 64 bytes; OUT 1 byte: 1 clears every field (other values are refused). Layout version 1:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | `version` 1 |
+| 1 | 1 | `last_cause`: the latest timeline end, an index into `ends`; `0xFF` none |
+| 2 | 2 | `rides`: SOF absences ridden through (resumed) |
+| 4 | 2 | `holdovers`: SOF absences of 50 ms or more (ridden or not) |
+| 6 | 2 x 9 | `ends[9]`, u16 counts of timeline ends by cause: 0 SOF lost (over 10 s, or no estimate / mid-anchor), 1 gap over 1 s between two passes outside a holdover, 2 discontinuity (frame count and clock disagree, or an inconsistent return), 3 host rejected, 4 rate / configuration, 5 re-anchor by phase error, 6 re-anchor by an output reset (preset load, flash write, type switch, rate change), 7 re-anchor otherwise (placement far off, hold stall, an `EXT_ALINK_USB` write), 8 stop (mode 0, source change) |
+| 24 | 2 | `suspends`: USB suspend events (TinyUSB `DCD_EVENT_SUSPEND`) |
+| 26 | 2 | `resumes`: USB resume events |
+| 28 | 2 | `bus_resets`: USB bus resets |
+| 30 | 2 | `unplugs`: disconnects |
+| 32 | 4 | `last_frames`: the latest absence or discontinuity: frames counted on the bus (after wrap restoration) |
+| 36 | 4 | `last_us`: its duration by the unit's clock, us. A suspend or a SOF stall with the counter running gives `last_frames` = `last_us` / 1000 |
+| 40 | 4 | `last_dev_us`: i32, clock minus frames at the host rate, us (0 for a consistent return) |
+| 44 | 4 | `longest_ride_us`: the longest absence ridden through |
+| 48 | 4 | `max_pass_us`: the longest main-loop pass seen while USB is the source |
+| 52 | 4 | `max_isr_quiet_us`: the longest time the main loop saw without a SOF interrupt entry |
+| 56 | 4 | `max_isr_late_us`: the latest a SOF interrupt ran after its SOF (RP2350: from the PHY timestamp; RP2040: only for entries the clean-pair prediction caught) |
+| 60 | 4 | `holdover_us`: the running holdover's age, 0 when none |
+
+Reading it after an event tells the causes apart: a host suspend or reset shows in 24-31; a SOF absence the host caused with its counter running shows `holdovers` (and `rides`) with `last_frames` matching `last_us` and no bus event; the unit's own starvation shows as `max_isr_quiet_us` or `max_pass_us` of 50 ms or more with `max_isr_late_us` large. The counters run from boot (u16 saturate) until a clear.
+
+#### 2.9.7 Host recipe
 
 1. `EXT_LIST`: `0x8010` present. Read `EXT_NOTIFY_FEATURES` (decode `0xE3` only with bit 4, `0xE2` only with bit 3).
 2. Input source USB (`REQ_SET_INPUT_SOURCE` 0), stream at 48 kHz (or 96 kHz with D 324..351).
@@ -686,9 +717,11 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 | `alink_usb.{c,h}`, `alink_usb/alink_usb_core.{c,h}` | the alink USB-direct block (WP USB1, 2.9): `EXT_ALINK_USB*` IDs in `config.h`, the 0x8005/0x8006 time-base dispatch in `vendor_commands.c`, `NOTIFY_FEAT_ALINK_USB` and `notify_push_alink_usb()` in `notify.{c,h}`, the V27 directory block in `flash_storage.c`, the SOF and packet-stamp hooks in `usb_audio.c`, the anchor in `main.c`; `Documentation/Features/alink_usb.md`; host tests `firmware/tests/test_alink_usb.c`, simulation `tools/alink_usb_sim/` |
 | `firmware/DSPi-Sender/sender_vendor.c` | the sender build's alink block (WP LK4): 0x0003, 0x8000-0x8002, 0x8005, 0x8007-0x800A; `sender_alink.c` holds the `EXT_ALINK_TX` / `EXT_ALINK_CTRL_MSG` parsing and the RATE scheduling |
 
-**Adding a sub-command:** pick the next free ID (`0x0001`-`0x7FFF` only after agreeing it with Weeb Labs; an alink sub-command takes the next free ID from `0x800B`, an alink USB-direct one from `0x8012`). Add it to `config.h`, to `ext_ids[]` in ascending order and to `ext_set_len()` if it has an OUT form, then add cases to `ext_handle_set()` / `ext_handle_get()` and a row to section 2.
+**Adding a sub-command:** pick the next free ID (`0x0001`-`0x7FFF` only after agreeing it with Weeb Labs; an alink sub-command takes the next free ID from `0x800B`, an alink USB-direct one from `0x8013`). Add it to `config.h`, to `ext_ids[]` in ascending order and to `ext_set_len()` if it has an OUT form, then add cases to `ext_handle_set()` / `ext_handle_get()` and a row to section 2.
 
 ## 5. History
+
+- 2026-11-14: WP USB2: SOF absences up to 10 s are ridden through when the frames and the time agree on the return (holdover, `0xE3` reasons 8 `HOLDOVER` / 9 `RESUMED`, STATUS flags bit 4); `0x8012` `EXT_ALINK_USB_DIAG` (timeline-end causes, bus events, absence details, main-loop and SOF interrupt timing).
 
 - 2026-11-13: names only (WP ALINK2): `EXT_LINK_*` -> `EXT_ALINK_*`, `NOTIFY_EVT_LINK_STATE` / `NOTIFY_FEAT_LINK_STATE` -> `NOTIFY_EVT_ALINK_STATE` / `NOTIFY_FEAT_ALINK_STATE`, "link" -> "alink" in the text; ids, layouts and section numbers unchanged. USB-direct: a GAP taken back at a stream stop sends no `0xE3` when nothing else changed (2.9.5), and the fill servo runs only while packets arrive, not only while the alt is set (review usb1 N1, N2).
 - 2026-11-13: round 3 (hardware findings, re-review usb1): mode 1 / pre-anchor mode 2 run the fill servo only while a stream plays (no stream: feed-forward only), so a unit anchors without a stream; `gap_count` excludes a normal stream stop and documents late packets; the stock ring target while rejected or without a time base.

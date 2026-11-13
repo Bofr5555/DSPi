@@ -49,11 +49,30 @@ static volatile uint32_t pulse_frame = ALINK_USB_FRAME_NONE;
 // ---------------------------------------------------------------------------
 
 void __not_in_flash_func(alink_usb_isr_sof)(uint32_t frame11) {
-    uint32_t now = time_us_32() * 48u;
+    // The frame number, the SOF time and "now" must belong to the same SOF.
+    // The DCD read the frame number at the IRQ's entry; when this runs about a
+    // frame late, another SOF can land between that read and the reads here,
+    // and a frame labelled with the next SOF's time (or the PHY counter read
+    // across the update: a 43.7 ms wrap) reads as a time-base discontinuity
+    // (WP USB2).  So: the timestamp registers first, then the frame number
+    // again; if it moved, take the new SOF whole.
 #if PICO_RP2350
     // The PHY latched the SOF on its 48 MHz counter: exact to 21 ns.
-    uint32_t since = (usb_hw->sof_timestamp_raw - usb_hw->sof_timestamp_last) & 0x1FFFFFu;
+    uint32_t last = usb_hw->sof_timestamp_last;
+    uint32_t raw = usb_hw->sof_timestamp_raw;
+    uint32_t f = usb_hw->sof_rd;
+    if ((f ^ frame11) & 0x7FFu) {
+        frame11 = f;
+        last = usb_hw->sof_timestamp_last;
+        raw = usb_hw->sof_timestamp_raw;
+    }
+    uint32_t now = time_us_32() * 48u;          // a few cycles after RAW (the us timer read quantises more)
+    uint32_t since = (raw - last) & 0x1FFFFFu;
 #else
+    // RP2040: the time, then the frame number read right after it (two loads
+    // apart instead of the DCD's entry read; a retry would cost RAM).
+    uint32_t now = time_us_32() * 48u;
+    frame11 = usb_hw->sof_rd;
     uint32_t since = UINT32_MAX;
 #endif
     alink_usb_tb_sof(&alink_usb_tb, frame11, now, since);
@@ -350,3 +369,19 @@ void alink_usb_fw_get_apply(uint8_t o[ALINK_APPLY_LEN]) {
 
 void alink_usb_fw_store(uint8_t s[ALINK_USB_STORE_LEN]) { alink_usb_store(&alink_usb, s); }
 void alink_usb_fw_load(const uint8_t s[ALINK_USB_STORE_LEN]) { alink_usb_load(&alink_usb, s); }
+
+
+void alink_usb_fw_get_diag(uint8_t o[ALINK_USB_DIAG_LEN]) {
+    alink_usb_diag_t *d = &alink_usb.diag;
+    d->suspends = (uint16_t)alink_usb_tb.ev[4];
+    d->resumes = (uint16_t)alink_usb_tb.ev[5];
+    d->mounts = (uint16_t)alink_usb_tb.ev[1];     // bus resets
+    d->umounts = (uint16_t)alink_usb_tb.ev[2];    // unplugged
+    alink_usb_get_diag(&alink_usb, o);
+}
+
+bool alink_usb_fw_clear_diag(uint8_t v) {
+    if (!alink_usb_clear_diag(&alink_usb, v)) return false;
+    for (int i = 0; i < 16; i++) alink_usb_tb.ev[i] = 0;
+    return true;
+}

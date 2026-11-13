@@ -55,6 +55,10 @@ void alink_usb_fw_get_frame_counter(uint8_t o[20]);
 bool alink_usb_fw_apply(const uint8_t p[ALINK_APPLY_LEN]);
 void alink_usb_fw_get_apply(uint8_t o[ALINK_APPLY_LEN]);
 
+// EXT_ALINK_USB_DIAG (WP USB2).
+void alink_usb_fw_get_diag(uint8_t o[ALINK_USB_DIAG_LEN]);
+bool alink_usb_fw_clear_diag(uint8_t v);
+
 // Persistence (flash_storage.c, V27 directory block).
 void alink_usb_fw_store(uint8_t s[ALINK_USB_STORE_LEN]);
 void alink_usb_fw_load(const uint8_t s[ALINK_USB_STORE_LEN]);

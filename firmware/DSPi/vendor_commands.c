@@ -59,7 +59,8 @@
 _Static_assert(EXT_ALINK_INFO == 0x8000 && EXT_ALINK_STATUS == 0x8001 && EXT_ALINK_CONFIG == 0x8002 &&
                EXT_ALINK_SLOTS == 0x8003 && EXT_ALINK_PHASE == 0x8004 && EXT_FRAME_COUNTER == 0x8005 &&
                EXT_APPLY_AT_FRAME == 0x8006 && EXT_ALINK_CTRL_MSG == 0x8008 && EXT_ALINK_STATS_RESET == 0x8009 &&
-               EXT_ALINK_DIAG == 0x800A && EXT_ALINK_USB == 0x8010 && EXT_ALINK_USB_STATUS == 0x8011,
+               EXT_ALINK_DIAG == 0x800A && EXT_ALINK_USB == 0x8010 && EXT_ALINK_USB_STATUS == 0x8011 &&
+               EXT_ALINK_USB_DIAG == 0x8012,
                "alink extension ids are frozen");
 _Static_assert(NOTIFY_EVT_ALINK_STATE == 0xE1 && NOTIFY_EVT_APPLY_RESULT == 0xE2 && NOTIFY_EVT_ALINK_USB == 0xE3 &&
                NOTIFY_FEAT_ALINK_STATE == (1u << 2) && NOTIFY_FEAT_ALINK_USB == (1u << 4),
@@ -611,6 +612,7 @@ static const uint16_t ext_ids[] = {
 #if DSPI_ALINK_USB
     EXT_ALINK_USB,
     EXT_ALINK_USB_STATUS,
+    EXT_ALINK_USB_DIAG,
 #endif
 };
 
@@ -631,6 +633,7 @@ static uint16_t ext_set_len(uint16_t id) {
 #endif
 #if DSPI_ALINK_USB
         case EXT_ALINK_USB:           return ALINK_USB_CFG_LEN;
+        case EXT_ALINK_USB_DIAG:      return 1;
 #endif
         default:                     return 0;
     }
@@ -714,6 +717,8 @@ static bool ext_handle_set(uint16_t id, const uint8_t *p, uint16_t len) {
 #if DSPI_ALINK_USB
         case EXT_ALINK_USB:
             return alink_usb_fw_set_config(p);
+        case EXT_ALINK_USB_DIAG:
+            return alink_usb_fw_clear_diag(p[0]);
 #endif
     }
     return false;
@@ -808,6 +813,7 @@ static bool ext_handle_get(uint16_t id, uint16_t wLength, uint8_t *resp) {
 #if DSPI_ALINK_USB
         case EXT_ALINK_USB:        alink_usb_fw_get_config(resp); n = ALINK_USB_CFG_LEN;    break;
         case EXT_ALINK_USB_STATUS: alink_usb_fw_get_status(resp); n = ALINK_USB_STATUS_LEN; break;
+        case EXT_ALINK_USB_DIAG:   alink_usb_fw_get_diag(resp); n = ALINK_USB_DIAG_LEN; break;
 #endif
         case EXT_RESET_INFO: {
             ResetInfo ri;

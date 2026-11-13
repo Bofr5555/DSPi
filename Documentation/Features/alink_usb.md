@@ -73,6 +73,26 @@ re-anchor anyway; the simulation's probe P8c (400 us hold-offs every 100 ms) mis
 is the late interrupt entry, with no clean-pair prediction, and can read as a discontinuity: a spurious `SOF_LOST`. Such
 periods reset the pipeline and re-anchor anyway.
 
+**SOF absences: holdover (WP USB2).** The K340's hour test (dab444d) showed 8 fresh anchors in a loaded half hour
+with no host suspend: each one a time-base loss (no SOF for 50 ms as the unit saw it), and with music each would have
+been 2-4 s of unaligned playback and then a dropout. Now a unit with a rate estimate that is not mid-anchor keeps its
+timeline through a SOF absence: `hold()` runs on the arrival extrapolated from the last clean pair at the measured host
+rate, the VCXO holds, STATUS flags bit 4 and `0xE3` `HOLDOVER`. On the return the frames counted since the last SOF must
+match the time at the host rate (modulo 2048-frame wraps, which are restored in the ISR's count; the clean pair only if
+it was taken after the return): within the F2 limits it continues (`RESUMED`, no anchor, estimator kept: it accepts
+gaps up to 12 s), otherwise, or after 10 s, the time base ends as before. All of it in the main loop (flash).
+
+**Consistent SOF reads (WP USB2).** The SOF interrupt reads the RP2350's `SOF_TIMESTAMP_LAST` and `_RAW` first and then
+the frame number again; if a SOF landed after the DCD read the frame number at the IRQ's entry (an entry about a frame
+late), it takes the new SOF whole. Before, such an entry labelled frame N with SOF N+1's time (a 1 ms "discontinuity")
+or read `RAW` before `LAST` moved (a 43.7 ms one), either of which ended the time base: a candidate for the hour test's
+anchors. The RP2040 reads the frame number right after the time instead (a retry would cost RAM).
+
+**`EXT_ALINK_USB_DIAG` (0x8012)** counts timeline ends by cause, USB bus events (suspend, resume, bus reset, unplug:
+counted in `tud_event_hook_cb`, which TinyUSB calls for every queued event), the last absence's frames, time and
+deviation, the longest main-loop pass, the longest time without a SOF interrupt entry and the latest SOF interrupt
+entry. Spec 2.9.6 says how to read it.
+
 **SOF discontinuities** (review usb1 F2): a SOF whose frame count and clock disagree by more than 100 us (RP2350) or
 0.5 ms (RP2040) — a stall with the frame number frozen, a small frame jump — sets the long-gap flag: the timeline ends,
 the estimator reseeds, and the unit anchors again once the rate estimate is back (instead of a poisoned estimate for

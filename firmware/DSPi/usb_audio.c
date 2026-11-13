@@ -1064,7 +1064,6 @@ static uint16_t uac1_driver_open(uint8_t rhport, tusb_desc_interface_t const *it
 // WP USB1: the OUT packet is stamped with its USB frame in the IRQ that
 // completes it (tud_event_hook_cb below).  xfer_cb runs later from tud_task(),
 // up to a main-loop pass after the packet, so the stamp cannot be taken there.
-static volatile bool out_wait;
 
 // TinyUSB calls this in the USB IRQ for every event it queues.  The OUT EP's
 // buffer is FULL from its completion until the next arm, which happens with
@@ -1073,9 +1072,10 @@ static volatile bool out_wait;
 void __not_in_flash_func(tud_event_hook_cb)(uint8_t rhport, uint32_t eventid, bool in_isr) {
     (void)rhport;
     (void)in_isr;
-    if (eventid != DCD_EVENT_XFER_COMPLETE || !out_wait) return;
+    alink_usb_tb.ev[eventid] ++;               // EXT_ALINK_USB_DIAG: bus reset, suspend, resume, ... (WP USB2; ids 0..8, ev[16])
+    if (eventid != DCD_EVENT_XFER_COMPLETE || !alink_usb_tb.out_wait) return;
     if (!(usb_dpram->ep_buf_ctrl[AUDIO_OUT_ENDPOINT & 0x0Fu].out & USB_BUF_CTRL_FULL)) return;
-    out_wait = false;
+    alink_usb_tb.out_wait = false;
     alink_usb_isr_out_done();
 }
 #endif
@@ -1084,7 +1084,7 @@ static inline void uac1_arm_data_out(uint8_t rhport) {
 #if DSPI_ALINK_USB
     uint32_t save = save_and_disable_interrupts();
     alink_usb_tb.stamp = ALINK_USB_FRAME_NONE;
-    out_wait = true;
+    alink_usb_tb.out_wait = true;
     usbd_edpt_xfer(rhport, AUDIO_OUT_ENDPOINT, ep_out_buf, AUDIO_EP_MAX_PKT);
     restore_interrupts(save);
 #else
