@@ -107,7 +107,9 @@ bool alink_usb_phase_possible(const alink_usb_t *us, uint32_t fs) {
 
 uint32_t alink_usb_ring_target(alink_usb_t *us, uint32_t fs, uint32_t target, uint32_t cap, uint32_t span) {
     alink_usb_limits(us, fs, target, cap, span);
-    if (!alink_usb_phase_possible(us, fs)) return target;
+    // The stock target unless a phase timeline can run now: not while rejected
+    // or without a time base (review usb1 R5).
+    if (!alink_usb_phase_possible(us, fs) || us->rejected || !us->tb_ok) return target;
     // D less the block cap and the margin: the hold threshold at the start.
     return link_phase_prefill(&us->ph, target, cap, span);
 }
@@ -366,6 +368,10 @@ static void reanchor(alink_usb_t *us) {
 // A gap follows the stream's audio: one GAP each (review usb1 F1).
 static void count_gap(alink_usb_t *us) {
     if (!us->stream || !us->stream_seen) return;
+    // Remembered so that a stream stop right after it can take it back (R3).
+    us->gap_n = alink_usb_tb.n;
+    us->gap_missed0 = us->missed;
+    us->gap_recent = true;
     us->gaps++;
     us->ev_pending = true;
     us->ev_reason = ALINK_USB_RS_GAP;
@@ -601,6 +607,22 @@ void alink_usb_outputs_reset(alink_usb_t *us) {
 }
 
 void alink_usb_stream(alink_usb_t *us, bool on) {
+    if (!on && us->gap_recent && alink_usb_tb.n - us->gap_n <= ALINK_USB_STOP_FRAMES) {
+        // A host sends its last packet a few frames before SET_INTERFACE 0: the
+        // hold then saw the end of the stream as a gap.  A normal stop is not a
+        // GAP: take the count and its silence back (review usb1 R3).
+        us->gaps--;
+        us->missed = us->gap_missed0;
+        if (us->ev_reason == ALINK_USB_RS_GAP) us->ev_reason = ALINK_USB_RS_NONE;
+    }
+    us->gap_recent = false;
+    if (on && us->held) {
+        // A new stream or format (alt change without alt 0): the held packet
+        // belongs to the old layout and cannot be decoded with the new one;
+        // dropped, the new stream fades in (review usb1 R4).
+        us->held = false;
+        us->fade_in = true;
+    }
     us->stream = on;
     us->stream_seen = false;
     if (!on) us->muted_gap = false;
@@ -669,6 +691,7 @@ void alink_usb_service(alink_usb_t *us, uint32_t now_ms) {
             us->rate_locked = false;
             alink_usb_est_reset(&us->est);
             set_state(us, ALINK_USB_ST_NO_SOF, us->state == ALINK_USB_ST_OFF ? ALINK_USB_RS_NONE : ALINK_USB_RS_SOF_LOST);
+            alink_usb_port_ring_target();       // the stock target while dark (R5)
         }
         event_service(us, now_ms);
         return;                                 // the VCXO holds its trim
@@ -687,6 +710,7 @@ void alink_usb_service(alink_usb_t *us, uint32_t now_ms) {
             us->rate_locked = false;
             alink_usb_port_park();
             set_state(us, ALINK_USB_ST_REJECTED, ALINK_USB_RS_HOST_RANGE);
+            alink_usb_port_ring_target();       // the stock target while rejected (R5)
         } else if (us->rejected && a < ALINK_USB_HOST_MAX_PPM - ALINK_USB_HOST_HYST_PPM) {
             us->rejected = false;
             set_state(us, ALINK_USB_ST_PULL_IN, ALINK_USB_RS_HOST_RANGE);
@@ -732,7 +756,11 @@ void alink_usb_service(alink_usb_t *us, uint32_t now_ms) {
                 else if (us->ph.state == LINK_PHASE_LOCKED || us->ph.state == LINK_PHASE_PENDING)
                     trim = link_phase_servo(&us->ph, e);
             }
-        } else if (us->rate_locked && !us->prefilling) {
+        } else if (us->rate_locked && !us->prefilling && us->stream) {
+            // The fill servo only while a stream fills the rings: with none
+            // (alt 0) the ring sits empty and the fill term would pull the VCXO
+            // off the feed-forward by -10..-20 ppm, and in mode 2 keep
+            // rate_ready() false so the anchor never comes (hardware H1/H2).
             ff_only = false;
         }
         alink_usb_port_actuate(hz, trim, ff_only);

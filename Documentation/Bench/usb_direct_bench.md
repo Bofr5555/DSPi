@@ -80,8 +80,8 @@ The interrupt jitter does not enter the phase lock: the RP2350 takes the SOF ins
 
 Expected: the skew is **constant within the session** (per-minute values within a few us: both run at the host's rate,
 so nothing drifts and PipeWire's combine sink stops resampling) but **arbitrary**: anything up to milliseconds, and
-different after every restart of the streams. That is the contrast for E3 (the simulation's mode-1 case: 61.1 and 62.1
-samples of latency on the two units).
+different after every restart of the streams. That is the contrast for E3 (the simulation's mode-1 case: a mean skew of 11 samples,
+up to 60, between the two units).
 
 ## 4. E3: phase lock (mode 2), CLICK, restarts, start offsets
 
@@ -139,7 +139,8 @@ reads 0 +- 1 sample"). To provoke it, start the player on A, then add B to the c
 ### 4.5 Gaps
 
 `missed` and `late` in `ST` count samples of missing packets (silence placed on the timeline) and late samples dropped;
-`gaps` counts the holes. A lost packet is not a hard hole: the packet before it fades out over 1 ms and the one after it
+`gaps` counts the holes, and also packets that came late rather than not at all (more than 1.65 frames after their SOF
+at D 192: the same faded 2 ms dip); a normal stream stop is not counted. A lost packet is not a hard hole: the packet before it fades out over 1 ms and the one after it
 fades in over 1 ms (the unit holds the newest packet back one frame to be able to do that); a loss of more than about three
 frames is also muted for 20 ms. Each gap sends `0xE3` reason 5 (`GAP`), at most one event per 250 ms. On a quiet PC all
 three stay 0 or grow very slowly; a burst says the host or the unit's main loop skipped a frame (the unit re-arms its OUT
@@ -157,7 +158,8 @@ times a second. Measure it on the real host with the real programme path, with n
 3. Expected on a quiet PC: `gaps` 0 to a few per hour, `late` 0, `anchors` unchanged. More than one gap a minute: find
    the cause before using mode 2 (host load, USB hub, the unit's main loop: a long command, a preset save); every preset
    save or flash write re-anchors (about 0.25 s muted), by design.
-4. Note the worst minute; it decides whether D 192 (3-4 ms of main-loop stall budget) is enough for the installation.
+4. Note the worst minute; it decides whether D 192 (about 1-2 ms of main-loop stall budget: the held frame costs one
+   frame of ring fill) is enough for the installation. A larger D (up to 399) buys stall budget at 1 sample per sample.
 
 ## 5. One K340 alone
 
@@ -215,7 +217,8 @@ has about 2-3 faded gaps per second; on the bench 4.6 measures the real rate.
 | P9 / P10 D 399 / D 170 | | 398.8 / 169.8 | |
 | S10 CLICK on one bus frame | | | 0.026 sample apart |
 | S12 96 kHz, D 336 | 0.025 | 335.8 / 335.8 | |
-| S11 mode 1 (contrast) | | 61.1 / 62.1 | arbitrary, per start |
+| H1 / H2 no stream, mode 1 / mode 2 | | | VCXO on the host rate; mode 2 anchors on silence (with a 1 s DAC mute hold) |
+| S11 mode 1 (contrast) | mean 11, max 62 samples | 60 / 60 (spread 15-82) | the phase follows each packet and the fill servo |
 
 Latencies read about 0.2 sample short of D in the model (the output DMA's quarter-frame word in the fill reading), the
 same on every unit.

@@ -95,6 +95,7 @@ enum {
 #define ALINK_USB_EVENT_MIN_MS     250u
 #define ALINK_USB_GAP_MUTE_MS      20u       // a stream gap mutes this long, then fades back in
 #define ALINK_USB_ANCHOR_MUTE_MS   20u       // soft mute refresh while anchoring
+#define ALINK_USB_STOP_FRAMES      16u       // a GAP this close before alt 0 was the stream's end
 #define ALINK_USB_DECODE_MARGIN    16u       // D - (cap + margin) is the hold threshold
 
 // t48: 48 ticks per microsecond, 48000 per frame.
@@ -239,6 +240,9 @@ typedef struct {
     // SOF discontinuity check (review usb1 F2), main loop: the pair seen last.
     bool     exact;                          // SOF times from the PHY (RP2350): 100 us limit, else 0.5 ms
     bool     seen_valid;
+    // The last GAP, taken back when the stream stops right after it (R3).
+    bool     gap_recent;
+    uint32_t gap_n, gap_missed0;
     uint32_t seen_n, seen_t;
     uint32_t last_frame;                     // last packet frame (continuity for unstamped ones)
     // Stream (alt > 0) accounting, EXT_ALINK_USB_STATUS (U6)

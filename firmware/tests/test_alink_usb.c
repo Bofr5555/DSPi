@@ -61,7 +61,8 @@ void alink_usb_port_write_silence(uint32_t k) {
     if (n_wlog < WLOG) { wlog[n_wlog].off = 0; wlog[n_wlog].k = k; wlog[n_wlog].g0 = wlog[n_wlog].g1 = -1.0f; n_wlog++; }
 }
 const void *alink_usb_port_keep(const alink_usb_pkt_t *p) { (void)p; return keep_copy; }
-void alink_usb_port_actuate(float hz, float trim, bool ff) { (void)trim; (void)ff; n_actuate++; vcxo = (hz / (float)fs - 1.0f) * 1e6f; }
+static int n_ff_only, n_fill_servo;
+void alink_usb_port_actuate(float hz, float trim, bool ff) { (void)trim; if (ff) n_ff_only++; else n_fill_servo++; n_actuate++; vcxo = (hz / (float)fs - 1.0f) * 1e6f; }
 void alink_usb_port_park(void) { n_park++; vcxo = 0.0f; }
 float alink_usb_port_vcxo_ppm(void) { return vcxo; }
 uint8_t alink_usb_port_apply(const link_apply_op_t *op) { (void)op; return LINK_APPLY_APPLIED; }
@@ -211,6 +212,7 @@ static void test_config(void) {
     us.mode = 1;
     CHECK(alink_usb_ring_target(&us, 48000, 96, 49, 448) == 96, "mode 1 keeps the stock target");
     us.mode = 2;
+    us.tb_ok = true;                            // a time base (round 3 R5: else the stock target)
     CHECK(alink_usb_ring_target(&us, 48000, 96, 49, 448) == 200 - 49 - 16, "mode 2 prefill D - cap - 16");
     CHECK(alink_usb_ring_target(&us, 44100, 88, 46, 448) == 88, "44.1 kHz: no phase lock, stock target");
 }
@@ -520,6 +522,76 @@ static void test_fixups(void) {
     CHECK(!alink_usb_apply(&us, sp) && n_pulse == 4, "a refused SYNC_PULSE arms nothing (%d)", n_pulse);
 }
 
+// Round 3: H1 (no fill servo without a stream), R3 (a stop right after a gap is
+// no GAP), R4 (a held packet dropped on a new stream / format), R5 (stock ring
+// target while rejected or without a time base).
+static void run_mode1(alink_usb_t *us, bool stream, int from, int to) {
+    for (int i = from; i < to; i++) {
+        now48 = 48000u * (uint32_t)i;
+        now_us = 1000u * (uint32_t)i;
+        alink_usb_tb_sof(&alink_usb_tb, (uint32_t)i & 0x7FF, now48, 0);
+        us->stream = stream;
+        alink_usb_service(us, (uint32_t)i);
+    }
+}
+
+static void test_round3(void) {
+    alink_usb_t us;
+    alink_usb_init(&us);
+    us.mode = 1;
+    memset(&alink_usb_tb, 0, sizeof(alink_usb_tb));
+    n_ff_only = n_fill_servo = 0;
+    run_mode1(&us, false, 0, 6000);
+    CHECK(us.rate_locked && n_fill_servo == 0 && n_ff_only > 0,
+          "mode 1, no stream: feed-forward only (ff %d, fill %d)", n_ff_only, n_fill_servo);
+    n_ff_only = n_fill_servo = 0;
+    run_mode1(&us, true, 6000, 7000);
+    CHECK(n_fill_servo > 0 && n_ff_only == 0, "mode 1 with a stream: the fill servo (fill %d)", n_fill_servo);
+
+    // R3: a GAP right before alt 0 is taken back; one long before stays.
+    locked_engine(&us);
+    uint8_t dummy[192] = { 0 };
+    alink_usb_pkt_t p = { 1000u, 48, dummy, sizeof dummy };
+    alink_usb_deliver(&us, &p);
+    p.frame = 1001u;
+    alink_usb_deliver(&us, &p);
+    now48 = 48000u * 5u;                        // no packet for 4 frames: the hold flushes, counts a GAP
+    alink_usb_tb.n = 1005u;
+    hold(&us);
+    CHECK(us.gaps == 1, "the end of the stream first reads as a GAP");
+    alink_usb_tb.n = 1008u;                     // alt 0 three frames later
+    alink_usb_stream(&us, false);
+    CHECK(us.gaps == 0 && us.missed == 0, "a normal stop is no GAP (gaps %u, missed %u)", us.gaps, us.missed);
+    locked_engine(&us);
+    p.frame = 1000u;
+    alink_usb_deliver(&us, &p);
+    p.frame = 1001u;
+    alink_usb_deliver(&us, &p);
+    now48 = 48000u * 5u;
+    alink_usb_tb.n = 1005u;
+    hold(&us);
+    alink_usb_tb.n = 1100u;                     // alt 0 95 frames later: a real gap before it
+    alink_usb_stream(&us, false);
+    CHECK(us.gaps == 1, "a gap long before the stop stays counted");
+
+    // R4: a held packet is dropped when a new stream (format) starts.
+    locked_engine(&us);
+    p.frame = 1000u;
+    alink_usb_deliver(&us, &p);
+    CHECK(us.held, "held");
+    alink_usb_stream(&us, true);
+    CHECK(!us.held && us.fade_in, "a new stream drops the held packet and fades in");
+
+    // R5: the stock ring target while rejected or without a time base.
+    locked_engine(&us);
+    CHECK(alink_usb_ring_target(&us, 48000, 96, 49, 448) == 192 - 49 - 16, "phase prefill while locked");
+    us.rejected = true;
+    CHECK(alink_usb_ring_target(&us, 48000, 96, 49, 448) == 96, "rejected: stock target");
+    us.rejected = false;
+    us.tb_ok = false;
+    CHECK(alink_usb_ring_target(&us, 48000, 96, 49, 448) == 96, "no time base: stock target");
+}
+
 int main(void) {
     test_time_base();
     test_estimator();
@@ -530,6 +602,7 @@ int main(void) {
     test_discontinuity();
     test_fades();
     test_fixups();
+    test_round3();
     printf("test_alink_usb: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

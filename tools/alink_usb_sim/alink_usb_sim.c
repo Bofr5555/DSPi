@@ -96,6 +96,7 @@ typedef struct {
     // counters
     uint32_t lost, overruns, underruns, events, reanchor_events, gap_events;
     double locked_at;           // first PHASE_LOCK (s after boot), 0 never
+    double hold_until;          // the DAC mute hold before the anchor's drain, -1 none
     // stream
     bool streaming;
     // clicks
@@ -119,7 +120,7 @@ typedef struct {
 
 typedef struct scen scen_t;
 static const scen_t *S;
-static double g_stall_at, g_stall_len;
+static double g_stall_at, g_stall_len, g_dac_hold = 0.2;
 
 static unit_t U[NU];
 static unit_t *cur;
@@ -271,6 +272,7 @@ static void unit_init(unit_t *u) {
     u->running = true;          // stock: outputs run from boot
     u->next_pass = u->boot_s;
     u->start_at = -1;
+    u->hold_until = -1;
     unit_sel(u);
     alink_usb_limits(&u->us, fs, fs / 500u, cap(), 448);
     alink_usb_port_ring_target();
@@ -382,7 +384,13 @@ static void unit_pass(unit_t *u) {
     }
     // main.c handshake (phase mode)
     if (u->us.mode == ALINK_USB_MODE_PHASE) {
-        if (alink_usb_anchor_wanted(&u->us)) {
+        // main.c: prepare_pipeline_reset() asserts the DAC mute, and the drain
+        // waits for its hold (the K340's GP11 mute: modelled as 200 ms) while
+        // the anchor is still wanted (round 3, hardware H2).
+        bool want = alink_usb_anchor_wanted(&u->us);
+        if (want && u->hold_until < 0) u->hold_until = T + g_dac_hold;
+        if (want && T >= u->hold_until) {
+            u->hold_until = -1;
             u->running = false;     // drain_and_disable_outputs()
             u->W = 0;
             u->C = 0;
@@ -493,6 +501,8 @@ struct scen {
     double duration;
     double miss_rate;           // probability a packet is skipped (both units independently)
     double stop_at, stop_len;   // stream stopped on unit 1 (alt 0) for stop_len s
+    double stop_lead;           // the host's last packet comes this long before the alt 0
+    double dac_hold;            // DAC mute hold before the anchor's drain (0: 200 ms)
     double sof_gap_at, sof_gap_len;     // SOF stops (bus suspend / host controller restart), frame number jumps
     double click_at;            // CLICK on both units at the same bus frame
     uint32_t fs;                // 0: 48 kHz
@@ -509,6 +519,9 @@ typedef struct {
     uint32_t holes[NU], hole_samples[NU], muted_silence[NU], gap_events[NU], events[NU], misstamps[NU], stamped[NU];
     double locked_at[NU];
     double lat_after_restart[NU];
+    int gaps_at_stop;               // unit 1: GAPs counted from 30 ms before the alt 0 to 100 ms after it
+    uint32_t gaps_pre;
+    bool stop_sampled;
     uint8_t first_bus[NU];
     uint8_t status[NU][ALINK_USB_STATUS_LEN];
 } res_t;
@@ -519,6 +532,7 @@ static void run(const scen_t *s, res_t *r) {
     S = s;
     g_stall_at = s->stall_at;
     g_stall_len = s->stall_len;
+    g_dac_hold = s->dac_hold > 0 ? s->dac_hold : 0.2;
     int burst_done = 0;
     host_ppm = s->host_ppm;
     host_n = 1000000u + (uint64_t)(urand() * 2048);
@@ -577,6 +591,7 @@ static void run(const scen_t *s, res_t *r) {
                         unit_unsel();
                     }
                     bool skip = urand() < s->miss_rate;
+                    if (i == 1 && s->stop_len > 0 && T >= s->stop_at - s->stop_lead && T < s->stop_at) skip = true;
                     if (i == 1 && s->burst_n > 0 && T >= s->burst_at && burst_done < s->burst_n) {
                         skip = true;
                         burst_done++;
@@ -635,6 +650,14 @@ static void run(const scen_t *s, res_t *r) {
                     while (u->W < w) u->content[u->W++ % RING] = NAN;
                 }
             }
+        }
+        if (s->stop_len > 0) {
+            if (!r->stop_sampled && T >= s->stop_at - s->stop_lead - 0.03) {
+                r->gaps_pre = U[1].us.gaps;
+                r->stop_sampled = true;
+                r->gaps_at_stop = -1;
+            }
+            if (r->gaps_at_stop < 0 && T >= s->stop_at + 0.1) r->gaps_at_stop = (int)(U[1].us.gaps - r->gaps_pre);
         }
         if (T >= s->duration - 10.0 && T >= next_meas) {
             measure(&r->m);
@@ -861,15 +884,17 @@ int main(int argc, char **argv) {
     {
         scen_t s = base("S11 contrast: mode 1 (rate lock only)");
         s.mode = ALINK_USB_MODE_RATE;
-        s.stream_start[1] = 1.2;
+        s.stream_start[1] = 12.3;           // B starts after both are rate-locked
         if (WANT(s.name)) {
             run(&s, &r);
             report(&s, &r);
             for (int i = 0; i < NU; i++)
                 CHECK(r.state[i] == ALINK_USB_ST_RATE_LOCK, "S11: unit %d rate-locked", i);
-            double l0 = r.m.lat_sum[0] / r.m.lat_n[0], l1 = r.m.lat_sum[1] / r.m.lat_n[1];
-            CHECK(r.m.lat_n[0] > 9000 && r.m.lat_n[1] > 9000 && fabs(l0 - l1) > 1.0,
-                  "S11: rate-locked only, the latencies are whatever the start left: %.2f and %.2f samples", l0, l1);
+            // Rate-locked only, nothing holds the phase: the output follows each
+            // packet's arrival and the fill servo (tens of samples of spread),
+            // against hundredths of a sample in mode 2.
+            double mean = r.m.skew_n ? r.m.skew_sum / r.m.skew_n : 0.0;
+            CHECK(r.m.skew_n > 9000 && mean > 1.0, "S11: rate-locked only, mean skew %.2f samples (mode 2: < 0.05)", mean);
         }
     }
     {
@@ -1118,6 +1143,61 @@ int main(int argc, char **argv) {
             report(&s, &r);
             expect_locked(&s, &r, 0.05);
             CHECK(r.late[0] == 0 && r.late[1] == 0, "P10: no late samples at d_min (late %u / %u)", r.late[0], r.late[1]);
+        }
+    }
+    // ----------------------------------------------------------------------
+    // Round 3 (hardware findings H1/H2, re-review R3)
+    // ----------------------------------------------------------------------
+    {
+        scen_t s = base("H1 mode 1 with no stream: the VCXO settles on the host rate");
+        s.mode = ALINK_USB_MODE_RATE;
+        s.stream_start[0] = s.stream_start[1] = 1e9;
+        s.duration = 40.0;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            for (int i = 0; i < NU; i++)
+                CHECK(r.state[i] == ALINK_USB_ST_RATE_LOCK && fabs(r.vcxo[i] - r.ff[i]) < 1.0,
+                      "H1: unit %d rate-locked, VCXO %.2f at the feed-forward %.2f (not pulled by an empty ring)", i,
+                      r.vcxo[i], r.ff[i]);
+        }
+    }
+    {
+        scen_t s = base("H2 mode 2 with no stream: anchors on silence (DAC mute hold 1 s)");
+        s.dac_hold = 1.0;
+        s.stream_start[0] = s.stream_start[1] = 1e9;
+        s.duration = 30.0;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            for (int i = 0; i < NU; i++)
+                CHECK(r.state[i] == ALINK_USB_ST_PHASE_LOCK && r.anchors[i] == 1 && r.underruns[i] == 0 &&
+                      fabs(r.vcxo[i] - r.ff[i]) < 1.0,
+                      "H2: unit %d phase-locked without a stream (state %u, anchors %u)", i, r.state[i], r.anchors[i]);
+        }
+    }
+    {
+        scen_t s = base("H2b mode 2 anchored without a stream, streams start at 25 s");
+        s.stream_start[0] = s.stream_start[1] = 25.0;
+        s.duration = 45.0;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            expect_locked(&s, &r, 0.05);
+            CHECK(r.anchors[0] == 1 && r.anchors[1] == 1, "H2b: anchored once, before the streams (anchors %u / %u)",
+                  r.anchors[0], r.anchors[1]);
+        }
+    }
+    {
+        scen_t s = base("R3 stream stop: the last packet 5 ms before the alt 0 is no GAP");
+        s.stop_at = 20.0;
+        s.stop_len = 2.0;
+        s.stop_lead = 0.005;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            expect_locked(&s, &r, 0.05);
+            CHECK(r.gaps_at_stop == 0, "R3: GAPs counted around the stop: %d", r.gaps_at_stop);
         }
     }
     printf("alink_usb_sim: %d checks, %d failures\n", checks, failures);
