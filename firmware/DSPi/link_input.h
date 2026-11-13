@@ -19,7 +19,9 @@
  * A loss keeps class and trim and re-locks; a loss that lasts goes back to 1.
  *
  * Clock: the sender owns it.  The wire rate is measured from the RX DMA
- * position (one PIO bit per line bit, against the crystal timer) and fed to
+ * position (one PIO bit per line bit, against the crystal timer; the decode
+ * service publishes each position with the time it read it, and the
+ * measurement uses that pair: link/link_ring_clock.h) and fed to
  * input_servo_apply() exactly as the S/PDIF and ADAT slave inputs do.  The
  * superframe's rate code drives perform_rate_change() through
  * link_input_check_rate_change().  Phase lock (EXT_LINK_PHASE) is LK6's: see

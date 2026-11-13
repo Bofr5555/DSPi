@@ -330,6 +330,26 @@ static void test_overrun_and_budget(void) {
     CHECK(fx.state == LINK_RX_LOCKED && c.locks == 2 && fx.overruns == 1, "re-locked after the overrun (locks %u)",
           c.locks);
 
+    // Fixup LK45F (review lk45 finding 5): a service gap at the stall rule's
+    // limit (link_ring_clock.h, 15/16 of the production ring unread) is no
+    // overrun: no loss, no frame missed.
+    count_ctx_t c3 = { 0, 0, 0 };
+    link_fast_init(&fx, fring, 8192, 1, 0xFF, count_cb, &c3, 0);
+    fx.frame_events = true;
+    for (wr = 0; wr < 3000; wr++) {
+        fring[wr & 8191u] = words[wr];
+        if ((wr & 63u) == 63u) link_fast_run(&fx, (uint64_t)(wr + 1u) * 32u, 0);
+    }
+    CHECK(fx.state == LINK_RX_LOCKED && c3.locks == 1, "locked before the stall");
+    unsigned frames_before = c3.frames;
+    size_t stall_words = 8192u - 8192u / 16u + 31u;     // 15/16 of a pass, plus words since the last call
+    for (; wr < 3000 + stall_words; wr++) fring[wr & 8191u] = words[wr];
+    link_fast_run(&fx, (uint64_t)wr * 32u, 0);
+    CHECK(fx.overruns == 0 && c3.losses == 0 && fx.state == LINK_RX_LOCKED, "stall: overruns %u, losses %u",
+          fx.overruns, c3.losses);
+    CHECK(c3.frames - frames_before >= stall_words * 32u / 320u - 1u, "stall: %u frames decoded after it",
+          c3.frames - frames_before);
+
     // Search budget: a receiver started 20000 bits late skips to the newest
     // bits and still locks; it decodes no frame older than the skip.
     count_ctx_t c2 = { 0, 0, 0 };

@@ -276,6 +276,16 @@ def in_flash(a):
     return FLASH_LO <= a < FLASH_HI
 
 def detect_platform(path):
+    """The ELF's Arm build attributes decide (Cortex-M33 is v8-M.main, the
+    M0+ v6-M); the path is the fallback for an ELF without them."""
+    try:
+        attrs = subprocess.run(["arm-none-eabi-readelf", "-A", path],
+                               capture_output=True, text=True, check=True).stdout
+        m = re.search(r"Tag_CPU_arch:\s*(\S+)", attrs)
+        if m:
+            return "rp2350" if m.group(1).startswith("v8") else "rp2040"
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pass
     p = path.lower()
     if "rp2350" in p:
         return "rp2350"

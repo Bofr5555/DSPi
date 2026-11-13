@@ -519,6 +519,52 @@ class LinkBlock(unittest.TestCase):
         snap = self.ext(mc.EXT_LINK_CTRL_MSG).payload
         self.assertEqual((snap[3], snap[8 + 8]), (3, 0))
 
+    def test_lk45f_sender_tx_write_back_while_rate_pending(self):
+        # Fixup LK45F (review lk45 finding 3): as sender_vendor.c set_tx(), "a change" is against the
+        # last accepted request, so writing the stream's layout back while its RATE is pending is refused,
+        # and rewriting the pending request is no change (accepted, the RATE stays as scheduled).
+        self.client("sender")
+        ln = self.dev.link
+        tx = lambda cls, c, rate=1, mask=0x0001: struct.pack("<HBBBBBBHHBBH", mask, cls, c, rate, 0, 0, 0xFF, 0xFE,
+                                                              0, 0, 0, 0)
+        self.assertEqual(self.put(mc.EXT_LINK_TX, tx(2, 8)), mc.ST_OK)
+        ln.frame = 1000
+        self.assertEqual(self.put(mc.EXT_LINK_TX, tx(2, 16)), mc.ST_OK)       # RATE to C 16 scheduled
+        pending = ln.injected
+        self.assertEqual(self.put(mc.EXT_LINK_TX, tx(2, 8)), mc.ST_ERROR)     # stream's layout written back
+        self.assertEqual(ln.injected, pending)
+        self.assertEqual(self.put(mc.EXT_LINK_TX, tx(2, 16, mask=0x0003)), mc.ST_OK)   # same request, pins only
+        self.assertEqual((ln.injected, self.ext(mc.EXT_LINK_TX).payload[0]), (pending, 0x03))
+        ln.advance(pending[0] - 1000, self.dev)
+        self.assertEqual((ln.injected, ln.tx_layout), (None, (2, 1, 16)))
+        # A RATE by EXT_LINK_CTRL_MSG moves the request too (set_ctrl()): its write-back is no change.
+        at = ((ln.frame + 31) & ~31) + 64
+        self.assertEqual(self.put(mc.EXT_LINK_CTRL_MSG, struct.pack("<QBBhB3x", at, 6, 0, 0, 0)), mc.ST_OK)
+        self.assertEqual(self.put(mc.EXT_LINK_TX, tx(2, 16, rate=0, mask=0x0003)), mc.ST_OK)
+        self.assertEqual(self.put(mc.EXT_LINK_TX, tx(2, 16, rate=1, mask=0x0003)), mc.ST_ERROR)
+        # Links off before and after: the layout switches at once.
+        ln.advance(at - ln.frame, self.dev)
+        self.assertEqual(self.put(mc.EXT_LINK_TX, tx(2, 16, rate=0, mask=0)), mc.ST_OK)
+        self.assertEqual(self.put(mc.EXT_LINK_TX, tx(2, 8, rate=1, mask=0)), mc.ST_OK)
+        self.assertEqual((ln.injected, ln.tx_layout), (None, (2, 1, 8)))
+
+    def test_lk45f_fanout_reports_hop_delay(self):
+        # Fixup LK45F (review lk45 finding 2): a re-emitter reports its hop delay at EXT_LINK_STATUS offset 50
+        # (link_protocol_spec.md 7.2); 0 unless it is re-sending, and on receivers.
+        self.client("sender")
+        ln = self.dev.link
+        self.assertEqual(self.ext(mc.EXT_LINK_STATUS).payload[50:52], b"\x00\x00")    # master
+        self.assertEqual(self.put(mc.EXT_LINK_CONFIG, bytes([1, 0xFF, 0, 0xFF, 0xFF, 0xFF, 3, 0])), mc.ST_OK)
+        ln.state = 2                                                                  # fan-out locked, re-sending
+        st = self.ext(mc.EXT_LINK_STATUS).payload
+        self.assertEqual(st[50:52], b"\x02\x00")
+        self.assertTrue(mc.decode_link_status(st).endswith(" hop_delay=2"))
+        self.client("receiver")
+        self.lock()
+        st = self.ext(mc.EXT_LINK_STATUS).payload
+        self.assertEqual(st[50], 0)
+        self.assertNotIn("hop_delay", mc.decode_link_status(st))
+
     def test_lk7_cli(self):
         rc, out = Scripts.run_main(None, mc, ["link", "--fake-link", "receiver"])
         self.assertEqual(rc, 0, out)

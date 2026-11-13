@@ -145,7 +145,8 @@ flywheel, slip and loss rules, and re-sends each frame on all outputs at the cla
 
 `REQ_EXTENSION` (0x00) with the sender's IDs: `EXT_NOTIFY_FEATURES` (0: the sender sends no notifications), `0x8000`
 `EXT_LINK_INFO` (role 2 or 4, classes L1-L3, 8 links, 64 channels, features `FAN_OUT | TEST_PATTERNS | LOS_PIN`),
-`0x8001` STATUS (the fan-out input; `frame` = F on the wire; `fill_frames` = the USB FIFO), `0x8002` CONFIG (the
+`0x8001` STATUS (the fan-out input; `frame` = F on the wire; `fill_frames` = the USB FIFO; `hop_delay_frames` = the
+fan-out delay while re-sending), `0x8002` CONFIG (the
 fan-out input), `0x8005` FRAME_COUNTER, `0x8007` TX, `0x8008` CTRL_MSG, `0x8009` STATS_RESET, `0x800A` DIAG (the
 sender layout of 7.1). Also `REQ_GET_PLATFORM` (0x7F; 0 output channels), `REQ_GET_SERIAL` (0x7E),
 `REQ_GET_BUILD_INFO` (0x80), `REQ_SAVE_OUTPUT_CONFIG` (0x52: stores `EXT_LINK_TX` and `EXT_LINK_CONFIG` in their own
@@ -178,7 +179,9 @@ of 2.8.8: no link enabled, L1, 8 channels, 48 kHz, audio, no SYNC, TX_DISABLE al
 - Not run on hardware. The host tests cover the encoder (bit for bit), the scheduling and refusal rules, the
   fan-out core (through LK1's decoder, with damage), and `bench.py`'s sender scenario (simulated). The PIO/DMA start, the
   USB path, the feedback and the fan-out's clock servo are compiled and reviewed only.
-- The fan-out delay is 2-3 frames, not the 1 frame of `link_protocol_spec.md` 7.2. A whole input frame must arrive
-  before its re-sent copy can start, plus the FIFOs. Its hop count is still hops + 1, so units behind a fan-out need
-  `EXT_LINK_PHASE.hops_offset` = -(delay_frames - 1) until the spec decides.
+- The fan-out delay is 2-3 frames: a whole input frame must arrive before its re-sent copy can start, plus the FIFOs.
+  As `link_protocol_spec.md` 7.2 says (coordinator decision 2026-11-13), the fan-out reports it in
+  `EXT_LINK_STATUS.hop_delay_frames` (offset 50, 0 unless re-sending; DIAG byte 3 has it too), its hop count is
+  hops + 1, and the hub gives the units behind it `EXT_LINK_PHASE.hops_offset` = -(delay - 1). A re-alignment may
+  change the delay; the hub re-reads it after the fan-out lost lock.
 - No UART or USB MIDI control, no notifications, no fan-out trim scan (the receive trim stays at 0).

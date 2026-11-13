@@ -50,9 +50,13 @@ def deps(ins):
     rest = rest.strip()
     base = op.split(".")[0]
     if base in ("str", "strh", "strb"):
-        return set(), set(regs_of(rest)), "store"
+        rs = regs_of(rest)
+        d = {rs[1]} if "], #" in rest or "]!" in rest else set()     # writeback
+        return d, set(rs), "store"
     if base == "stm":
-        return set(), set(regs_of(rest)), "store"
+        rn, _, lst = rest.partition(",")
+        d = set(regs_of(rn)) if "!" in rn else set()                # writeback
+        return d, set(regs_of(rest)), "store"
     if base in ("ldr", "ldrh", "ldrb"):
         rs = regs_of(rest)
         d = {rs[0]}

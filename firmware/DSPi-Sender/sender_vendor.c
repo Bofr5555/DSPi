@@ -224,6 +224,8 @@ static uint16_t get_status(uint8_t *o) {
     uint32_t fill = snd_fifo.wr - snd_fifo.rd;
     o[48] = (uint8_t)fill;
     o[49] = (uint8_t)(fill >> 8);
+    if (snd.engine == SND_ENG_FANOUT)                // hop_delay_frames: 0 unless re-sending
+        o[50] = (uint8_t)(delay > 255u ? 255u : delay);
     return 52;
 }
 

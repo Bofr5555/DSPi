@@ -27,6 +27,7 @@ volatile bool link_input_restart_pending = false;
 
 #include "link/bench_trim.h"
 #include "link/link_fast.h"
+#include "link/link_ring_clock.h"
 
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
@@ -62,6 +63,9 @@ volatile bool link_input_restart_pending = false;
 
 _Static_assert((LINK_FIFO_ROWS & (LINK_FIFO_ROWS - 1u)) == 0, "FIFO rows must be a power of two");
 _Static_assert(sizeof(LINK_RING) == LINK_RING_WORDS * 4u, "arena link ring size");
+// The stall rule (link_ring_clock.h) gives up 1/16 of the ring; the decoder's
+// overrun limit (guard, comma window, one frame not yet consumed) must fit in it.
+_Static_assert(LINK_RING_BITS / 16u > LINK_FAST_GUARD_BITS + 12u + 400u, "stall rule vs overrun limit");
 
 #define DETECT_DWELL_US     12000u      // per class until a comma with a good head
 #define DETECT_LOCK_US      15000u      // after that, until the superframe locks
@@ -69,8 +73,6 @@ _Static_assert(sizeof(LINK_RING) == LINK_RING_WORDS * 4u, "arena link ring size"
 #define SCAN_STEP_US        25000u      // longest a trim step may take
 #define RELOCK_US           300000u     // a loss longer than this re-detects the class
 #define SEARCH_BUDGET       (LINK_RING_BITS / 4u)
-#define MEAS_WINDOW_US      32000u      // fast rate window
-#define MEAS_LONG_HALF_US   8000000ull  // long window: anchors rotate every 8 s, span 8-16 s
 #define EVENT_MIN_MS        250u        // NOTIFY_EVT_LINK_STATE rate limit
 
 // Link-up phases.
@@ -104,12 +106,13 @@ static bool scan_locked;
 static uint32_t scan_frames0, scan_errs0;
 
 // Ring position: absolute bits the DMA has written, tracked by whoever runs
-// the decode service and published under a sequence count.
+// the decode service and published with the time it was read under a
+// sequence count.
 static const uint32_t *volatile ring_addr;
 static uint32_t ring_last_idx;
 static uint64_t ring_passes;
 static volatile uint32_t ring_seq;
-static uint64_t ring_bits_pub;
+static uint64_t ring_bits_pub, ring_us_pub;
 static uint64_t service_last_us;
 static uint32_t pass_us = 4000u;            // one ring pass at the loaded class
 
@@ -131,12 +134,12 @@ static bool sf_valid;
 static volatile bool stream_mute;           // superframe: system mute or test pattern (PRBS) payload
 
 // Wire-rate measurement (as adat_input.c's slave machine).
-static uint64_t meas_win_us, meas_win_bits;
-static float    meas_hz_smooth;
-static uint64_t long_us[2], long_bits[2];
-static bool     long_valid;
-static float    meas_hz_long;
+static link_meas_t meas;
 static uint32_t servo_last_us;
+
+// Head-error counters at the last poll that saw the decoder locked: the
+// loss reason looks only at what failed since (EXT_LINK_STATUS keeps totals).
+static uint32_t lock_comma0, lock_crc80;
 
 // NOTIFY_EVT_LINK_STATE, held until the rate limit allows.
 static bool ev_pending, ev_once;
@@ -205,16 +208,19 @@ static uint32_t error_sum(const link_rx_stats_t *s) {
            s->comma_errors + s->counter_errors + s->code_errors + s->idle_errors;
 }
 
-static uint64_t ring_bits_read(void) {
+// The last published position and, in *us, the time it was read.
+static uint64_t ring_bits_read(uint64_t *us) {
     uint32_t s0, s1;
-    uint64_t v;
+    uint64_t v, t;
     do {
         s0 = ring_seq;
         __dmb();
         v = ring_bits_pub;
+        t = ring_us_pub;
         __dmb();
         s1 = ring_seq;
     } while (s0 != s1 || (s0 & 1u));
+    if (us) *us = t;
     return v;
 }
 
@@ -273,19 +279,19 @@ static bool load_program(unsigned c, int t) {
 }
 
 // Absolute bits written; must run at least once per ring pass (the decode
-// service does, and restarts the decoder after a longer gap).
+// service does, and restarts the decoder after a longer gap: link_ring_gap_ok()).
 static uint64_t ring_writer_bits(void) {
     uint32_t idx = (dma_hw->ch[LINK_DMA_DATA].write_addr - (uint32_t)(uintptr_t)LINK_RING) >> 2;
     if (idx >= LINK_RING_WORDS) idx = 0;    // the reload is in flight
-    if (idx < ring_last_idx) ring_passes++;
-    ring_last_idx = idx;
-    return (ring_passes * LINK_RING_WORDS + idx) * 32u;
+    return link_ring_count(idx, LINK_RING_WORDS, &ring_last_idx, &ring_passes) * 32u;
 }
 
-static void ring_publish(uint64_t bits) {
+// us: when the DMA position behind bits was read (the rate measurement's clock).
+static void ring_publish(uint64_t bits, uint64_t us) {
     ring_seq++;
     __dmb();
     ring_bits_pub = bits;
+    ring_us_pub = us;
     __dmb();
     ring_seq++;
 }
@@ -340,7 +346,7 @@ static void decoder_restart(unsigned c, bool count) {
     link_fast_set_bank_mask(&lf, (phase == PH_SCAN && !m) ? 1u : m);
     link_fast_set_output(&lf, NULL, 0);
     service_last_us = time_us_64();
-    ring_publish(at);
+    ring_publish(at, service_last_us);
 }
 
 static void enter_detect(uint64_t now) {
@@ -376,8 +382,9 @@ static void enter_locked(void) {
     phase = PH_LOCKED;
     detected_rate = rate_hz(lf.rate);
     fifo_tail = fifo_head;
-    long_valid = false;
-    meas_win_us = 0;
+    link_meas_reset(&meas);
+    lock_comma0 = lf.stats.comma_errors;
+    lock_crc80 = lf.stats.crc8_errors;
     event(LINK_INPUT_LOCKED, LINK_REASON_LOCKED);
 
 }
@@ -447,8 +454,8 @@ static void link_up_step(uint64_t now) {
         if (C1_OWNS()) break;
         if (st != LINK_RX_LOCKED) {
             // All three failed frames were flywheel frames: the comma is gone.
-            enter_relock(now, lf.stats.comma_errors >= 3u && !lf.stats.crc8_errors ? LINK_REASON_COMMA_LOST
-                                                                                 : LINK_REASON_FRAME_ERRORS);
+            uint32_t commas = lf.stats.comma_errors - lock_comma0, crc8s = lf.stats.crc8_errors - lock_crc80;
+            enter_relock(now, commas >= 3u && !crc8s ? LINK_REASON_COMMA_LOST : LINK_REASON_FRAME_ERRORS);
         } else if (rate_hz(lf.rate) != detected_rate) {
             // A RATE switch in the stream: the pipeline follows (mute, rate change, prefill).
             detected_rate = rate_hz(lf.rate);
@@ -474,7 +481,7 @@ static inline __attribute__((always_inline)) bool decode_into_fifo(uint64_t bits
         uint32_t space = LINK_FIFO_ROWS - (head - fifo_tail);
         if (!space) {
             // The pipeline is not taking audio: keep the lock, drop the backlog.
-            if ((int64_t)(bits - lf.p) > (int64_t)(LINK_RING_BITS / 2u)) fifo_drop = true;
+            if ((int32_t)((uint32_t)bits - lf.p) > (int32_t)(LINK_RING_BITS / 2u)) fifo_drop = true;
             ok = false;
             break;
         }
@@ -507,11 +514,12 @@ void link_input_decode_service(void) {
     if (!running) return;
     uint64_t now = time_us_64();
     uint64_t bits = ring_writer_bits();
-    // A gap longer than half a ring pass may have hidden a whole pass from
-    // the position count: start over at the writer (a loss if locked).
-    if (now - service_last_us > pass_us / 2u) {
+    // A gap of nearly a ring pass may have hidden a whole pass from the
+    // position count, and the bits are being overwritten: start over at the
+    // writer (a loss if locked).
+    if (!link_ring_gap_ok(now - service_last_us, pass_us)) {
         link_fast_restart(&lf, lf.cls, bits & ~31ull);
-        ring_publish(bits & ~31ull);
+        ring_publish(bits & ~31ull, now);
         service_last_us = now;
         return;
     }
@@ -523,7 +531,7 @@ void link_input_decode_service(void) {
     }
     if (phase != PH_LOCKED) link_fast_run(&lf, bits, SEARCH_BUDGET);
     else (void)decode_into_fifo(bits, false);
-    ring_publish(bits);
+    ring_publish(bits, now);
 }
 
 #if DSPI_LINK_DECODE_CORE1
@@ -537,10 +545,14 @@ void link_input_core1_service(void) {
     if (c1_active) {
         uint64_t now = time_us_64();
         uint64_t bits = ring_writer_bits();
-        bool keep = (now - service_last_us <= pass_us / 2u) && !slots_dirty;
-        service_last_us = now;
-        if (keep) keep = decode_into_fifo(bits, true);
-        ring_publish(bits);
+        // A long gap is core 0's to handle (it restarts the decoder): leave
+        // service_last_us so that its service pass sees the gap too.
+        bool keep = link_ring_gap_ok(now - service_last_us, pass_us);
+        if (keep) {
+            service_last_us = now;
+            keep = !slots_dirty && decode_into_fifo(bits, true);
+            ring_publish(bits, now);
+        }
         if (!keep) c1_active = false;
     }
     __dmb();
@@ -594,37 +606,13 @@ __attribute__((weak)) void link_input_on_delivered(uint32_t frames, uint32_t que
     (void)queued;
 }
 
-// Wire rate from the RX DMA position (flash; once per poll, cheap).
-static void measure(uint64_t now) {
+// Wire rate from the RX DMA position (flash; once per poll, cheap).  The
+// pair is the one the decode service published (core 0 or core 1), never
+// this poll's own time: core 1 publishes at its own moments.
+static void measure(void) {
     if (phase != PH_LOCKED || !detected_rate) return;
-    uint64_t bits = ring_bits_read();
-    if (!meas_win_us) {
-        meas_win_us = now;
-        meas_win_bits = bits;
-        long_us[0] = long_us[1] = now;
-        long_bits[0] = long_bits[1] = bits;
-        meas_hz_smooth = 0.0f;
-        return;
-    }
-    uint64_t span = now - meas_win_us;
-    if (span < MEAS_WINDOW_US) return;
-    // Frames per second = line bits per second * Fs / baud.
-    float k = 1e6f * (float)detected_rate / (float)link_class_baud(cls);
-    float hz = (float)(bits - meas_win_bits) * k / (float)span;
-    meas_win_us = now;
-    meas_win_bits = bits;
-    meas_hz_smooth = meas_hz_smooth == 0.0f ? hz : meas_hz_smooth + 0.25f * (hz - meas_hz_smooth);
-    if (now - long_us[1] >= MEAS_LONG_HALF_US) {
-        long_us[0] = long_us[1];
-        long_bits[0] = long_bits[1];
-        long_us[1] = now;
-        long_bits[1] = bits;
-    }
-    uint64_t long_span = now - long_us[0];
-    if (long_span >= MEAS_LONG_HALF_US) {
-        meas_hz_long = (float)(bits - long_bits[0]) * k / (float)long_span;
-        long_valid = true;
-    }
+    uint64_t us, bits = ring_bits_read(&us);
+    link_meas_sample(&meas, us, bits, 1e6f * (float)detected_rate / (float)link_class_baud(cls));
 }
 
 uint32_t link_input_poll(void) {
@@ -648,8 +636,12 @@ uint32_t link_input_poll(void) {
         sf_last = lf.sf;
         sf_valid = true;
         stream_mute = (sf_last.flags & (LINK_SF_FLAG_MUTE | LINK_SF_FLAG_PRBS)) != 0;
+        if (phase == PH_LOCKED) {
+            lock_comma0 = lf.stats.comma_errors;
+            lock_crc80 = lf.stats.crc8_errors;
+        }
     }
-    measure(now);
+    measure();
     return deliver();
 }
 
@@ -690,7 +682,7 @@ void link_input_start(void) {
     ring_addr = LINK_RING;
     ring_last_idx = 0;
     ring_passes = 0;
-    ring_publish(0);
+    ring_publish(0, time_us_64());
 
     // DMA 5 moves FIFO words into the ring and chains to 6, which rewrites
     // 5's write address with trigger (LK3's two-channel ring).
@@ -785,9 +777,10 @@ void link_input_discard_queued(void) {
 DSP_TIME_CRITICAL
 void link_input_update_clock_servo(void) {
     if (!running || phase != PH_LOCKED || !detected_rate || detected_rate != audio_state.freq) return;
-    if (meas_hz_smooth == 0.0f) return;
+    float hz = link_meas_hz(&meas);
+    if (hz == 0.0f) return;
     if (!input_servo_tick_due(&servo_last_us)) return;
-    input_servo_apply(long_valid ? meas_hz_long : meas_hz_smooth, 0);
+    input_servo_apply(hz, 0);
 }
 
 bool link_input_check_rate_change(void) {
@@ -856,6 +849,7 @@ bool link_input_stats_reset(uint8_t v) {
     if (v != 1u) return false;
     memset(&stats_acc, 0, sizeof(stats_acc));
     memset(&lf.stats, 0, sizeof(lf.stats));
+    lock_comma0 = lock_crc80 = 0;
     return true;
 }
 
@@ -926,10 +920,10 @@ void link_input_get_diag(uint8_t o[LINK_DIAG_LEN]) {
     memset(o, 0, LINK_DIAG_LEN);
     o[0] = 1;                               // layout version
     o[1] = (uint8_t)(lf.p & 31u);
-    float ff = 0.0f, actual = long_valid ? meas_hz_long : meas_hz_smooth;
+    float ff = 0.0f, actual = link_meas_hz(&meas);
     if (running && detected_rate && actual > 0.0f) ff = (actual / (float)detected_rate - 1.0f) * 1e6f;
     putf(o + 4, ff);                        // ppm_ff; ppm_phase and integral (8, 12): LK6
-    uint64_t bits = running ? ring_bits_read() : 0;
+    uint64_t bits = running ? ring_bits_read(NULL) : 0;
     put32(o + 16, (uint32_t)((bits / 8u) % (LINK_RING_WORDS * 4u)));
     put32(o + 20, (uint32_t)((uint64_t)lf.p / 8u % (LINK_RING_WORDS * 4u)));
     put32(o + 24, 0);                       // output DMA words consumed: LK6

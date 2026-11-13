@@ -346,15 +346,25 @@ stream (SYS2 4.2).
 ### 7.2 Repeaters and fan-outs (the hop byte)
 
 A repeater (a receiver with a transmit pin) or a fan-out (a sender slaved to a link input) re-emits the stream it
-receives, delayed by exactly one frame:
+receives, delayed by a whole number of frames, its **hop delay** `d_hop`, which it reports
+(`extension_channel_spec.md` 2.8.2, `EXT_LINK_STATUS.hop_delay_frames`):
 
+- The hop delay is at least 1 frame and is the re-emitter's own: a store-and-forward re-emitter needs a whole input
+  frame before its copy can start, plus its FIFOs (LK4's fan-out: 2-3 frames). It is constant while the re-emitter
+  stays locked; after a re-alignment it may differ, and the re-emitter reports the new value.
 - The re-emitted frame F carries the same F, the same payload and the same layout; HDR is unchanged.
 - Its superframe is the received one with `hops = min(hops + 1, 255)` and `class` set to the class of the outgoing
   line, CRC recomputed (`link_sf_repeat()`). 255 means "255 or more".
 - It re-encodes (its own RD and padding), so its output is again a conforming stream. A repeater that has no valid
   superframe yet sends only D21.5 idles (no commas, so downstream units see no stream rather than a wrong one,
   and the line still never sits at a constant level).
-- Receivers use hops to compute `D_local = D - hops` (SYS2 3.1); the hub writes it (`EXT_LINK_PHASE`).
+- Receivers use hops to compute `D_local = D - hops` (SYS2 3.1), which counts one frame per hop; the hub writes it
+  (`EXT_LINK_PHASE.d_local`). The hub compensates the rest of each re-emitter's delay through
+  `EXT_LINK_PHASE.hops_offset`: a unit behind re-emitters with hop delays `d_1 .. d_h` gets
+  `hops_offset = -sum(d_k - 1)`, so that its effective delay `d_local + hops_offset` is `D - sum(d_k)` and it plays
+  frame F at the same moment as a unit fed directly. The hub reads each re-emitter's `hop_delay_frames` and knows from
+  its own configuration which re-emitters feed which unit (the stream does not say: hops counts re-emitters, not
+  frames). It re-reads them after a re-emitter lost lock and adjusts the units behind it.
 
 ## 8. Reference receiver
 

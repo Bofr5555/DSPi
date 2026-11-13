@@ -200,6 +200,9 @@ $M set 0x52                             # REQ_SAVE_OUTPUT_CONFIG: keep the link 
 On link-up the receiver detects the class (about 12 ms per class tried), runs the trim scan (a few hundred frames
 per trim step: L1 19 steps, L2 9, L3 3, about 0.1-0.4 s), locks, matches the pipeline to the stream's rate, prefills
 and plays. Its STATUS counters and its trim scan should match what a bench RX board reports on the same wire.
+A save (`REQ_SAVE_OUTPUT_CONFIG`, a preset save) stalls the main loop longer than the receiver's ring holds (4 ms at
+L3, 16 ms at L1), so expect one loss and re-lock per flash write; other main-loop stalls up to those limits must not
+show as losses (`Documentation/Features/link_receiver.md` section 2).
 
 ## 8. Flashing
 
