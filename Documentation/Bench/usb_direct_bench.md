@@ -80,7 +80,7 @@ The interrupt jitter does not enter the phase lock: the RP2350 takes the SOF ins
 
 Expected: the skew is **constant within the session** (per-minute values within a few us: both run at the host's rate,
 so nothing drifts and PipeWire's combine sink stops resampling) but **arbitrary**: anything up to milliseconds, and
-different after every restart of the streams. That is the contrast for E3 (the simulation's mode-1 case: 59.7 and 57.6
+different after every restart of the streams. That is the contrast for E3 (the simulation's mode-1 case: 59.4 and 58.2
 samples of latency on the two units).
 
 ## 4. E3: phase lock (mode 2), CLICK, restarts, start offsets
@@ -188,7 +188,7 @@ units +12 / -18 ppm, B booted 3.7 s after A, D 192, 48 kHz):
 | SOF gone 120 ms, frame number jumps | 0.013 | 191.82 / 191.82 | one new anchor each |
 | CLICK on one bus frame | | | 0.009 sample apart |
 | 96 kHz, D 288 | 0.036 | 287.8 / 287.8 | |
-| mode 1 (contrast) | | 59.7 / 57.6 | arbitrary, per start |
+| mode 1 (contrast) | | 59.4 / 58.2 | arbitrary, per start |
 
 Latencies read about 0.2 sample short of D in the model (the output DMA's quarter-frame word in the fill reading), the
 same on every unit.
