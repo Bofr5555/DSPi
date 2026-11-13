@@ -1,16 +1,16 @@
 /*
- * bench_decode.c - link bench: cycles per frame of LK5's receiver (WP LK5)
+ * bench_decode.c - alink bench: cycles per frame of LK5's receiver (WP LK5)
  *
  *   decode all [crc=dma|sw]
  *   decode canned <L1|L2|L3> <44k1|48k|96k> [ch=C] [mask=M] [slot=S] [crc=dma|sw] [runs=N] [batch=F]
  *   decode live [mask=M] [slot=S] [crc=dma|sw] [ms=T] [batch=F]
  *
  * mask is the decimal bank mask (1 = bank 0, 3 = banks 0-1, 15 = banks 0-3);
- * every form ends with OK (or ERR), so `tools/link/bench.sh cmd` returns.
+ * every form ends with OK (or ERR), so `tools/alink/bench.sh cmd` returns.
  *
- * Runs link_fast (firmware/DSPi/link/link_fast.c, built here exactly as in
- * DSPi: LINK_FAST_M33 and LINK_FAST_CRC_DMA) over a stream and times every
- * link_fast_run() with the Cortex-M33's DWT cycle counter.
+ * Runs alink_fast (firmware/DSPi/alink/alink_fast.c, built here exactly as in
+ * DSPi: ALINK_FAST_M33 and ALINK_FAST_CRC_DMA) over a stream and times every
+ * alink_fast_run() with the Cortex-M33's DWT cycle counter.
  *
  *  - canned: a bench stream (PRBS-7 payload, sender's layout) generated into
  *    RAM, written into the decoder's ring F frames at a time (default 48, one
@@ -45,14 +45,14 @@
 #include "hardware/structs/m33.h"
 
 #include "bench_gen.h"
-#include "link_fast.h"
+#include "alink_fast.h"
 
 #define DEC_RING_WORDS  8192u
 #define DEC_BLOCK       64u
 
 static uint32_t dec_ring[DEC_RING_WORDS] __attribute__((aligned(4)));
 static uint32_t canned[DEC_RING_WORDS] __attribute__((aligned(4)));
-static link_fast_t lf;
+static alink_fast_t lf;
 static int32_t out_rows[DEC_BLOCK][8];
 static float in_buf[8][DEC_BLOCK];
 static float preamp[8] = { 1, 1, 1, 1, 1, 1, 1, 1 };
@@ -71,13 +71,13 @@ static void cyc_enable(void) {
     m33_hw->dwt_ctrl |= M33_DWT_CTRL_CYCCNTENA_BITS;
 }
 
-static void ev_cb(void *ctx, const link_rx_event_t *ev) { (void)ctx; (void)ev; }
+static void ev_cb(void *ctx, const alink_rx_event_t *ev) { (void)ctx; (void)ev; }
 
-// The sniffer channel: configured once, self-tested against link_crc16().
+// The sniffer channel: configured once, self-tested against alink_crc16().
 // Returns the state for the report.
 static const char *crc_setup(bool want) {
     if (!want) {
-        link_fast_set_crc_dma(&lf, -1);
+        alink_fast_set_crc_dma(&lf, -1);
         return "sw";
     }
     if (crc_ch < 0) {
@@ -91,21 +91,21 @@ static const char *crc_setup(bool want) {
         channel_config_set_sniff_enable(&c, true);
         dma_channel_configure((uint)crc_ch, &c, &crc_sink, canned, 0, false);
     }
-    link_fast_set_crc_dma(&lf, crc_ch);
+    alink_fast_set_crc_dma(&lf, crc_ch);
     static const uint8_t bytes[24] = "123456789abcdefghijklmno";
     uint32_t w[6];
     for (unsigned i = 0; i < 6u; i++)
         w[i] = (uint32_t)bytes[4 * i] << 24 | (uint32_t)bytes[4 * i + 1] << 16 | (uint32_t)bytes[4 * i + 2] << 8 |
                bytes[4 * i + 3];
-    uint32_t want_crc = link_crc16(bytes, 24);
+    uint32_t want_crc = alink_crc16(bytes, 24);
     for (int swap = 0; swap < 2; swap++) {
         dma_sniffer_enable((uint)crc_ch, DMA_SNIFF_CTRL_CALC_VALUE_CRC16, false);
         dma_sniffer_set_byte_swap_enabled(swap != 0);
-        if (link_fast_crc_dma_probe(&lf, w) == want_crc) {
+        if (alink_fast_crc_dma_probe(&lf, w) == want_crc) {
             return swap ? "dma(bswap)" : "dma";
         }
     }
-    link_fast_set_crc_dma(&lf, -1);
+    alink_fast_set_crc_dma(&lf, -1);
     return "sw(sniffer mismatch)";
 }
 
@@ -137,9 +137,9 @@ static uint32_t check_rows(unsigned n, const int32_t *expect) {
 }
 
 static void one_call(dec_acc_t *a, uint64_t avail, const int32_t *expect) {
-    bool locked = lf.state == LINK_RX_LOCKED;
+    bool locked = lf.state == ALINK_RX_LOCKED;
     uint32_t t0 = cyccnt();
-    unsigned n = link_fast_run(&lf, avail, 4096);
+    unsigned n = alink_fast_run(&lf, avail, 4096);
     uint32_t dt = cyccnt() - t0;
     unsigned got = lf.out_n;
     if (locked && n && got == n) {
@@ -157,11 +157,11 @@ static void one_call(dec_acc_t *a, uint64_t avail, const int32_t *expect) {
 
 static void report(const char *mode, unsigned cls, unsigned rate, unsigned ch, unsigned mask, const char *crc,
                    const dec_acc_t *a, uint32_t sys_hz) {
-    uint32_t fs = link_rate_hz(rate);
+    uint32_t fs = alink_rate_hz(rate);
     uint32_t mean = a->frames ? (uint32_t)(a->cyc / a->frames) : 0;
     uint32_t glue_f = a->frames ? (uint32_t)(a->glue / a->frames) : 0;
     uint32_t pct10 = fs ? (uint32_t)((uint64_t)mean * fs * 1000u / sys_hz) : 0;     // 0.1 %
-    const link_rx_stats_t *s = &lf.stats;
+    const alink_rx_stats_t *s = &lf.stats;
     uint32_t errors = s->crc8_errors + s->crc16_errors + s->bit_slips + s->superframe_errors + s->comma_errors +
                       s->counter_errors + s->code_errors + s->idle_errors;
     printf("DECODE %s cls=%u rate=%u ch=%u mask=0x%02x crc=%s frames=%lu calls=%lu cyc_frame=%lu cyc_min=%lu "
@@ -194,22 +194,22 @@ static bool parse_common(const bench_args_t *a, long *mask, long *slot, bool *dm
 static void outputs(long slot, long mask, unsigned ch, int32_t expect[8]) {
     unsigned s0 = slot >= 0 ? (unsigned)slot : 8u * (unsigned)__builtin_ctz((unsigned)mask);
     uint8_t slots[8];
-    uint8_t prbs[3 * LINK_MAX_CHANNELS];
-    link_prbs7_fill(prbs, 3u * ch);
+    uint8_t prbs[3 * ALINK_MAX_CHANNELS];
+    alink_prbs7_fill(prbs, 3u * ch);
     for (unsigned i = 0; i < 8u; i++) {
         unsigned c = s0 + i;
         slots[i] = (uint8_t)c;
         bool decoded = c < ch && (((unsigned)mask >> (c / 8u)) & 1u);
-        expect[i] = decoded ? link_get_s24(prbs + 3u * c) : 0;
+        expect[i] = decoded ? alink_get_s24(prbs + 3u * c) : 0;
     }
-    link_fast_set_slots(&lf, slots);
+    alink_fast_set_slots(&lf, slots);
 }
 
 // One canned measurement; false for a layout that does not exist.
 static bool canned_run(unsigned cls, unsigned rate, unsigned ch, long mask, long slot, bool dma, long batch,
                        long runs, uint32_t sys_hz) {
-    if (!ch) ch = cls == 1 ? (rate == LINK_RATE_96K ? 3u : 8u) : cls == 2 ? (rate == LINK_RATE_96K ? 8u : 16u)
-                           : (rate == LINK_RATE_96K ? 16u : 32u);
+    if (!ch) ch = cls == 1 ? (rate == ALINK_RATE_96K ? 3u : 8u) : cls == 2 ? (rate == ALINK_RATE_96K ? 8u : 16u)
+                           : (rate == ALINK_RATE_96K ? 16u : 32u);
     static bench_gen_t g;
     if (!bench_gen_init(&g, cls, rate, ch, BENCH_PAY_PRBS, 1000, 7)) return false;
     bench_sink_t sink;
@@ -218,13 +218,13 @@ static bool canned_run(unsigned cls, unsigned rate, unsigned ch, long mask, long
     while (bench_sink_bits(&sink) + bench_gen_frame_bits(&g) + 64u <= DEC_RING_WORDS * 32ull)
         bench_gen_frame(&g, &sink);
     uint32_t words = (uint32_t)sink.words;
-    uint32_t step = (uint32_t)batch * 10u * link_frame_symbols_max(cls, rate) / 32u + 1u;
+    uint32_t step = (uint32_t)batch * 10u * alink_frame_symbols_max(cls, rate) / 32u + 1u;
     dec_acc_t acc = { 0, 0, 0, 0, 0xFFFFFFFFu, 0, 0 };
     int32_t expect[8];
     const char *crc = "";
     for (long r = 0; r < runs; r++) {
-        link_fast_init(&lf, dec_ring, DEC_RING_WORDS, cls, (uint8_t)mask, ev_cb, 0, 0);
-        link_fast_set_output(&lf, out_rows, (uint16_t)batch);
+        alink_fast_init(&lf, dec_ring, DEC_RING_WORDS, cls, (uint8_t)mask, ev_cb, 0, 0);
+        alink_fast_set_output(&lf, out_rows, (uint16_t)batch);
         outputs(slot, mask, ch, expect);
         crc = crc_setup(dma);
         memset(dec_ring, 0, sizeof(dec_ring));
@@ -258,7 +258,7 @@ void bench_decode_cmd(const bench_args_t *a, const bench_decode_live_t *live, ui
             printf("ERR decode canned <L1|L2|L3> <44k1|48k|96k> ...\n");
             return;
         }
-        if ((s = bench_kv(a, "ch")) && !bench_parse_int(s, 1, LINK_MAX_CHANNELS, &ch)) { printf("ERR ch\n"); return; }
+        if ((s = bench_kv(a, "ch")) && !bench_parse_int(s, 1, ALINK_MAX_CHANNELS, &ch)) { printf("ERR ch\n"); return; }
         if ((s = bench_kv(a, "runs")) && !bench_parse_int(s, 1, 100, &runs)) { printf("ERR runs\n"); return; }
         if (!canned_run(cls, rate, (unsigned)ch, mask, slot, dma, batch, runs, sys_hz)) printf("ERR layout\n");
         else printf("OK\n");
@@ -284,15 +284,15 @@ void bench_decode_cmd(const bench_args_t *a, const bench_decode_live_t *live, ui
         dec_acc_t acc = { 0, 0, 0, 0, 0xFFFFFFFFu, 0, 0 };
         int32_t expect[8];
         uint64_t start = live->writer_bits();
-        link_fast_init(&lf, live->ring, live->ring_words, live->cls, (uint8_t)mask, ev_cb, 0, start & ~31ull);
-        link_fast_set_output(&lf, out_rows, (uint16_t)batch);
+        alink_fast_init(&lf, live->ring, live->ring_words, live->cls, (uint8_t)mask, ev_cb, 0, start & ~31ull);
+        alink_fast_set_output(&lf, out_rows, (uint16_t)batch);
         // A live stream's C comes from its superframe: lock first, then set the outputs.
         uint64_t t_end = time_us_64() + 500000u;
-        while (lf.state != LINK_RX_LOCKED && time_us_64() < t_end) {
-            link_fast_run(&lf, live->writer_bits(), 4096);
+        while (lf.state != ALINK_RX_LOCKED && time_us_64() < t_end) {
+            alink_fast_run(&lf, live->writer_bits(), 4096);
             lf.out_n = 0;
         }
-        if (lf.state != LINK_RX_LOCKED) { printf("ERR no lock within 500 ms\n"); return; }
+        if (lf.state != ALINK_RX_LOCKED) { printf("ERR no lock within 500 ms\n"); return; }
         outputs(slot, mask, lf.channels, expect);
         const char *crc = crc_setup(dma);
         memset(&lf.stats, 0, sizeof(lf.stats));
@@ -310,7 +310,7 @@ void bench_decode_cmd(const bench_args_t *a, const bench_decode_live_t *live, ui
     printf("ERR decode canned|live\n");
 }
 
-#else   // RP2040: no DWT cycle counter, and the link is RP2350-only
+#else   // RP2040: no DWT cycle counter, and the alink is RP2350-only
 
 void bench_decode_cmd(const bench_args_t *a, const bench_decode_live_t *live, uint32_t sys_hz) {
     (void)a; (void)live; (void)sys_hz;

@@ -1,7 +1,7 @@
 /*
- * sender_store.c - DSPi link sender (WP LK4): persisted link settings
+ * sender_store.c - DSPi alink sender (WP LK4): persisted alink settings
  *
- * EXT_LINK_TX and EXT_LINK_CONFIG persist through REQ_SAVE_OUTPUT_CONFIG
+ * EXT_ALINK_TX and EXT_ALINK_CONFIG persist through REQ_SAVE_OUTPUT_CONFIG
  * (0x52), as on a receiver (extension_channel_spec.md 2.8), in one flash
  * sector of their own just below the area DSPi's presets use (the last 21
  * sectors on RP2350), so a board that later goes back to DSPi firmware finds
@@ -23,8 +23,8 @@
 
 typedef struct {
     uint32_t magic;
-    uint8_t  tx[SND_TX_LEN];        // EXT_LINK_TX IN form (IN-only fields 0)
-    uint8_t  config[8];             // EXT_LINK_CONFIG
+    uint8_t  tx[SND_TX_LEN];        // EXT_ALINK_TX IN form (IN-only fields 0)
+    uint8_t  config[8];             // EXT_ALINK_CONFIG
     uint8_t  channels_req;
     uint8_t  pad[1];
     uint16_t crc;                   // CRC-16/CCITT-FALSE over the bytes before it
@@ -35,11 +35,11 @@ _Static_assert(sizeof(store_t) <= FLASH_PAGE_SIZE, "one flash page");
 void sender_store_load(void) {
     const store_t *st = (const store_t *)(XIP_BASE + STORE_OFFSET);
     if (st->magic != (uint32_t)(STORE_MAGIC)) return;
-    if (link_crc16((const uint8_t *)st, offsetof(store_t, crc)) != st->crc) return;
+    if (alink_crc16((const uint8_t *)st, offsetof(store_t, crc)) != st->crc) return;
     snd_txcfg_t c;
-    if (snd_txcfg_parse(st->tx, SND_MAX_LINKS, &c) == 0) {
+    if (snd_txcfg_parse(st->tx, SND_MAX_ALINKS, &c) == 0) {
         snd.cfg = c;
-        snd.channels_req = st->channels_req >= 1 && st->channels_req <= LINK_MAX_CHANNELS ? st->channels_req
+        snd.channels_req = st->channels_req >= 1 && st->channels_req <= ALINK_MAX_CHANNELS ? st->channels_req
                                                                                           : c.channels;
     }
     const uint8_t *p = st->config;
@@ -58,7 +58,7 @@ bool sender_store_save(void) {
     memcpy(st.config, snd.config, 8);
     st.channels_req = snd.channels_req;
     snd_lock_give(s);
-    st.crc = link_crc16((const uint8_t *)&st, offsetof(store_t, crc));
+    st.crc = alink_crc16((const uint8_t *)&st, offsetof(store_t, crc));
     memset(page, 0xFF, sizeof(page));
     memcpy(page, &st, sizeof(st));
     uint32_t irq = save_and_disable_interrupts();

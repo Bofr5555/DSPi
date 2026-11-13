@@ -505,10 +505,10 @@ void notify_push_clip(uint32_t mask) {
     restore_interrupts(flags);
 }
 
-void notify_push_link_state(uint8_t state, uint8_t cls, uint8_t reason, uint32_t frame_low) {
+void notify_push_alink_state(uint8_t state, uint8_t cls, uint8_t reason, uint32_t frame_low) {
     uint32_t flags = save_and_disable_interrupts();
     NotifyRingEntry e = {
-        .event_id = NOTIFY_EVT_LINK_STATE,
+        .event_id = NOTIFY_EVT_ALINK_STATE,
         .source   = PARAM_SRC_INTERNAL,
     };
     e.value[0] = state;
@@ -868,7 +868,7 @@ uint16_t notify_peek_next_for(NotifyConsumer c, uint8_t *out_buf, uint16_t max_l
             return 12;
         }
 
-        case NOTIFY_EVT_LINK_STATE:
+        case NOTIFY_EVT_ALINK_STATE:
         case NOTIFY_EVT_APPLY_RESULT:
         case NOTIFY_EVT_ALINK_USB: {
             // 12 bytes.  0xE1: state, class, reason, pad, F low 32 bits LE.

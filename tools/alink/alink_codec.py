@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""DSPi link protocol v1: bit-exact Python twin of firmware/DSPi/link/.
+"""DSPi alink protocol v1: bit-exact Python twin of firmware/DSPi/alink/.
 
-Normative text: Documentation/Features/link_protocol_spec.md.  Standard
+Normative text: Documentation/Features/alink_protocol_spec.md. Standard
 library only.  Written from the spec's tables, not translated from the C
-code, so the shared vectors (firmware/tests/link_vectors.json) compare two
+code, so the shared vectors (firmware/tests/alink_vectors.json) compare two
 independent implementations.
 
-Conventions as in link_codec.h: a symbol is an int with code-group bit 'a'
+Conventions as in alink_codec.h: a symbol is an int with code-group bit 'a'
 in bit 9, sent first; RD is 0 for RD- and 1 for RD+; line bits are a list of
 0/1 ints in line order (packed MSB first into bytes or 32-bit words when
 stored).
@@ -100,7 +100,7 @@ def max_channels(cls, rate):
 
 
 # The protocol's capacity table (spec 5.7), the one source for senders, tools and fakes:
-# CAPACITY[(cls, rate)] is the largest C, from max_channels() as link_max_channels() in C.
+# CAPACITY[(cls, rate)] is the largest C, from max_channels() as alink_max_channels() in C.
 CAPACITY = {(c, r): max_channels(c, r) for c in sorted(CLASS_BAUD) for r in sorted(RATE_HZ)}
 
 # ---------------------------------------------------------------------------

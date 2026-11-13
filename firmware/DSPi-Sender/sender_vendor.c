@@ -1,13 +1,13 @@
 /*
- * sender_vendor.c - DSPi link sender (WP LK4): vendor requests
+ * sender_vendor.c - DSPi alink sender (WP LK4): vendor requests
  *
  * The control surface of a sender build on the vendor interface (EP0,
  * interface 2), the same transport and conventions as DSPi's
  * vendor_commands.c: the MS OS 2.0 descriptor request, REQ_EXTENSION (0x00)
- * with the sender's link block (extension_channel_spec.md 2.8: 0x8000,
+ * with the sender's alink block (extension_channel_spec.md 2.8: 0x8000,
  * 0x8001, 0x8002, 0x8005, 0x8007, 0x8008, 0x8009, 0x800A), and the few plain
  * requests a host uses to identify a DSPi (platform, serial, build info),
- * REQ_SAVE_OUTPUT_CONFIG (0x52) to persist the link settings, and
+ * REQ_SAVE_OUTPUT_CONFIG (0x52) to persist the alink settings, and
  * REQ_ENTER_BOOTLOADER (0xF0).  Everything else STALLs: a sender has no DSP.
  *
  * An OUT extension request STALLs at SETUP for an unknown ID or a wrong
@@ -27,29 +27,29 @@
 #include "usb_descriptors.h"
 #include "build_info.h"
 
-// Extension IDs of the link block (extension_channel_spec.md 2.8).
-#define EXT_LINK_INFO           0x8000
-#define EXT_LINK_STATUS         0x8001
-#define EXT_LINK_CONFIG         0x8002
+// Extension IDs of the alink block (extension_channel_spec.md 2.8).
+#define EXT_ALINK_INFO          0x8000
+#define EXT_ALINK_STATUS        0x8001
+#define EXT_ALINK_CONFIG        0x8002
 #define EXT_FRAME_COUNTER       0x8005
-#define EXT_LINK_TX             0x8007
-#define EXT_LINK_CTRL_MSG       0x8008
-#define EXT_LINK_STATS_RESET    0x8009
-#define EXT_LINK_DIAG           0x800A
+#define EXT_ALINK_TX            0x8007
+#define EXT_ALINK_CTRL_MSG      0x8008
+#define EXT_ALINK_STATS_RESET   0x8009
+#define EXT_ALINK_DIAG          0x800A
 
-#define LINK_ROLE_SENDER        2u
-#define LINK_ROLE_FANOUT        4u
-#define LINK_FEAT_FAN_OUT       0x08u
-#define LINK_FEAT_TEST_PATTERNS 0x10u
-#define LINK_FEAT_LOS_PIN       0x20u
+#define ALINK_ROLE_SENDER       2u
+#define ALINK_ROLE_FANOUT       4u
+#define ALINK_FEAT_FAN_OUT      0x08u
+#define ALINK_FEAT_TEST_PATTERNS 0x10u
+#define ALINK_FEAT_LOS_PIN      0x20u
 
-// Sender layout of EXT_LINK_DIAG (byte 0; a receiver's layout is 1).
+// Sender layout of EXT_ALINK_DIAG (byte 0; a receiver's layout is 1).
 #define SENDER_DIAG_VERSION     0x81u
 
 static const uint16_t ext_ids[] = {
     EXT_NOTIFY_FEATURES,
-    EXT_LINK_INFO, EXT_LINK_STATUS, EXT_LINK_CONFIG, EXT_FRAME_COUNTER,
-    EXT_LINK_TX, EXT_LINK_CTRL_MSG, EXT_LINK_STATS_RESET, EXT_LINK_DIAG,
+    EXT_ALINK_INFO, EXT_ALINK_STATUS, EXT_ALINK_CONFIG, EXT_FRAME_COUNTER,
+    EXT_ALINK_TX, EXT_ALINK_CTRL_MSG, EXT_ALINK_STATS_RESET, EXT_ALINK_DIAG,
 };
 
 static uint8_t resp[64];
@@ -57,10 +57,10 @@ static uint8_t rx_buf[64];
 
 static uint16_t ext_set_len(uint16_t id) {
     switch (id) {
-    case EXT_LINK_CONFIG:       return 8;
-    case EXT_LINK_TX:           return SND_TX_LEN;
-    case EXT_LINK_CTRL_MSG:     return SND_CTRL_OUT_LEN;
-    case EXT_LINK_STATS_RESET:  return 1;
+    case EXT_ALINK_CONFIG:      return 8;
+    case EXT_ALINK_TX:          return SND_TX_LEN;
+    case EXT_ALINK_CTRL_MSG:    return SND_CTRL_OUT_LEN;
+    case EXT_ALINK_STATS_RESET: return 1;
     default:                    return 0;
     }
 }
@@ -70,15 +70,15 @@ static void put64(uint8_t *p, uint64_t v) { for (int i = 0; i < 8; i++) p[i] = (
 static void putf(uint8_t *p, float f) { uint32_t u; memcpy(&u, &f, 4); put32(p, u); }
 
 static uint8_t rate_code_of(uint32_t hz) {
-    return hz == 44100u ? LINK_RATE_44K1 : hz == 96000u ? LINK_RATE_96K : LINK_RATE_48K;
+    return hz == 44100u ? ALINK_RATE_44K1 : hz == 96000u ? ALINK_RATE_96K : ALINK_RATE_48K;
 }
 
-// A pin some link function already uses (another one than the config being
-// written): the link outputs, their SFP pins and the SYNC pin.
+// A pin some alink function already uses (another one than the config being
+// written): the alink outputs, their SFP pins and the SYNC pin.
 static bool pin_taken(uint8_t pin) {
     if (pin == 0xFF) return false;
-    for (unsigned n = 0; n < SND_MAX_LINKS; n++)
-        if (snd_link_pins[n] == pin || SND_TXDIS_PIN(n) == pin || SND_LOS_PIN(n) == pin) return true;
+    for (unsigned n = 0; n < SND_MAX_ALINKS; n++)
+        if (snd_alink_pins[n] == pin || SND_TXDIS_PIN(n) == pin || SND_LOS_PIN(n) == pin) return true;
     return snd.cfg.sync_pin == pin;
 }
 
@@ -110,10 +110,10 @@ static bool set_config(const uint8_t *p) {
 
 static bool set_tx(const uint8_t *p) {
     snd_txcfg_t c;
-    if (snd_txcfg_parse(p, SND_MAX_LINKS, &c)) return false;
+    if (snd_txcfg_parse(p, SND_MAX_ALINKS, &c)) return false;
     if (c.sync_pin != 0xFF) {
-        for (unsigned n = 0; n < SND_MAX_LINKS; n++)
-            if (snd_link_pins[n] == c.sync_pin || SND_TXDIS_PIN(n) == c.sync_pin || SND_LOS_PIN(n) == c.sync_pin)
+        for (unsigned n = 0; n < SND_MAX_ALINKS; n++)
+            if (snd_alink_pins[n] == c.sync_pin || SND_TXDIS_PIN(n) == c.sync_pin || SND_LOS_PIN(n) == c.sync_pin)
                 return false;
         if (snd.config[0] && c.sync_pin == (snd.config[1] == 0xFF ? SND_FANOUT_RX_PIN : snd.config[1]))
             return false;
@@ -122,24 +122,24 @@ static bool set_tx(const uint8_t *p) {
     bool restart = false, pins;
     uint32_t s = snd_lock_take();
     snd_txcfg_t old = snd.cfg;
-    bool running = old.link_enable != 0 || c.link_enable != 0;
+    bool running = old.alink_enable != 0 || c.alink_enable != 0;
     if (c.cls != old.cls) {
-        // Not announced in-band: the links restart at the new line rate and
+        // Not announced in-band: the alinks restart at the new line rate and
         // the receivers re-detect (2.8.8).  A pending RATE's layout is in
         // cfg, the restart takes it at once.
         restart = true;
     } else if (c.rate != old.rate || c.channels != old.channels) {
         if (!running) {
-            restart = true;                             // no link sends: switch now
+            restart = true;                             // no alink sends: switch now
         } else {
             uint64_t at;
-            if (snd.tx.apply_op != LINK_OP_NONE || !snd_schedule_layout(&snd.tx, c.rate, c.channels, &at)) {
+            if (snd.tx.apply_op != ALINK_OP_NONE || !snd_schedule_layout(&snd.tx, c.rate, c.channels, &at)) {
                 snd_lock_give(s);
                 return false;                           // one apply at a time
             }
         }
     }
-    pins = c.link_enable != old.link_enable || c.txdis_mask != old.txdis_mask || c.sync_pin != old.sync_pin;
+    pins = c.alink_enable != old.alink_enable || c.txdis_mask != old.txdis_mask || c.sync_pin != old.sync_pin;
     snd.cfg = c;
     snd.channels_req = c.channels;
     snd.usb_rate_follow = false;                        // the host's rate wins over a pending follow
@@ -153,12 +153,12 @@ static bool set_ctrl(const uint8_t *p) {
     snd_ctrl_t m;
     if (snd_ctrl_parse(p, &m)) return false;
     uint32_t s = snd_lock_take();
-    if (m.op != LINK_OP_NONE && !link_tx_schedule(&snd.tx, m.frame, m.op, m.arg, m.value)) {
+    if (m.op != ALINK_OP_NONE && !alink_tx_schedule(&snd.tx, m.frame, m.op, m.arg, m.value)) {
         snd_lock_give(s);
-        return false;                       // lead, one at a time, RATE fit (link_tx_schedule)
+        return false;                       // lead, one at a time, RATE fit (alink_tx_schedule)
     }
-    if (m.op == LINK_OP_RATE) snd.cfg.rate = m.arg;
-    if (m.op == LINK_OP_SYNC_PULSE) snd.sync_pulse_frame = m.frame;
+    if (m.op == ALINK_OP_RATE) snd.cfg.rate = m.arg;
+    if (m.op == ALINK_OP_SYNC_PULSE) snd.sync_pulse_frame = m.frame;
     snd.cfg.flags = (uint8_t)((snd.cfg.flags & ~1u) | (m.system_flags & 1u));
     snd_lock_give(s);
     return true;
@@ -167,10 +167,10 @@ static bool set_ctrl(const uint8_t *p) {
 static bool ext_set(uint16_t id, const uint8_t *p, uint16_t len) {
     if (ext_set_len(id) == 0 || len != ext_set_len(id)) return false;
     switch (id) {
-    case EXT_LINK_CONFIG:   return set_config(p);
-    case EXT_LINK_TX:       return set_tx(p);
-    case EXT_LINK_CTRL_MSG: return set_ctrl(p);
-    case EXT_LINK_STATS_RESET:
+    case EXT_ALINK_CONFIG:  return set_config(p);
+    case EXT_ALINK_TX:      return set_tx(p);
+    case EXT_ALINK_CTRL_MSG: return set_ctrl(p);
+    case EXT_ALINK_STATS_RESET:
         if (p[0] != 1) return false;
         snd.stats_req = snd.stats_req + 1u;
         return true;
@@ -184,21 +184,21 @@ static bool ext_set(uint16_t id, const uint8_t *p, uint16_t len) {
 
 static uint16_t get_info(uint8_t *o) {
     memset(o, 0, 32);
-    o[0] = snd.config[0] ? LINK_ROLE_FANOUT : LINK_ROLE_SENDER;
-    o[1] = LINK_PROTOCOL_VERSION;
+    o[0] = snd.config[0] ? ALINK_ROLE_FANOUT : ALINK_ROLE_SENDER;
+    o[1] = ALINK_PROTOCOL_VERSION;
     o[2] = 0x07;                                    // L1, L2, L3
-    o[3] = SND_MAX_LINKS;
-    o[4] = LINK_MAX_CHANNELS;
+    o[3] = SND_MAX_ALINKS;
+    o[4] = ALINK_MAX_CHANNELS;
     o[5] = 0;                                       // slots: a sender has none
     o[8] = snd.config[1] == 0xFF ? SND_FANOUT_RX_PIN : snd.config[1];
     o[9] = 0xFF;
-    put32(o + 12, LINK_FEAT_FAN_OUT | LINK_FEAT_TEST_PATTERNS | LINK_FEAT_LOS_PIN);
+    put32(o + 12, ALINK_FEAT_FAN_OUT | ALINK_FEAT_TEST_PATTERNS | ALINK_FEAT_LOS_PIN);
     return 32;
 }
 
 static uint16_t get_status(uint8_t *o) {
     uint8_t state, cls, rate, chans, hops, sender, sflags;
-    link_rx_stats_t st;
+    alink_rx_stats_t st;
     float phase, ppm_ff;
     uint32_t delay, realigns;
     sender_fanout_status(&state, &cls, &rate, &chans, &hops, &sender, &sflags, &st, &phase, &delay,
@@ -231,13 +231,13 @@ static uint16_t get_status(uint8_t *o) {
 
 static uint16_t get_diag(uint8_t *o) {
     uint8_t state, cls, rate, chans, hops, sender, sflags;
-    link_rx_stats_t st;
+    alink_rx_stats_t st;
     float phase, ppm_ff;
     uint32_t delay, realigns;
     sender_fanout_status(&state, &cls, &rate, &chans, &hops, &sender, &sflags, &st, &phase, &delay,
                          &realigns, &ppm_ff);
     uint32_t s = snd_lock_take();
-    uint32_t fs = link_rate_hz(snd.tx.rate);
+    uint32_t fs = alink_rate_hz(snd.tx.rate);
     snd_lock_give(s);
     memset(o, 0, 64);
     o[0] = SENDER_DIAG_VERSION;
@@ -279,9 +279,9 @@ static bool ext_get(uint16_t id, uint16_t wlen, uint8_t *o, uint16_t *n) {
         put32(o, 0);                                // the sender sends no notifications
         *n = 4;
         break;
-    case EXT_LINK_INFO:     *n = get_info(o); break;
-    case EXT_LINK_STATUS:   *n = get_status(o); break;
-    case EXT_LINK_CONFIG:   memcpy(o, snd.config, 8); *n = 8; break;
+    case EXT_ALINK_INFO:    *n = get_info(o); break;
+    case EXT_ALINK_STATUS:  *n = get_status(o); break;
+    case EXT_ALINK_CONFIG:  memcpy(o, snd.config, 8); *n = 8; break;
     case EXT_FRAME_COUNTER: {
         uint64_t f = snd.wire_frame;
         put64(o, f);
@@ -290,7 +290,7 @@ static bool ext_get(uint16_t id, uint16_t wlen, uint8_t *o, uint16_t *n) {
         *n = 16;
         break;
     }
-    case EXT_LINK_TX: {
+    case EXT_ALINK_TX: {
         uint32_t s = snd_lock_take();
         snd_txcfg_t c = snd.cfg;
         snd_lock_give(s);
@@ -298,14 +298,14 @@ static bool ext_get(uint16_t id, uint16_t wlen, uint8_t *o, uint16_t *n) {
         *n = SND_TX_LEN;
         break;
     }
-    case EXT_LINK_CTRL_MSG: {
+    case EXT_ALINK_CTRL_MSG: {
         uint32_t s = snd_lock_take();
         snd_ctrl_pack_in(&snd.tx, snd.wire_frame, o);
         snd_lock_give(s);
         *n = SND_CTRL_IN_LEN;
         break;
     }
-    case EXT_LINK_DIAG:     *n = get_diag(o); break;
+    case EXT_ALINK_DIAG:    *n = get_diag(o); break;
     default:
         return false;
     }
@@ -323,13 +323,13 @@ bool sender_follow_usb_rate(void) {
     bool done = true, restart = false;
     uint32_t s = snd_lock_take();
     if (snd.cfg.rate != code) {
-        unsigned cap = link_max_channels(snd.cfg.cls, code);
+        unsigned cap = alink_max_channels(snd.cfg.cls, code);
         unsigned c = snd.channels_req < cap ? snd.channels_req : cap;
-        if (snd.cfg.link_enable == 0) {
+        if (snd.cfg.alink_enable == 0) {
             restart = true;
         } else {
             uint64_t at;
-            done = snd.tx.apply_op == LINK_OP_NONE && snd_schedule_layout(&snd.tx, code, c, &at);
+            done = snd.tx.apply_op == ALINK_OP_NONE && snd_schedule_layout(&snd.tx, code, c, &at);
         }
         if (done) {
             snd.cfg.rate = code;

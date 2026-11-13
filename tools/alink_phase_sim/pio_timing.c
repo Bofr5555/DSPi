@@ -1,21 +1,21 @@
 // pio_timing.c - is the phase simulation's ideal line right? (WP LK6)
 //
-// link_phase_sim.c lets sender bit k reach the receiver's DMA ring at
+// alink_phase_sim.c lets sender bit k reach the receiver's DMA ring at
 // k / baud on the sender's clock, plus a constant.  This program checks that
 // against LK2's cycle-accurate model of the real PIO programs: LK4's encoder
-// output goes through link_tx_N on a clock offset by `ppm`, a line with
-// pulse-width distortion and jitter, and link_rx_N on a nominal clock; every
+// output goes through alink_tx_N on a clock offset by `ppm`, a line with
+// pulse-width distortion and jitter, and alink_rx_N on a nominal clock; every
 // 32-bit word the RX pushes (the DMA write position the receiver reads) is
 // timed and compared with the time its last bit left the sender.  The spread
 // of that delay is the error of the ideal line model, in line bits; the phase
 // lock measures arrivals in 32-bit DMA words, so anything under a few bits is
 // below its resolution.
 //
-//   tools/link_phase_sim/run.sh pio
+//   tools/alink_phase_sim/run.sh pio
 #define main lk2_model_main
-#include "link_pio_model.c"
+#include "alink_pio_model.c"
 #undef main
-#include "sender_link.h"
+#include "sender_alink.h"
 
 static int fails;
 static double *push_t;
@@ -33,8 +33,8 @@ static void one(unsigned cls, unsigned rate, unsigned c, double ppm, double pwd,
     static snd_tables_t T;
     static bool tinit;
     if (!tinit) { snd_tables_init(&T); tinit = true; }
-    link_tx_t tx;
-    link_tx_init(&tx, cls, rate, c, 4096, 1);
+    alink_tx_t tx;
+    alink_tx_init(&tx, cls, rate, c, 4096, 1);
     uint32_t cap = 1u << 16;
     uint32_t *w = calloc(cap, 4);
     snd_sink_t s;

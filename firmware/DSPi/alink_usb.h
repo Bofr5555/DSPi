@@ -52,8 +52,8 @@ void alink_usb_fw_get_status(uint8_t o[ALINK_USB_STATUS_LEN]);
 // The USB time base answers EXT_FRAME_COUNTER / EXT_APPLY_AT_FRAME IN.
 bool alink_usb_fw_time_base_active(void);
 void alink_usb_fw_get_frame_counter(uint8_t o[20]);
-bool alink_usb_fw_apply(const uint8_t p[LINK_APPLY_LEN]);
-void alink_usb_fw_get_apply(uint8_t o[LINK_APPLY_LEN]);
+bool alink_usb_fw_apply(const uint8_t p[ALINK_APPLY_LEN]);
+void alink_usb_fw_get_apply(uint8_t o[ALINK_APPLY_LEN]);
 
 // Persistence (flash_storage.c, V27 directory block).
 void alink_usb_fw_store(uint8_t s[ALINK_USB_STORE_LEN]);

@@ -1,22 +1,22 @@
 /*
- * sender_link.h - DSPi link sender (WP LK4): the portable encoder core
+ * sender_alink.h - DSPi alink sender (WP LK4): the portable encoder core
  *
- * The sender emits one link stream (link_protocol_spec.md) that every link
+ * The sender emits one alink stream (alink_protocol_spec.md) that every alink
  * output's DMA channel reads from the same word ring.  This is the part of
  * the sender that has no Pico SDK in it, so the host tests compile it as is:
  *
  *  - a table-driven frame encoder that produces exactly the bits of LK1's
- *    reference link_tx_frame() (same superframe, apply and RATE rules, the
- *    state is LK1's link_tx_t), at a cost a core can afford at L3;
+ *    reference alink_tx_frame() (same superframe, apply and RATE rules, the
+ *    state is LK1's alink_tx_t), at a cost a core can afford at L3;
  *  - the word sink the encoder writes into: a power-of-two ring, optionally
  *    with a parallel ring for the SYNC pin (a pulse that starts on the first
  *    bit of a chosen frame's comma, sent by its own PIO state machine in
- *    step with the links);
+ *    step with the alinks);
  *  - a log of frame start positions, so the TX side can tell which frame is
  *    on the wire from the DMA read position;
  *  - the sender's scheduling rules (RATE at a multiple of 32, at least
  *    SND_RATE_LEAD frames ahead, value = new C, one apply at a time) and the
- *    byte layouts and refusal rules of EXT_LINK_TX and EXT_LINK_CTRL_MSG
+ *    byte layouts and refusal rules of EXT_ALINK_TX and EXT_ALINK_CTRL_MSG
  *    (extension_channel_spec.md 2.8.8, 2.8.9);
  *  - the 1 kHz test tone.
  *
@@ -24,21 +24,21 @@
  * the caller places (RAM on the target), so nothing here adds .data.
  */
 
-#ifndef SENDER_LINK_H
-#define SENDER_LINK_H
+#ifndef SENDER_ALINK_H
+#define SENDER_ALINK_H
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#include "link_codec.h"
+#include "alink_codec.h"
 
 // Frames between the next encoded frame and a RATE the sender schedules
 // itself (SYS2 3.3: 50 ms at 48 kHz; a multiple of 32).
 #define SND_RATE_LEAD           2400u
 
-// Link outputs on the v1 carrier (EXT_LINK_INFO.max_links).
-#define SND_MAX_LINKS           8u
+// Alink outputs on the v1 carrier (EXT_ALINK_INFO.max_alinks).
+#define SND_MAX_ALINKS          8u
 
 // Receiver-side argument limits of the apply ops (extension_channel_spec.md
 // 2.8.7; the receivers are RP2350 DSPis).
@@ -55,7 +55,7 @@ typedef struct {
     uint16_t comma[2];          // K28.5 at RD-/RD+, same format
     uint16_t crc16[256];        // CRC-16/CCITT-FALSE, MSB first
     uint8_t  crc8[256];         // CRC-8 poly 0x07
-    uint8_t  prbs[3u * LINK_MAX_CHANNELS];  // the PRBS-7 payload (spec 5.8)
+    uint8_t  prbs[3u * ALINK_MAX_CHANNELS]; // the PRBS-7 payload (spec 5.8)
 } snd_tables_t;
 
 void snd_tables_init(snd_tables_t *t);
@@ -182,40 +182,40 @@ uint64_t snd_log_wire(snd_log_t *l, uint64_t wire_bit);
 // Encoder
 // ---------------------------------------------------------------------------
 
-// Encode frame tx->frame into s: the bits link_tx_frame() produces for the
+// Encode frame tx->frame into s: the bits alink_tx_frame() produces for the
 // same state and samples (tx->channels samples, ignored while the PRBS flag
 // is in force), and advance tx exactly as it does.  Records the frame's
 // start in log (may be NULL).  Never fails: the caller keeps the ring ahead
 // of its reader.
-void snd_frame(link_tx_t *tx, const snd_tables_t *t, const int32_t *samples, snd_sink_t *s,
+void snd_frame(alink_tx_t *tx, const snd_tables_t *t, const int32_t *samples, snd_sink_t *s,
                snd_log_t *log);
 
 // The "idle only" test pattern: frame tx->frame as D21.5 only (no comma, no
 // head), with the encoder state advanced as for a real frame.
-void snd_idle_frame(link_tx_t *tx, snd_sink_t *s, snd_log_t *log);
+void snd_idle_frame(alink_tx_t *tx, snd_sink_t *s, snd_log_t *log);
 
 // Bits of frame tx->frame.
-static inline unsigned snd_frame_bits(const link_tx_t *tx) {
-    return 10u * link_frame_symbols(tx->cls, tx->rate, tx->frame);
+static inline unsigned snd_frame_bits(const alink_tx_t *tx) {
+    return 10u * alink_frame_symbols(tx->cls, tx->rate, tx->frame);
 }
 
 // ---------------------------------------------------------------------------
 // Scheduling
 // ---------------------------------------------------------------------------
 
-// The sender's own layout change (EXT_LINK_TX rate_code / channels, or a USB
+// The sender's own layout change (EXT_ALINK_TX rate_code / channels, or a USB
 // rate change): RATE at the first superframe boundary at least SND_RATE_LEAD
 // frames after the next encoded frame, value = channels when it changes, else
 // 0.  False when an apply is pending or the layout does not fit the class
 // (nothing scheduled); *at is the target frame on success.
-bool snd_schedule_layout(link_tx_t *tx, unsigned rate, unsigned channels, uint64_t *at);
+bool snd_schedule_layout(alink_tx_t *tx, unsigned rate, unsigned channels, uint64_t *at);
 
 // Whether (op, arg, value) is a valid apply for the receivers (ops 1-5, 7, 8
-// of extension_channel_spec.md 2.8.7; RATE is checked by link_tx_schedule).
+// of extension_channel_spec.md 2.8.7; RATE is checked by alink_tx_schedule).
 bool snd_op_args_ok(uint8_t op, uint8_t arg, int16_t value);
 
 // ---------------------------------------------------------------------------
-// EXT_LINK_TX (0x8007), 16 bytes
+// EXT_ALINK_TX (0x8007), 16 bytes
 // ---------------------------------------------------------------------------
 
 #define SND_TX_LEN          16u
@@ -228,7 +228,7 @@ bool snd_op_args_ok(uint8_t op, uint8_t arg, int16_t value);
 #define SND_TP_TONE         3u
 
 typedef struct {
-    uint16_t link_enable;
+    uint16_t alink_enable;
     uint8_t  cls;
     uint8_t  channels;
     uint8_t  rate;
@@ -248,14 +248,14 @@ static inline bool snd_pin_ok(uint8_t p) {
 }
 
 // Parse and check an OUT payload on its own (ranges, reserved bytes, the
-// protocol capacity of 5.7, bits at or above max_links).  0 = accepted.
-int snd_txcfg_parse(const uint8_t p[SND_TX_LEN], unsigned max_links, snd_txcfg_t *c);
+// protocol capacity of 5.7, bits at or above max_alinks). 0 = accepted.
+int snd_txcfg_parse(const uint8_t p[SND_TX_LEN], unsigned max_alinks, snd_txcfg_t *c);
 
 // The IN form: cfg plus the IN-only los_mask and usb_alt.
 void snd_txcfg_pack(const snd_txcfg_t *c, uint16_t los_mask, uint8_t usb_alt, uint8_t out[SND_TX_LEN]);
 
 // ---------------------------------------------------------------------------
-// EXT_LINK_CTRL_MSG (0x8008)
+// EXT_ALINK_CTRL_MSG (0x8008)
 // ---------------------------------------------------------------------------
 
 typedef struct {
@@ -267,16 +267,16 @@ typedef struct {
 
 // Parse an OUT payload; checks the op's arguments, system_flags and the
 // reserved bytes.  The lead, one-at-a-time and RATE rules are those of
-// link_tx_schedule(), applied by the caller.  0 = accepted.
+// alink_tx_schedule(), applied by the caller. 0 = accepted.
 int snd_ctrl_parse(const uint8_t p[SND_CTRL_OUT_LEN], snd_ctrl_t *c);
 
 // The IN form on a sender: the superframe content as the encoder would pack
 // it now (layout, flags with the pending bits, the pending apply) and the
 // low 32 bits of `sf_frame`, the first frame of the superframe on the wire.
-void snd_ctrl_pack_in(const link_tx_t *tx, uint64_t sf_frame, uint8_t out[SND_CTRL_IN_LEN]);
+void snd_ctrl_pack_in(const alink_tx_t *tx, uint64_t sf_frame, uint8_t out[SND_CTRL_IN_LEN]);
 
 // The superframe flags byte the encoder packs for tx (pending bits derived).
-uint8_t snd_sf_flags(const link_tx_t *tx);
+uint8_t snd_sf_flags(const alink_tx_t *tx);
 
 // ---------------------------------------------------------------------------
 // Test tone
@@ -291,4 +291,4 @@ typedef struct {
 void snd_tone_set_rate(snd_tone_t *t, uint32_t fs);
 int32_t snd_tone_next(snd_tone_t *t);
 
-#endif // SENDER_LINK_H
+#endif // SENDER_ALINK_H

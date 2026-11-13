@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Run a link tool in the container (rootless podman, no network, no devices).
+# Run an alink tool in the container (rootless podman, no network, no devices).
 # The checkout is mounted read-only.
 #
 #   ./run.sh -m unittest discover -s tests -v
-#   ./run.sh gen_vectors.py > ../../firmware/tests/link_vectors.json
+#   ./run.sh gen_vectors.py > ../../firmware/tests/alink_vectors.json
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-IMAGE="${DSPI_LINK_IMAGE:-localhost/dspi-link-tools:1}"
+IMAGE="${DSPI_ALINK_IMAGE:-${DSPI_LINK_IMAGE:-localhost/dspi-alink-tools:1}}"   # DSPI_LINK_IMAGE: old name, accepted for one release
 if ! podman image exists "$IMAGE"; then
   podman build -q -t "$IMAGE" -f "$HERE/Containerfile" "$HERE" >/dev/null
 fi

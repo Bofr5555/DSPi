@@ -1,16 +1,16 @@
 /*
- * bench_trim.h - link RX sampling trim and the trim scan (link bench, DSPi receiver)
+ * bench_trim.h - alink RX sampling trim and the trim scan (alink bench, DSPi receiver)
  *
- * The link_rx_N programs (LK2) expose public labels hi_entry and lo_emit.
+ * The alink_rx_N programs (LK2) expose public labels hi_entry and lo_emit.
  * A trim of t moves t cycles of delay from the fall exits (every `jmp
  * lo_emit`) to hi_entry, which shifts the sampling window by t sys cycles
- * (3.26 ns at 307.2 MHz).  This is the patch tools/link_rx_test applies; the
+ * (3.26 ns at 307.2 MHz).  This is the patch tools/alink_rx_test applies; the
  * bench applies it to the program before loading it into instruction
  * memory, so the .pio files stay as they are.
  *
  * The scan tries every trim the program allows (L1 -9..+9, L2 -4..+4, L3
  * -1..+1), records which decode clean and reports the result in the
- * EXT_LINK_DIAG layout (offsets 32-39, extension_channel_spec.md 2.8.11).
+ * EXT_ALINK_DIAG layout (offsets 32-39, extension_channel_spec.md 2.8.11).
  *
  * Portable C11, no SDK.
  */
@@ -31,7 +31,7 @@ bool bench_trim_patch(uint16_t *ins, unsigned len, unsigned hi_entry, unsigned l
 // Largest t such that both +t and -t patch (L1 9, L2 4, L3 1).
 int bench_trim_max(const uint16_t *ins, unsigned len, unsigned hi_entry, unsigned lo_emit);
 
-// Scan state (scan_state values of EXT_LINK_DIAG offset 35).
+// Scan state (scan_state values of EXT_ALINK_DIAG offset 35).
 #define BENCH_SCAN_NONE     0u
 #define BENCH_SCAN_RUNNING  1u
 #define BENCH_SCAN_DONE     2u

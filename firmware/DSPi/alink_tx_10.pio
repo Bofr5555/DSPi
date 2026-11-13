@@ -1,9 +1,9 @@
-; link_tx_10.pio; DSPi audio link NRZ transmitter, class L2, 30.72 MBd (SYS2 2.6)
+; alink_tx_10.pio; DSPi audio link NRZ transmitter, class L2, 30.72 MBd (SYS2 2.6)
 ;
 ; One instruction: one line bit every 10 sys cycles at clock divider 1.0
 ; (307.2 MHz / 10). The encoder packs 10-bit 8b/10b symbols MSB first into
-; 32-bit words (symbol bit 'a' is the first on the wire); every link's DMA
-; channel reads the same word ring, so all links of a star emit identical
+; 32-bit words (symbol bit 'a' is the first on the wire); every alink's DMA
+; channel reads the same word ring, so all alinks of a star emit identical
 ; bits on identical cycles once started with pio_enable_sm_mask_in_sync().
 ;
 ; Setup: out pins = the TX GPIO (count 1), OUT shift left, autopull 32,
@@ -13,9 +13,9 @@
 ; stalls the out and stretches the current bit (a receiver bit slip), so the
 ; encoder must stay ahead of the DMA read pointer.
 ;
-; tools/link_rx_test models this program cycle by cycle.
+; tools/alink_rx_test models this program cycle by cycle.
 
-.program link_tx_10
+.program alink_tx_10
 .wrap_target
     out pins, 1 [9]
 .wrap

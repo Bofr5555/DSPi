@@ -1,10 +1,10 @@
 /*
- * link_codec.c - DSPi link protocol v1: reference encoder and primitives
+ * alink_codec.c - DSPi alink protocol v1: reference encoder and primitives
  *
- * See link_codec.h and Documentation/Features/link_protocol_spec.md.
+ * See alink_codec.h and Documentation/Features/alink_protocol_spec.md.
  */
 
-#include "link_codec.h"
+#include "alink_codec.h"
 
 #include <string.h>
 
@@ -12,20 +12,20 @@
 // Classes, rates and the frame layout
 // ---------------------------------------------------------------------------
 
-uint32_t link_class_baud(unsigned cls) {
+uint32_t alink_class_baud(unsigned cls) {
     switch (cls) {
-    case LINK_CLASS_L1: return 15360000u;
-    case LINK_CLASS_L2: return 30720000u;
-    case LINK_CLASS_L3: return 61440000u;
+    case ALINK_CLASS_L1: return 15360000u;
+    case ALINK_CLASS_L2: return 30720000u;
+    case ALINK_CLASS_L3: return 61440000u;
     default: return 0;
     }
 }
 
-uint32_t link_rate_hz(unsigned rate) {
+uint32_t alink_rate_hz(unsigned rate) {
     switch (rate) {
-    case LINK_RATE_44K1: return 44100u;
-    case LINK_RATE_48K: return 48000u;
-    case LINK_RATE_96K: return 96000u;
+    case ALINK_RATE_44K1: return 44100u;
+    case ALINK_RATE_48K: return 48000u;
+    case ALINK_RATE_96K: return 96000u;
     default: return 0;
     }
 }
@@ -37,7 +37,7 @@ static uint32_t gcd_u32(uint32_t a, uint32_t b) {
 
 // Symbols per frame as the reduced fraction num/den (baud / (10 * Fs)).
 static bool frame_ratio(unsigned cls, unsigned rate, uint32_t *num, uint32_t *den) {
-    uint32_t baud = link_class_baud(cls), fs = link_rate_hz(rate);
+    uint32_t baud = alink_class_baud(cls), fs = alink_rate_hz(rate);
     if (!baud || !fs) return false;
     uint32_t d = 10u * fs, g = gcd_u32(baud, d);
     *num = baud / g;
@@ -45,35 +45,35 @@ static bool frame_ratio(unsigned cls, unsigned rate, uint32_t *num, uint32_t *de
     return true;
 }
 
-unsigned link_frame_symbols(unsigned cls, unsigned rate, uint64_t frame) {
+unsigned alink_frame_symbols(unsigned cls, unsigned rate, uint64_t frame) {
     uint32_t num, den;
     if (!frame_ratio(cls, rate, &num, &den)) return 0;
     uint64_t m = frame % den;
     return (unsigned)(((m + 1u) * num) / den - (m * num) / den);
 }
 
-unsigned link_frame_symbols_min(unsigned cls, unsigned rate) {
+unsigned alink_frame_symbols_min(unsigned cls, unsigned rate) {
     uint32_t num, den;
     if (!frame_ratio(cls, rate, &num, &den)) return 0;
     return (unsigned)(num / den);
 }
 
-unsigned link_frame_symbols_max(unsigned cls, unsigned rate) {
+unsigned alink_frame_symbols_max(unsigned cls, unsigned rate) {
     uint32_t num, den;
     if (!frame_ratio(cls, rate, &num, &den)) return 0;
     return (unsigned)((num + den - 1u) / den);
 }
 
-unsigned link_layout_symbols(unsigned channels) {
-    unsigned n = LINK_HEAD_SYMBOLS;
-    for (unsigned b = 0; b < link_bank_count(channels); b++)
-        n += LINK_BANK_SYMBOLS(link_bank_channels(channels, b));
+unsigned alink_layout_symbols(unsigned channels) {
+    unsigned n = ALINK_HEAD_SYMBOLS;
+    for (unsigned b = 0; b < alink_bank_count(channels); b++)
+        n += ALINK_BANK_SYMBOLS(alink_bank_channels(channels, b));
     return n;
 }
 
-unsigned link_max_channels(unsigned cls, unsigned rate) {
-    unsigned room = link_frame_symbols_min(cls, rate), c = 0;
-    while (c < LINK_MAX_CHANNELS && link_layout_symbols(c + 1u) <= room) c++;
+unsigned alink_max_channels(unsigned cls, unsigned rate) {
+    unsigned room = alink_frame_symbols_min(cls, rate), c = 0;
+    while (c < ALINK_MAX_CHANNELS && alink_layout_symbols(c + 1u) <= room) c++;
     return c;
 }
 
@@ -134,13 +134,13 @@ static unsigned rd_after4(uint8_t s4, unsigned rd) {
     return rd;
 }
 
-uint16_t link_8b10b_encode(uint8_t byte, bool k, unsigned *rd) {
+uint16_t alink_8b10b_encode(uint8_t byte, bool k, unsigned *rd) {
     unsigned x = byte & 0x1Fu, y = byte >> 5, r = *rd & 1u;
     uint8_t s6, s4;
     if (k) {
         bool k28 = x == 28;
         if (!k28 && !(y == 7 && (x == 23 || x == 27 || x == 29 || x == 30)))
-            return LINK_SYM_INVALID;
+            return ALINK_SYM_INVALID;
         s6 = k28 ? (r ? ENC6_K28_RDP : ENC6_K28_RDN) : enc6[x][r];
         r = rd_after6(s6, r);
         s4 = enc4k[y][r];
@@ -157,7 +157,7 @@ uint16_t link_8b10b_encode(uint8_t byte, bool k, unsigned *rd) {
     return (uint16_t)(((unsigned)s6 << 4) | s4);
 }
 
-unsigned link_8b10b_rd_after(uint16_t sym, unsigned rd) {
+unsigned alink_8b10b_rd_after(uint16_t sym, unsigned rd) {
     return rd_after4((uint8_t)(sym & 0xFu), rd_after6((uint8_t)((sym >> 4) & 0x3Fu), rd & 1u));
 }
 
@@ -180,12 +180,12 @@ static unsigned accept_rds(uint16_t sym, uint8_t byte, bool k) {
     unsigned mask = 0;
     for (unsigned r = 0; r < 2; r++) {
         unsigned rd = r;
-        if (link_8b10b_encode(byte, k, &rd) == sym) mask |= 1u << r;
+        if (alink_8b10b_encode(byte, k, &rd) == sym) mask |= 1u << r;
     }
     return mask;
 }
 
-unsigned link_8b10b_decode(uint16_t sym, uint8_t *byte, bool *k) {
+unsigned alink_8b10b_decode(uint16_t sym, uint8_t *byte, bool *k) {
     if (sym > 0x3FFu) return 0;
     uint8_t x = dec6[sym >> 4], y = dec4[sym & 0xFu];
     if (x == 0xFF || y == 0xFF) return 0;
@@ -214,7 +214,7 @@ unsigned link_8b10b_decode(uint16_t sym, uint8_t *byte, bool *k) {
 // CRCs, PRBS-7
 // ---------------------------------------------------------------------------
 
-uint8_t link_crc8(const uint8_t *data, size_t len) {
+uint8_t alink_crc8(const uint8_t *data, size_t len) {
     uint8_t crc = 0;
     for (size_t i = 0; i < len; i++) {
         crc ^= data[i];
@@ -224,7 +224,7 @@ uint8_t link_crc8(const uint8_t *data, size_t len) {
     return crc;
 }
 
-uint16_t link_crc16(const uint8_t *data, size_t len) {
+uint16_t alink_crc16(const uint8_t *data, size_t len) {
     uint16_t crc = 0xFFFFu;
     for (size_t i = 0; i < len; i++) {
         crc ^= (uint16_t)data[i] << 8;
@@ -234,7 +234,7 @@ uint16_t link_crc16(const uint8_t *data, size_t len) {
     return crc;
 }
 
-void link_prbs7_fill(uint8_t *out, size_t len) {
+void alink_prbs7_fill(uint8_t *out, size_t len) {
     unsigned s = 0x7Fu;
     for (size_t i = 0; i < len; i++) {
         uint8_t v = 0;
@@ -261,10 +261,10 @@ static uint64_t get_u64le(const uint8_t *p) {
     return v;
 }
 
-void link_sf_pack(const link_sf_t *sf, uint8_t out[LINK_SF_LEN]) {
-    memset(out, 0, LINK_SF_LEN);
-    out[0] = LINK_SF_MAGIC;
-    out[1] = LINK_PROTOCOL_VERSION;
+void alink_sf_pack(const alink_sf_t *sf, uint8_t out[ALINK_SF_LEN]) {
+    memset(out, 0, ALINK_SF_LEN);
+    out[0] = ALINK_SF_MAGIC;
+    out[1] = ALINK_PROTOCOL_VERSION;
     out[2] = sf->flags;
     out[3] = sf->rate;
     out[4] = sf->channels;
@@ -277,16 +277,16 @@ void link_sf_pack(const link_sf_t *sf, uint8_t out[LINK_SF_LEN]) {
     out[25] = sf->apply_arg;
     out[26] = (uint8_t)((uint16_t)sf->apply_value);
     out[27] = (uint8_t)((uint16_t)sf->apply_value >> 8);
-    uint16_t crc = link_crc16(out, 30);
+    uint16_t crc = alink_crc16(out, 30);
     out[30] = (uint8_t)crc;
     out[31] = (uint8_t)(crc >> 8);
 }
 
-int link_sf_unpack(const uint8_t in[LINK_SF_LEN], link_sf_t *sf) {
+int alink_sf_unpack(const uint8_t in[ALINK_SF_LEN], alink_sf_t *sf) {
     uint16_t crc = (uint16_t)(in[30] | (in[31] << 8));
-    if (link_crc16(in, 30) != crc) return LINK_SF_ERR_CRC;
-    if (in[0] != LINK_SF_MAGIC) return LINK_SF_ERR_MAGIC;
-    if (in[1] != LINK_PROTOCOL_VERSION) return LINK_SF_ERR_VERSION;
+    if (alink_crc16(in, 30) != crc) return ALINK_SF_ERR_CRC;
+    if (in[0] != ALINK_SF_MAGIC) return ALINK_SF_ERR_MAGIC;
+    if (in[1] != ALINK_PROTOCOL_VERSION) return ALINK_SF_ERR_VERSION;
     sf->flags = in[2];
     sf->rate = in[3];
     sf->channels = in[4];
@@ -298,16 +298,16 @@ int link_sf_unpack(const uint8_t in[LINK_SF_LEN], link_sf_t *sf) {
     sf->apply_op = in[24];
     sf->apply_arg = in[25];
     sf->apply_value = (int16_t)(uint16_t)(in[26] | (in[27] << 8));
-    if (sf->frame % LINK_SF_LEN) return LINK_SF_ERR_FRAME;
-    if (!link_class_baud(sf->cls) || !link_rate_hz(sf->rate) || sf->channels < 1 ||
-        sf->channels > link_max_channels(sf->cls, sf->rate))
-        return LINK_SF_ERR_LAYOUT;
-    if (sf->apply_op > LINK_OP_MAX || (sf->apply_op == LINK_OP_NONE) != (sf->apply_frame == 0))
-        return LINK_SF_ERR_APPLY;
-    return LINK_SF_OK;
+    if (sf->frame % ALINK_SF_LEN) return ALINK_SF_ERR_FRAME;
+    if (!alink_class_baud(sf->cls) || !alink_rate_hz(sf->rate) || sf->channels < 1 ||
+        sf->channels > alink_max_channels(sf->cls, sf->rate))
+        return ALINK_SF_ERR_LAYOUT;
+    if (sf->apply_op > ALINK_OP_MAX || (sf->apply_op == ALINK_OP_NONE) != (sf->apply_frame == 0))
+        return ALINK_SF_ERR_APPLY;
+    return ALINK_SF_OK;
 }
 
-void link_sf_repeat(const link_sf_t *in, uint8_t out_cls, link_sf_t *out) {
+void alink_sf_repeat(const alink_sf_t *in, uint8_t out_cls, alink_sf_t *out) {
     *out = *in;
     out->hops = in->hops == 0xFFu ? 0xFFu : (uint8_t)(in->hops + 1u);
     out->cls = out_cls;
@@ -317,7 +317,7 @@ void link_sf_repeat(const link_sf_t *in, uint8_t out_cls, link_sf_t *out) {
 // Bit packing
 // ---------------------------------------------------------------------------
 
-bool link_bitw_put(link_bitw_t *w, uint32_t v, unsigned n) {
+bool alink_bitw_put(alink_bitw_t *w, uint32_t v, unsigned n) {
     if (n > 32 || w->nbits + n > w->cap_words * 32u) return false;
     for (unsigned i = n; i-- > 0;) {
         size_t wi = w->nbits >> 5;
@@ -333,25 +333,25 @@ bool link_bitw_put(link_bitw_t *w, uint32_t v, unsigned n) {
 // Frame encoder
 // ---------------------------------------------------------------------------
 
-static void tx_pack_sf(link_tx_t *tx, uint64_t first) {
-    link_sf_t sf = {
-        .flags = (uint8_t)(tx->flags & (LINK_SF_FLAGS_DEFINED & ~(LINK_SF_FLAG_RATE_PEND |
-                                                                   LINK_SF_FLAG_APPLY_PEND))),
+static void tx_pack_sf(alink_tx_t *tx, uint64_t first) {
+    alink_sf_t sf = {
+        .flags = (uint8_t)(tx->flags & (ALINK_SF_FLAGS_DEFINED & ~(ALINK_SF_FLAG_RATE_PEND |
+                                                                   ALINK_SF_FLAG_APPLY_PEND))),
         .rate = tx->rate, .channels = tx->channels, .cls = tx->cls,
         .hops = tx->hops, .sender = tx->sender, .frame = first,
         .apply_frame = tx->apply_frame, .apply_op = tx->apply_op,
         .apply_arg = tx->apply_arg, .apply_value = tx->apply_value,
     };
-    if (sf.apply_op != LINK_OP_NONE) sf.flags |= LINK_SF_FLAG_APPLY_PEND;
-    if (sf.apply_op == LINK_OP_RATE) sf.flags |= LINK_SF_FLAG_RATE_PEND;
-    link_sf_pack(&sf, tx->sf);
+    if (sf.apply_op != ALINK_OP_NONE) sf.flags |= ALINK_SF_FLAG_APPLY_PEND;
+    if (sf.apply_op == ALINK_OP_RATE) sf.flags |= ALINK_SF_FLAG_RATE_PEND;
+    alink_sf_pack(&sf, tx->sf);
 }
 
-bool link_tx_init(link_tx_t *tx, unsigned cls, unsigned rate, unsigned channels,
+bool alink_tx_init(alink_tx_t *tx, unsigned cls, unsigned rate, unsigned channels,
                   uint64_t first, uint8_t sender) {
     memset(tx, 0, sizeof(*tx));
-    if (!link_class_baud(cls) || !link_rate_hz(rate) || channels < 1 ||
-        channels > link_max_channels(cls, rate))
+    if (!alink_class_baud(cls) || !alink_rate_hz(rate) || channels < 1 ||
+        channels > alink_max_channels(cls, rate))
         return false;
     tx->cls = (uint8_t)cls;
     tx->rate = (uint8_t)rate;
@@ -361,14 +361,14 @@ bool link_tx_init(link_tx_t *tx, unsigned cls, unsigned rate, unsigned channels,
     return true;
 }
 
-bool link_tx_schedule(link_tx_t *tx, uint64_t at, uint8_t op, uint8_t arg, int16_t value) {
-    uint64_t next_sf = (tx->frame + LINK_SF_LEN - 1u) & ~(uint64_t)(LINK_SF_LEN - 1u);
-    if (op == LINK_OP_NONE || op > LINK_OP_MAX || tx->apply_op != LINK_OP_NONE) return false;
-    if (at < next_sf + LINK_SF_LEN) return false;
-    if (op == LINK_OP_RATE) {
+bool alink_tx_schedule(alink_tx_t *tx, uint64_t at, uint8_t op, uint8_t arg, int16_t value) {
+    uint64_t next_sf = (tx->frame + ALINK_SF_LEN - 1u) & ~(uint64_t)(ALINK_SF_LEN - 1u);
+    if (op == ALINK_OP_NONE || op > ALINK_OP_MAX || tx->apply_op != ALINK_OP_NONE) return false;
+    if (at < next_sf + ALINK_SF_LEN) return false;
+    if (op == ALINK_OP_RATE) {
         unsigned c = value ? (unsigned)value : tx->channels;
-        if (at % LINK_SF_LEN || value < 0 || !link_rate_hz(arg) || c < 1 ||
-            c > link_max_channels(tx->cls, arg))
+        if (at % ALINK_SF_LEN || value < 0 || !alink_rate_hz(arg) || c < 1 ||
+            c > alink_max_channels(tx->cls, arg))
             return false;
     }
     tx->apply_frame = at;
@@ -378,20 +378,20 @@ bool link_tx_schedule(link_tx_t *tx, uint64_t at, uint8_t op, uint8_t arg, int16
     return true;
 }
 
-static bool put_sym(link_tx_t *tx, link_bitw_t *w, uint8_t byte, bool k) {
-    return link_bitw_put(w, link_8b10b_encode(byte, k, &tx->rd), 10);
+static bool put_sym(alink_tx_t *tx, alink_bitw_t *w, uint8_t byte, bool k) {
+    return alink_bitw_put(w, alink_8b10b_encode(byte, k, &tx->rd), 10);
 }
 
-bool link_tx_frame(link_tx_t *tx, const int32_t *samples, link_bitw_t *w) {
+bool alink_tx_frame(alink_tx_t *tx, const int32_t *samples, alink_bitw_t *w) {
     uint64_t f = tx->frame;
     // Pack at every superframe start, and at the first frame even when the
     // stream starts inside a superframe (that partial one is still valid).
-    if (f % LINK_SF_LEN == 0 || !tx->started) {
-        uint64_t first = f & ~(uint64_t)(LINK_SF_LEN - 1u);
+    if (f % ALINK_SF_LEN == 0 || !tx->started) {
+        uint64_t first = f & ~(uint64_t)(ALINK_SF_LEN - 1u);
         // Carried while the superframe completes before the target.
-        if (tx->apply_op != LINK_OP_NONE && first + LINK_SF_LEN > tx->apply_frame) {
+        if (tx->apply_op != ALINK_OP_NONE && first + ALINK_SF_LEN > tx->apply_frame) {
             tx->apply_frame = 0;
-            tx->apply_op = LINK_OP_NONE;
+            tx->apply_op = ALINK_OP_NONE;
             tx->apply_arg = 0;
             tx->apply_value = 0;
         }
@@ -401,33 +401,33 @@ bool link_tx_frame(link_tx_t *tx, const int32_t *samples, link_bitw_t *w) {
 
     uint8_t head[3];
     head[0] = (uint8_t)f;
-    head[1] = tx->sf[f % LINK_SF_LEN];
-    head[2] = link_crc8(head, 2);
-    bool ok = put_sym(tx, w, LINK_BYTE_K28_5, true);
+    head[1] = tx->sf[f % ALINK_SF_LEN];
+    head[2] = alink_crc8(head, 2);
+    bool ok = put_sym(tx, w, ALINK_BYTE_K28_5, true);
     for (int i = 0; i < 3; i++) ok = ok && put_sym(tx, w, head[i], false);
 
-    unsigned c = tx->channels, used = link_layout_symbols(c);
-    uint8_t payload[3 * LINK_MAX_CHANNELS];
-    if (tx->sf[2] & LINK_SF_FLAG_PRBS) {
-        link_prbs7_fill(payload, 3u * c);
+    unsigned c = tx->channels, used = alink_layout_symbols(c);
+    uint8_t payload[3 * ALINK_MAX_CHANNELS];
+    if (tx->sf[2] & ALINK_SF_FLAG_PRBS) {
+        alink_prbs7_fill(payload, 3u * c);
     } else {
-        for (unsigned ch = 0; ch < c; ch++) link_put_s24(payload + 3u * ch, samples[ch]);
+        for (unsigned ch = 0; ch < c; ch++) alink_put_s24(payload + 3u * ch, samples[ch]);
     }
-    for (unsigned b = 0; b < link_bank_count(c); b++) {
-        const uint8_t *p = payload + 3u * LINK_BANK_CHANNELS * b;
-        unsigned n = 3u * link_bank_channels(c, b);
-        uint16_t crc = link_crc16(p, n);
+    for (unsigned b = 0; b < alink_bank_count(c); b++) {
+        const uint8_t *p = payload + 3u * ALINK_BANK_CHANNELS * b;
+        unsigned n = 3u * alink_bank_channels(c, b);
+        uint16_t crc = alink_crc16(p, n);
         for (unsigned i = 0; i < n; i++) ok = ok && put_sym(tx, w, p[i], false);
         ok = ok && put_sym(tx, w, (uint8_t)crc, false);
         ok = ok && put_sym(tx, w, (uint8_t)(crc >> 8), false);
     }
-    unsigned total = link_frame_symbols(tx->cls, tx->rate, f);
-    for (unsigned i = used; i < total; i++) ok = ok && put_sym(tx, w, LINK_BYTE_IDLE, false);
+    unsigned total = alink_frame_symbols(tx->cls, tx->rate, f);
+    for (unsigned i = used; i < total; i++) ok = ok && put_sym(tx, w, ALINK_BYTE_IDLE, false);
     tx->frame = f + 1u;
     // A RATE switches the layout here, at the end of the frame before its
     // target, so tx->rate and tx->channels describe the next frame before the
     // caller fills its samples (the receiver switches at the same point).
-    if (tx->apply_op == LINK_OP_RATE && tx->frame == tx->apply_frame) {
+    if (tx->apply_op == ALINK_OP_RATE && tx->frame == tx->apply_frame) {
         tx->rate = tx->apply_arg;
         if (tx->apply_value) tx->channels = (uint8_t)tx->apply_value;
     }

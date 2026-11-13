@@ -1,18 +1,18 @@
 /*
- * test_bench_logic.c - host tests for the link bench logic (WP LK3)
+ * test_bench_logic.c - host tests for the alink bench logic (WP LK3)
  *
- * - bench_gen produces exactly the bits of LK1's link_tx_frame() at every
+ * - bench_gen produces exactly the bits of LK1's alink_tx_frame() at every
  *   class, rate and channel count, PRBS and test vector, from any start;
- * - the sink packs like link_bitw_put();
+ * - the sink packs like alink_bitw_put();
  * - acquisition finds F, the comma position and the disparity from any bit
  *   offset; the bit error rate tester checks every bit of a clean stream
  *   and accounts for every TX impairment exactly; the reference runner's
  *   counters match the spec's rules for the same impairments;
  * - a small ring with a slow reader: skips and gaps are counted, not hidden;
  * - trim patching, the scan's range logic, command parsing and the
- *   EXT_LINK_STATUS / EXT_LINK_DIAG layouts.
+ *   EXT_ALINK_STATUS / EXT_ALINK_DIAG layouts.
  *
- * cc -std=c11 -I firmware/DSPi/link -I firmware/link_bench test_bench_logic.c <sources>
+ * cc -std=c11 -I firmware/DSPi/alink -I firmware/alink_bench test_bench_logic.c <sources>
  */
 
 #include <stdio.h>
@@ -57,33 +57,33 @@ static void buf_flush(Buf *b) {
 // ---------------------------------------------------------------------------
 
 static void test_gen_equals_reference(void) {
-    static const unsigned classes[] = { LINK_CLASS_L1, LINK_CLASS_L2, LINK_CLASS_L3 };
-    static const unsigned rates[] = { LINK_RATE_44K1, LINK_RATE_48K, LINK_RATE_96K };
+    static const unsigned classes[] = { ALINK_CLASS_L1, ALINK_CLASS_L2, ALINK_CLASS_L3 };
+    static const unsigned rates[] = { ALINK_RATE_44K1, ALINK_RATE_48K, ALINK_RATE_96K };
     unsigned combos = 0;
     for (unsigned ci = 0; ci < 3; ci++)
         for (unsigned ri = 0; ri < 3; ri++) {
-            unsigned cls = classes[ci], rate = rates[ri], max = link_max_channels(cls, rate);
+            unsigned cls = classes[ci], rate = rates[ri], max = alink_max_channels(cls, rate);
             unsigned chans[4] = { 1, bench_default_channels(cls, rate), max, max > 9 ? 9 : max };
             for (unsigned k = 0; k < 4; k++)
                 for (unsigned pay = 0; pay < 2; pay++) {
                     unsigned c = chans[k];
                     uint64_t first = 1000u + 13u * k + pay;   // starts inside a superframe
-                    link_tx_t tx;
-                    link_tx_init(&tx, cls, rate, c, first, 0x5Au);
-                    tx.flags = pay == BENCH_PAY_PRBS ? LINK_SF_FLAG_PRBS : 0;
+                    alink_tx_t tx;
+                    alink_tx_init(&tx, cls, rate, c, first, 0x5Au);
+                    tx.flags = pay == BENCH_PAY_PRBS ? ALINK_SF_FLAG_PRBS : 0;
                     bench_gen_t g;
                     CHECK(bench_gen_init(&g, cls, rate, c, pay, first, 0x5Au), "init %u %u %u", cls, rate, c);
                     static uint32_t ref[16384], got[16384];
-                    link_bitw_t w;
-                    link_bitw_init(&w, ref, 16384);
+                    alink_bitw_t w;
+                    alink_bitw_init(&w, ref, 16384);
                     Buf b = { .words = got, .cap = 16384 };
                     bench_sink_init(&b.s, got, 16384);
-                    int32_t samples[LINK_MAX_CHANNELS];
+                    int32_t samples[ALINK_MAX_CHANNELS];
                     for (unsigned ch = 0; ch < c; ch++) samples[ch] = bench_vector_sample(ch);
                     uint64_t nbits = 0;
                     for (unsigned f = 0; f < 300; f++) {   // covers the 147-frame 44.1 kHz cycle twice
                         unsigned bits_hint = bench_gen_frame_bits(&g);
-                        if (!link_tx_frame(&tx, samples, &w)) break;
+                        if (!alink_tx_frame(&tx, samples, &w)) break;
                         unsigned n = bench_gen_frame(&g, &b.s);
                         CHECK(n == bits_hint, "frame bits");
                         nbits += n;
@@ -100,13 +100,13 @@ static void test_gen_equals_reference(void) {
                     combos++;
                 }
         }
-    printf("gen == link_tx_frame: %u streams of 300 frames\n", combos);
+    printf("gen == alink_tx_frame: %u streams of 300 frames\n", combos);
 }
 
 static void test_sink(void) {
     uint32_t a[64], ring[16];
-    link_bitw_t w;
-    link_bitw_init(&w, a, 64);
+    alink_bitw_t w;
+    alink_bitw_init(&w, a, 64);
     bench_sink_t s;
     bench_sink_init(&s, ring, 16);
     uint32_t x = 12345;
@@ -116,7 +116,7 @@ static void test_sink(void) {
         x = x * 1103515245u + 12345u;
         unsigned n = (x >> 8) % 33u;
         uint32_t v = x ^ (x << 7);
-        link_bitw_put(&w, n < 32 ? v & ((1u << n) - 1u) : v, n);
+        alink_bitw_put(&w, n < 32 ? v & ((1u << n) - 1u) : v, n);
         bench_sink_put(&s, v, n);
         total += n;
         // Compare every completed word still in the ring.
@@ -124,7 +124,7 @@ static void test_sink(void) {
         for (uint64_t k = first; k < s.words; k++)
             if (ring[k & 15u] != a[k]) ok = false;
     }
-    CHECK(ok, "sink words differ from link_bitw_put");
+    CHECK(ok, "sink words differ from alink_bitw_put");
     CHECK(bench_sink_bits(&s) == total && w.nbits == total, "sink bit count");
 }
 
@@ -164,7 +164,7 @@ static void stream_more(Stream *st, unsigned frames) {
     buf_flush(&st->b);
 }
 
-static link_rx_t scratch_rx;
+static alink_rx_t scratch_rx;
 
 static void test_acquire(void) {
     for (unsigned cls = 1; cls <= 3; cls++)
@@ -227,7 +227,7 @@ static void test_bert_clean(void) {
                 bench_bert_init(&k.bert);
                 bench_ref_init(&k.ref, cls, pay);
                 run_checkers(&k, &st, bench_sink_bits(&st.b.s), cls);
-                link_rx_stats_t s;
+                alink_rx_stats_t s;
                 bench_ref_stats(&k.ref, &s);
                 uint64_t gen_bits = bench_sink_bits(&st.b.s) - st.frame_start[0];
                 CHECK(k.acquired, "acquired");
@@ -272,7 +272,7 @@ static void test_impairments(void) {
         { BENCH_IMP_IDLE, 20, 0, 0, 1, 1000, 100000, 3, 3, 0, 1, 2 },
     };
     for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        unsigned cls = LINK_CLASS_L1, rate = LINK_RATE_48K;
+        unsigned cls = ALINK_CLASS_L1, rate = ALINK_RATE_48K;
         Stream st;
         stream_make(&st, cls, rate, 8, BENCH_PAY_PRBS, 64u, 3, 200);
         CHECK(bench_gen_inject(&st.g, cases[i].kind, cases[i].n), "inject");
@@ -295,7 +295,7 @@ static void test_impairments(void) {
                 bench_bert_run(&k.bert, &r, 0, bench_sink_bits(&st.b.s), 1000000u);
             }
         }
-        link_rx_stats_t s;
+        alink_rx_stats_t s;
         bench_ref_stats(&k.ref, &s);
         const char *name = cases[i].kind == BENCH_IMP_COMMA ? "comma" : cases[i].kind == BENCH_IMP_FLIP ? "flip"
                          : cases[i].kind == BENCH_IMP_SLIP ? "slip" : "idle";
@@ -320,7 +320,7 @@ static void test_impairments(void) {
 // the ring are skipped and counted, the reference runner restarts and
 // counts gaps, and what was checked is still clean.
 static void test_small_ring(void) {
-    unsigned cls = LINK_CLASS_L2, rate = LINK_RATE_48K;
+    unsigned cls = ALINK_CLASS_L2, rate = ALINK_RATE_48K;
     Stream st;
     stream_make(&st, cls, rate, 16, BENCH_PAY_PRBS, 0, 0, 3000);
     const uint32_t ring_words = 4096;
@@ -355,7 +355,7 @@ static void test_small_ring(void) {
         bench_ref_run(&k.ref, &r, oldest, newest, 3000);
         round++;
     }
-    link_rx_stats_t s;
+    alink_rx_stats_t s;
     bench_ref_stats(&k.ref, &s);
     CHECK(k.bert.st.syncs >= 1 && k.bert.st.errors == 0 && k.bert.st.losses == 0, "small ring BERT clean");
     CHECK(k.bert.st.skipped_frames > 0, "small ring: skipped frames counted (%llu)",
@@ -376,7 +376,7 @@ static void test_small_ring(void) {
 // ---------------------------------------------------------------------------
 
 static void test_trim_patch(void) {
-    // A link_rx_20-shaped program: hi_entry at 6 with delay 9, three
+    // An alink_rx_20-shaped program: hi_entry at 6 with delay 9, three
     // `jmp lo_emit [9]` (lo_emit at 3), other jumps untouched.
     uint16_t prog[16] = {0};
     for (int i = 0; i < 16; i++) prog[i] = (uint16_t)(0xA042);   // nop

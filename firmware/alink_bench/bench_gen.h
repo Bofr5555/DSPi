@@ -1,14 +1,14 @@
 /*
- * bench_gen.h - link bench: real-time frame generator and bit sink
+ * bench_gen.h - alink bench: real-time frame generator and bit sink
  *
- * The bench image (WP LK3) sends and checks link streams at line rate.  The
- * reference encoder link_tx_frame() packs bit by bit and recomputes PRBS and
+ * The bench image (WP LK3) sends and checks alink streams at line rate. The
+ * reference encoder alink_tx_frame() packs bit by bit and recomputes PRBS and
  * CRC every frame, which costs far more than a core has at L2/L3.  This
  * generator produces the same bits, using only LK1's primitives: the bench
  * payload (PRBS-7 or a fixed test vector) is the same in every frame, so its
  * banks are encoded once per starting running disparity and copied, and only
  * the comma and the head (HDR, CTL, CRC8) are encoded per frame.  The host
- * tests prove the output identical to link_tx_frame() at every class, rate
+ * tests prove the output identical to alink_tx_frame() at every class, rate
  * and channel count.
  *
  * It also injects TX-side impairments at exact frame positions (comma
@@ -24,7 +24,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "link_codec.h"
+#include "alink_codec.h"
 
 // ---------------------------------------------------------------------------
 // Bit sink: MSB-first bits into a power-of-two ring of 32-bit words
@@ -66,7 +66,7 @@ void bench_sink_put_bits(bench_sink_t *s, const uint32_t *src, unsigned nbits);
 #define BENCH_IMP_IDLE      4u      // send n whole frames as idles (no comma, no head)
 
 // Longest payload: 8 banks of 26 symbols.
-#define BENCH_PAY_MAX_BITS  (10u * 8u * LINK_BANK_SYMBOLS(LINK_BANK_CHANNELS))
+#define BENCH_PAY_MAX_BITS  (10u * 8u * ALINK_BANK_SYMBOLS(ALINK_BANK_CHANNELS))
 #define BENCH_PAY_WORDS     ((BENCH_PAY_MAX_BITS + 31u) / 32u)
 
 typedef struct {
@@ -87,13 +87,13 @@ typedef struct {
     uint32_t pay_bits[2][BENCH_PAY_WORDS];
     unsigned pay_nbits;
     uint8_t  pay_rd_end[2];
-    unsigned layout;        // link_layout_symbols(channels)
+    unsigned layout;        // alink_layout_symbols(channels)
     unsigned sym_const;     // symbols per frame when constant (48/96 kHz), else 0
     // State.
     uint64_t frame;         // F of the next frame
     unsigned rd;
     bool     started;
-    uint8_t  sf[LINK_SF_LEN];
+    uint8_t  sf[ALINK_SF_LEN];
     // Pending impairments.
     uint16_t imp_comma, imp_flip, imp_idle;
     int8_t   imp_slip;

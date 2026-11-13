@@ -1,14 +1,14 @@
 /*
- * link_bench.c - DSPi audio link bench image (WP LK3)
+ * alink_bench.c - DSPi audio link bench image (WP LK3)
  *
  * A standalone image for spare Pico (RP2040) and Pico 2 (RP2350) boards
  * wired GPIO to GPIO; it is not DSPi and shares no code with its audio
  * pipeline.  Roles, chosen at run time over the USB serial console:
  *
  *   tx      send a bench stream (PRBS-7 or a test vector) on 1..N pins with
- *           link_tx_N, all SMs started in sync, every link DMA-fed from one
+ *           alink_tx_N, all SMs started in sync, every alink DMA-fed from one
  *           word ring
- *   rx      receive with link_rx_N into a 32 KB raw ring (two DMA channels:
+ *   rx      receive with alink_rx_N into a 32 KB raw ring (two DMA channels:
  *           data + address reload, the LK5 design), acquire with LK1's
  *           reference receiver, check every bit against the regenerated
  *           stream, run the reference receiver for the spec 8.9 counters,
@@ -19,16 +19,16 @@
  *
  * Clocking: 307.2 MHz, the clock the class dividers assume (20 / 10 / 5
  * cycles per bit), on both chips (DSPi runs the RP2040 there too), core at
- * 1.20 V.  "clock 153" halves it: link_tx_10/rx_10 then carry L1 and
- * link_tx_5/rx_5 carry L2, and L3 is not available; "clock 76" (76.8 MHz,
- * below the RP2040's stock clock) leaves only L1, on link_tx_5/rx_5.  The whole image runs from RAM (copy_to_ram), so the flash
+ * 1.20 V.  "clock 153" halves it: alink_tx_10/rx_10 then carry L1 and
+ * alink_tx_5/rx_5 carry L2, and L3 is not available; "clock 76" (76.8 MHz,
+ * below the RP2040's stock clock) leaves only L1, on alink_tx_5/rx_5. The whole image runs from RAM (copy_to_ram), so the flash
  * clock never matters after boot.
  *
  * Work split: core 1 runs the real-time parts (TX ring refill, bit error
  * checker); core 0 runs the console, acquisition, the reference receiver
  * (best effort, with gaps counted), the trim scan and IMPAIR bursts.
  *
- * Nothing here writes flash.  Documentation/Bench/link_gpio_bench.md has
+ * Nothing here writes flash.  Documentation/Bench/alink_gpio_bench.md has
  * the wiring, the commands and the expected results.
  */
 
@@ -52,12 +52,12 @@
 #include "bench_trim.h"
 
 #include "bench_retime.pio.h"
-#include "link_rx_10.pio.h"
-#include "link_rx_20.pio.h"
-#include "link_rx_5.pio.h"
-#include "link_tx_10.pio.h"
-#include "link_tx_20.pio.h"
-#include "link_tx_5.pio.h"
+#include "alink_rx_10.pio.h"
+#include "alink_rx_20.pio.h"
+#include "alink_rx_5.pio.h"
+#include "alink_tx_10.pio.h"
+#include "alink_tx_20.pio.h"
+#include "alink_tx_5.pio.h"
 
 #ifndef BENCH_GIT
 #define BENCH_GIT "unknown"
@@ -74,7 +74,7 @@
 #define TX_RING_WORDS   4096u           // 16 KB
 #define RX_GUARD_WORDS  512u            // never read this close to the writer's lap
 #define TX_MARGIN_WORDS 64u
-#define MAX_LINKS       ((NUM_DMA_CHANNELS - 2u) / 2u < BENCH_MAX_TX_PINS ? (NUM_DMA_CHANNELS - 2u) / 2u : BENCH_MAX_TX_PINS)
+#define MAX_ALINKS      ((NUM_DMA_CHANNELS - 2u) / 2u < BENCH_MAX_TX_PINS ? (NUM_DMA_CHANNELS - 2u) / 2u : BENCH_MAX_TX_PINS)
 
 // ---------------------------------------------------------------------------
 // Programs per bit period
@@ -89,15 +89,15 @@ typedef struct {
 } prog_set_t;
 
 static const prog_set_t progs[3] = {
-    { 20, &link_tx_20_program, &link_rx_20_program, link_tx_20_program_get_default_config,
-      link_rx_20_program_get_default_config, link_rx_20_offset_hi_entry, link_rx_20_offset_lo_emit,
-      link_rx_20_wrap_target },
-    { 10, &link_tx_10_program, &link_rx_10_program, link_tx_10_program_get_default_config,
-      link_rx_10_program_get_default_config, link_rx_10_offset_hi_entry, link_rx_10_offset_lo_emit,
-      link_rx_10_wrap_target },
-    { 5, &link_tx_5_program, &link_rx_5_program, link_tx_5_program_get_default_config,
-      link_rx_5_program_get_default_config, link_rx_5_offset_hi_entry, link_rx_5_offset_lo_emit,
-      link_rx_5_wrap_target },
+    { 20, &alink_tx_20_program, &alink_rx_20_program, alink_tx_20_program_get_default_config,
+      alink_rx_20_program_get_default_config, alink_rx_20_offset_hi_entry, alink_rx_20_offset_lo_emit,
+      alink_rx_20_wrap_target },
+    { 10, &alink_tx_10_program, &alink_rx_10_program, alink_tx_10_program_get_default_config,
+      alink_rx_10_program_get_default_config, alink_rx_10_offset_hi_entry, alink_rx_10_offset_lo_emit,
+      alink_rx_10_wrap_target },
+    { 5, &alink_tx_5_program, &alink_rx_5_program, alink_tx_5_program_get_default_config,
+      alink_rx_5_program_get_default_config, alink_rx_5_offset_hi_entry, alink_rx_5_offset_lo_emit,
+      alink_rx_5_wrap_target },
 };
 
 static uint32_t sys_hz;
@@ -105,7 +105,7 @@ static uint32_t sys_hz;
 // The program set for a class at the current clock, NULL if the clock has
 // no integer N for it.
 static const prog_set_t *progs_for(unsigned cls) {
-    uint32_t baud = link_class_baud(cls);
+    uint32_t baud = alink_class_baud(cls);
     if (!baud || sys_hz % baud) return NULL;
     unsigned n = sys_hz / baud;
     for (unsigned i = 0; i < 3; i++) if (progs[i].n == n) return &progs[i];
@@ -185,11 +185,11 @@ static volatile uint32_t bert_seq, bert_gen_pub;
 static bench_bert_stats_t bert_pub;     // copies under bert_seq
 static volatile bool bert_synced_pub;
 static volatile uint64_t bert_frame_pub, bert_pos_pub;
-static link_sf_t bert_sf_pub;
+static alink_sf_t bert_sf_pub;
 
 static bench_ref_t ref;                 // core 0
-static link_rx_t acq_rx;                // core 0 scratch
-static uint32_t snap[(10u * LINK_MAX_FRAME_SYMBOLS * 68u + 31u) / 32u + 2u];
+static alink_rx_t acq_rx;               // core 0 scratch
+static uint32_t snap[(10u * ALINK_MAX_FRAME_SYMBOLS * 68u + 31u) / 32u + 2u];
 static bench_scan_t scan;
 static bool scan_valid;
 static uint32_t acq_tries;
@@ -302,7 +302,7 @@ static void dma_ring_pair(int data, int ctrl, bool to_ring, const uint32_t *cons
 // TX
 // ---------------------------------------------------------------------------
 
-// Absolute words the first link's DMA has read (core 1).
+// Absolute words the first alink's DMA has read (core 1).
 static uint64_t tx_read_abs(void) {
     uint32_t idx = (dma_hw->ch[tx.dma_data[0]].read_addr - (uint32_t)tx_ring) >> 2;
     if (idx < tx_last_idx) tx_passes++;
@@ -346,7 +346,7 @@ static void tx_service(void) {
 static const char *tx_start(const bench_txcfg_t *c, uint8_t drive, unsigned skip_pio) {
     tx.ps = progs_for(c->cls);
     if (!tx.ps) return "class not available at this clock";
-    if (c->npins > MAX_LINKS) return "too many links";
+    if (c->npins > MAX_ALINKS) return "too many alinks";
     tx.cfg = *c;
     tx.drive = drive;
     // SMs: fill PIO blocks in order, skipping the RX block in loopback.
@@ -405,7 +405,7 @@ static const char *tx_start(const bench_txcfg_t *c, uint8_t drive, unsigned skip
 #if NUM_PIOS > 2
     pio_enable_sm_multi_mask_in_sync(pio1, sm_mask[0], sm_mask[1], sm_mask[2]);
 #else
-    // The RP2040 cannot start two blocks on the same cycle; links on pio1
+    // The RP2040 cannot start two blocks on the same cycle; alinks on pio1
     // start a few cycles after those on pio0 (a constant skew).
     if (sm_mask[0]) pio_enable_sm_mask_in_sync(pio0, sm_mask[0]);
     if (sm_mask[1]) pio_enable_sm_mask_in_sync(pio1, sm_mask[1]);
@@ -505,7 +505,7 @@ static void rx_service(void) {
 }
 
 // *synced is true only once core 1 has applied the latest reset.
-static void rx_bert_snapshot(bench_bert_stats_t *st, bool *synced, uint64_t *frame, link_sf_t *sf) {
+static void rx_bert_snapshot(bench_bert_stats_t *st, bool *synced, uint64_t *frame, alink_sf_t *sf) {
     uint32_t s0, s1;
     do {
         s0 = bert_seq;
@@ -601,7 +601,7 @@ static void acquisition_service(void) {
     if (rx_words_now() - w0 > RX_RING_WORDS - RX_GUARD_WORDS) return;
     acq_tries++;
     bench_acq_t a;
-    if (bench_acquire(snap, w0 * 32u, (size_t)nw * 32u, rx.cls, &acq_rx, &a) && a.sf.apply_op == LINK_OP_NONE) {
+    if (bench_acquire(snap, w0 * 32u, (size_t)nw * 32u, rx.cls, &acq_rx, &a) && a.sf.apply_op == ALINK_OP_NONE) {
         if (gen != reset_gen) return;
         acq_result = a;
         acq_gen = gen;
@@ -727,7 +727,7 @@ static void print_stat(void) {
     if (tx.on) {
         bench_imp_stats_t im;
         memcpy(&im, (const void *)&tx_imp, sizeof(im));
-        printf(" tx_cls=%s tx_rate=%s tx_ch=%u tx_pay=%s tx_links=%u tx_frame=%llu tx_words=%llu tx_late=%lu"
+        printf(" tx_cls=%s tx_rate=%s tx_ch=%u tx_pay=%s tx_alinks=%u tx_frame=%llu tx_words=%llu tx_late=%lu"
                " tx_stall=%lu imp_comma=%lu imp_flip=%lu imp_slip=%lu imp_slip_bits=%ld imp_idle=%lu",
                bench_class_name(tx.cfg.cls), bench_rate_name(tx.cfg.rate), tx.cfg.channels,
                tx.cfg.pay == BENCH_PAY_PRBS ? "prbs" : "vec", tx.cfg.npins, (unsigned long long)tx_frame_wire,
@@ -739,9 +739,9 @@ static void print_stat(void) {
         bench_bert_stats_t b;
         bool synced;
         uint64_t frame;
-        link_sf_t sf;
+        alink_sf_t sf;
         rx_bert_snapshot(&b, &synced, &frame, &sf);
-        link_rx_stats_t s;
+        alink_rx_stats_t s;
         bench_ref_stats(&ref, &s);
         printf(" rx_pin=%u rx_cls=%s trim=%d sync=%d frame=%llu rate=%s ch=%u sf_flags=0x%02x sender=%u"
                " rx_words=%llu rx_stall=%lu acq_tries=%lu",
@@ -775,7 +775,7 @@ static void fill_status(bench_status_t *st) {
     bench_bert_stats_t b;
     bool synced;
     uint64_t frame;
-    link_sf_t sf;
+    alink_sf_t sf;
     rx_bert_snapshot(&b, &synced, &frame, &sf);
     st->state = rx.on ? (synced ? 2u : 1u) : 0u;
     st->cls = synced ? sf.cls : 0u;
@@ -882,8 +882,8 @@ static uint64_t live_writer_bits(void) { return rx_words_now() * 32u; }
 static void print_id(void) {
     char serial[2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1];
     pico_get_unique_board_id_string(serial, sizeof(serial));
-    printf("ID fw=link_bench ver=%s chip=%s clock=%lu serial=%s max_links=%u classes=%s%s%s\n", BENCH_GIT, CHIP_NAME,
-           (unsigned long)sys_hz, serial, (unsigned)MAX_LINKS, progs_for(1) ? "L1" : "", progs_for(2) ? ",L2" : "",
+    printf("ID fw=alink_bench ver=%s chip=%s clock=%lu serial=%s max_alinks=%u classes=%s%s%s\n", BENCH_GIT, CHIP_NAME,
+           (unsigned long)sys_hz, serial, (unsigned)MAX_ALINKS, progs_for(1) ? "L1" : "", progs_for(2) ? ",L2" : "",
            progs_for(3) ? ",L3" : "");
 }
 
@@ -964,7 +964,7 @@ static void cmd(char *line) {
     }
     if (!strcmp(c, "rx")) {
         long pin = 0;
-        unsigned cls = LINK_CLASS_L1;
+        unsigned cls = ALINK_CLASS_L1;
         bool aut = true;
         if ((s = bench_kv(&a, "pin")) && (!bench_parse_int(s, 0, 28, &pin) || !bench_pin_ok((unsigned)pin))) {
             reply("bad pin");
@@ -1060,7 +1060,7 @@ static void events_poll(void) {
     bench_bert_stats_t b;
     bool synced;
     uint64_t frame;
-    link_sf_t sf;
+    alink_sf_t sf;
     rx_bert_snapshot(&b, &synced, &frame, &sf);
     if (synced && !was_synced)
         printf("EVT sync cls=%s rate=%s ch=%u frame=%llu\n", bench_class_name(sf.cls), bench_rate_name(sf.rate),

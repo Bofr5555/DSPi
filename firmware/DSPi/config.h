@@ -141,7 +141,7 @@ extern volatile uint32_t nominal_feedback_10_14;
 // OUT = set).  An unknown sub-command, a wrong direction or a wrong length
 // STALLs, exactly like an unknown opcode, so stock firmware (which STALLs 0x00)
 // reads as "no extensions".  IDs 0x0001-0x7FFF are coordinated with Weeb Labs
-// and listed in the spec; 0x8000-0x80FF are the fork's link block (spec 2.8,
+// and listed in the spec; 0x8000-0x80FF are the fork's alink block (spec 2.8,
 // RP2350 receiver builds); 0x8100-0xFFFF are experimental/private, never shipped.
 #define REQ_EXTENSION               0x00
 #define EXT_LIST                    0x0000  // IN: supported IDs, uint16 LE ascending (excl. 0), truncated to wLength
@@ -151,19 +151,19 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define EXT_IDENTIFY                0x0004  // IN: IdentifyStatus (56 B); OUT: IdentifyRequest (4 B) (identify.h)
 #define EXT_RESET_INFO              0x0005  // IN: ResetInfo (20 B) (reset_info.h); no OUT
 #define EXT_FIRMWARE_FIXES          0x0006  // IN: uint32 LE FW_FIX_* flags; no OUT
-// Link block (extension_channel_spec.md 2.8); a receiver build (DSPI_LINK)
+// Alink block (extension_channel_spec.md 2.8); a receiver build (DSPI_ALINK)
 // serves INFO, STATUS, CONFIG, SLOTS, PHASE, FRAME_COUNTER, APPLY_AT_FRAME,
 // CTRL_MSG (IN), STATS_RESET and DIAG.
-#define EXT_LINK_INFO               0x8000  // IN: 32 B
-#define EXT_LINK_STATUS             0x8001  // IN: 52 B
-#define EXT_LINK_CONFIG             0x8002  // IN/OUT: 8 B
-#define EXT_LINK_SLOTS              0x8003  // IN/OUT: 8 B
-#define EXT_LINK_PHASE              0x8004  // IN/OUT: 8 B (WP LK6)
+#define EXT_ALINK_INFO              0x8000  // IN: 32 B
+#define EXT_ALINK_STATUS            0x8001  // IN: 52 B
+#define EXT_ALINK_CONFIG            0x8002  // IN/OUT: 8 B
+#define EXT_ALINK_SLOTS             0x8003  // IN/OUT: 8 B
+#define EXT_ALINK_PHASE             0x8004  // IN/OUT: 8 B (WP LK6)
 #define EXT_FRAME_COUNTER           0x8005  // IN: 16 B (WP LK6)
 #define EXT_APPLY_AT_FRAME          0x8006  // IN 16 B / OUT 16 B (WP LK6)
-#define EXT_LINK_CTRL_MSG           0x8008  // IN: 24 B (receiver)
-#define EXT_LINK_STATS_RESET        0x8009  // OUT: 1 B
-#define EXT_LINK_DIAG               0x800A  // IN: 64 B
+#define EXT_ALINK_CTRL_MSG          0x8008  // IN: 24 B (receiver)
+#define EXT_ALINK_STATS_RESET       0x8009  // OUT: 1 B
+#define EXT_ALINK_DIAG              0x800A  // IN: 64 B
 // USB sync block (extension_channel_spec.md 2.9, WP USB1); DSPI_ALINK_USB builds
 // (RP2040 and RP2350).  They also serve EXT_FRAME_COUNTER and
 // EXT_APPLY_AT_FRAME on the USB time base (time_base 1 / 2).

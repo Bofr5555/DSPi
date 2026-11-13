@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""mirror_diff.py - keep link_phase_sim.c's copy of the receiver glue in step (WP LK6, review lk6).
+"""mirror_diff.py - keep alink_phase_sim.c's copy of the receiver glue in step (WP LK6, review lk6).
 
-The simulation runs line-for-line copies ("mirrors") of link_input.c's
+The simulation runs line-for-line copies ("mirrors") of alink_input.c's
 delivery, anchor, verification, servo-tick and holdover functions, because the
 firmware file needs the Pico SDK.  This script extracts each mirrored function
 from both files, removes the simulation's `rx_t *r` plumbing and comments, and
@@ -10,8 +10,8 @@ itself (ring fill, DMA positions, the actuator, events, the flags byte); they
 are recorded in mirror_expected.txt.  Any other difference means one copy
 changed without the other: the check fails.
 
-  python3 tools/link_phase_sim/mirror_diff.py [ROOT]            check (exit 1 on drift)
-  python3 tools/link_phase_sim/mirror_diff.py [ROOT] --write    accept the current port differences
+  python3 tools/alink_phase_sim/mirror_diff.py [ROOT]           check (exit 1 on drift)
+  python3 tools/alink_phase_sim/mirror_diff.py [ROOT] --write   accept the current port differences
 
 Based on review lk6's mirror_diff.py.
 """
@@ -44,7 +44,7 @@ def norm(s):
     s = re.sub(r"\br->", "", s)
     s = re.sub(r"\(r,\s*", "(", s)
     s = re.sub(r"\(r\)", "()", s)
-    s = re.sub(r"&\(link_apply_limits_t\)\{[^}]*\}", "&apply_lim", s)
+    s = re.sub(r"&\(alink_apply_limits_t\)\{[^}]*\}", "&apply_lim", s)
     s = re.sub(r"//.*", "", s)
     s = re.sub(r"/\*.*?\*/", "", s, flags=re.S)
     s = re.sub(r"\s+", " ", s)
@@ -52,8 +52,8 @@ def norm(s):
 
 
 def report(root):
-    fw = open(os.path.join(root, "firmware/DSPi/link_input.c")).read()
-    sim = open(os.path.join(root, "tools/link_phase_sim/link_phase_sim.c")).read()
+    fw = open(os.path.join(root, "firmware/DSPi/alink_input.c")).read()
+    sim = open(os.path.join(root, "tools/alink_phase_sim/alink_phase_sim.c")).read()
     out = []
     for n in NAMES:
         a, b = body(fw, n), body(sim, n)
@@ -78,9 +78,9 @@ def main(argv):
         return 0
     want = open(expected).read() if os.path.exists(expected) else ""
     if now == want:
-        print(f"mirror_diff: the simulation's {len(NAMES)} mirrored functions match link_input.c (port lines as recorded)")
+        print(f"mirror_diff: the simulation's {len(NAMES)} mirrored functions match alink_input.c (port lines as recorded)")
         return 0
-    print("mirror_diff: FAIL, the simulation's glue and link_input.c have drifted apart:")
+    print("mirror_diff: FAIL, the simulation's glue and alink_input.c have drifted apart:")
     sys.stdout.writelines(difflib.unified_diff(want.splitlines(True), now.splitlines(True), "mirror_expected.txt",
                                                "now"))
     print("Change both copies; after checking that the remaining differences are port lines only, "

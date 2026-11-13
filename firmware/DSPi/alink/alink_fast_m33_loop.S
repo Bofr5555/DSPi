@@ -1,11 +1,11 @@
-@ link_fast_m33_loop.S - DSPi link receiver: clean-frame loop for the Cortex-M33 (WP LK5)
+@ alink_fast_m33_loop.S - DSPi alink receiver: clean-frame loop for the Cortex-M33 (WP LK5)
 @
 @   uint32_t lf_clean_m33(lf_clean_ctx_t *c);
 @
-@ The loop of lf_clean_fixed() in link_fast.c for its common case: 48/96 kHz,
+@ The loop of lf_clean_fixed() in alink_fast.c for its common case: 48/96 kHz,
 @ one decoded bank that is a full bank, delivery of a whole bank in order (or
 @ none).  lf_clean_fixed() computes everything that is constant for the call
-@ into *c (link_fast.h, lf_clean_ctx_t, offsets asserted there) and the number
+@ into *c (alink_fast.h, lf_clean_ctx_t, offsets asserted there) and the number
 @ of frames n that lie before any boundary; this loop checks each frame's
 @ content exactly as the C loop does and stops at the first frame that is not
 @ clean, before touching anything of it.  Returns the frames taken; c->flo,
@@ -15,7 +15,7 @@
     .syntax unified
     .cpu    cortex-m33
     .thumb
-    .section .time_critical.link_m33.lf_clean_m33, "ax", %progbits
+    .section .time_critical.alink_m33.lf_clean_m33, "ax", %progbits
 
     .equ C_WP,      0       @ word holding the first frame's comma end
     .equ C_N,       4       @ frames allowed

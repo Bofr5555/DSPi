@@ -1,17 +1,17 @@
-// link_phase_sim.c - two phase-locked link receivers fed by one sender (WP LK6)
+// alink_phase_sim.c - two phase-locked alink receivers fed by one sender (WP LK6)
 //
 // What runs as in the firmware:
-//  - the sender: LK4's encoder core (firmware/DSPi-Sender/sender_link.c,
-//    snd_frame, link_tx_schedule for the superframe applies);
-//  - the decoder: LK5's link_fast over a 32 KB raw ring per receiver, at the
+//  - the sender: LK4's encoder core (firmware/DSPi-Sender/sender_alink.c,
+//    snd_frame, alink_tx_schedule for the superframe applies);
+//  - the decoder: LK5's alink_fast over a 32 KB raw ring per receiver, at the
 //    ring positions the receiver's DMA would have written;
-//  - the phase lock and the apply queue: link/link_phase.c (WP LK6);
-//  - the rate measurement: link/link_ring_clock.h (LK45F), on the receiver's
+//  - the phase lock and the apply queue: alink/alink_phase.c (WP LK6);
+//  - the rate measurement: alink/alink_ring_clock.h (LK45F), on the receiver's
 //    own microsecond timer;
 //  - the glue: deliver(), deliver_span(), deliver_place(), deliver_hold(),
 //    the anchor, the verification, the servo tick and the holdover/relock
-//    transitions are line-for-line copies of firmware/DSPi/link_input.c
-//    (marked "mirrors"), and the main loop's LINK prefill handshake of main.c.
+//    transitions are line-for-line copies of firmware/DSPi/alink_input.c
+//    (marked "mirrors"), and the main loop's ALINK prefill handshake of main.c.
 // What is modelled:
 //  - the line: sender bit k arrives at k / baud on the sender's clock (an
 //    ideal line; LK2's PIO model shows the RX programs deliver exactly one bit
@@ -25,13 +25,13 @@
 // the skew between them, each one's latency against D, and the time between
 // the two receivers' CLICK samples (the bench's test (e) on the model).
 //
-//   tools/link_phase_sim/run.sh            (all scenarios; exit 1 on a failure)
+//   tools/alink_phase_sim/run.sh           (all scenarios; exit 1 on a failure)
 
-#include "link_codec.h"
-#include "link_fast.h"
-#include "link_phase.h"
-#include "link_ring_clock.h"
-#include "sender_link.h"
+#include "alink_codec.h"
+#include "alink_fast.h"
+#include "alink_phase.h"
+#include "alink_ring_clock.h"
+#include "sender_alink.h"
 
 #include <inttypes.h>
 #include <math.h>
@@ -80,7 +80,7 @@ typedef struct {
     double rx_ppm[NRX];
     double boot_s[NRX];             // receiver power-up (absolute seconds)
     double loss_from[NRX], loss_to[NRX];   // dark line on that receiver's input (absolute s)
-    uint8_t mode;                   // EXT_LINK_PHASE.mode on both
+    uint8_t mode;                   // EXT_ALINK_PHASE.mode on both
     uint16_t d_local;
     double duration_s;
     double click_at_s;              // sender schedules CLICK (superframe) at about this time
@@ -112,7 +112,7 @@ static unsigned rate_hz(unsigned code) { return code == 0 ? 44100u : code == 1 ?
 #define SND_WORDS   (1u << 20)
 
 typedef struct {
-    link_tx_t tx;
+    alink_tx_t tx;
     snd_sink_t sink;
     uint32_t *ring;
     bool click_scheduled;
@@ -126,8 +126,8 @@ static snd_tables_t T;
 static void sender_init(sender_t *s, const scenario_t *sc) {
     memset(s, 0, sizeof(*s));
     s->ring = calloc(SND_WORDS, 4);
-    link_tx_init(&s->tx, sc->cls, sc->rate, sc->c, F0, 0x5A);
-    s->tx.flags = LINK_SF_FLAG_USB_LIVE;
+    alink_tx_init(&s->tx, sc->cls, sc->rate, sc->c, F0, 0x5A);
+    s->tx.flags = ALINK_SF_FLAG_USB_LIVE;
     snd_sink_init(&s->sink, s->ring, SND_WORDS, NULL);
 }
 
@@ -136,20 +136,20 @@ static void sender_init(sender_t *s, const scenario_t *sc) {
 static void sender_fill(sender_t *s, const scenario_t *sc, uint64_t words) {
     while (s->sink.words < words) {
         if (sc->restart_at_s > 0 && !s->restarted &&
-            (double)snd_sink_bits(&s->sink) / ((double)link_class_baud(sc->cls) * (1.0 + sc->sender_ppm * 1e-6)) >=
+            (double)snd_sink_bits(&s->sink) / ((double)alink_class_baud(sc->cls) * (1.0 + sc->sender_ppm * 1e-6)) >=
                 sc->restart_at_s) {
             // A power cycle: the encoder starts over (its own disparity, F, superframe).
-            link_tx_init(&s->tx, sc->cls, sc->rate, sc->c, sc->restart_f0, 0x5A);
-            s->tx.flags = LINK_SF_FLAG_USB_LIVE;
+            alink_tx_init(&s->tx, sc->cls, sc->rate, sc->c, sc->restart_f0, 0x5A);
+            s->tx.flags = ALINK_SF_FLAG_USB_LIVE;
             s->restarted = true;
             s->restart_bits = snd_sink_bits(&s->sink);
             s->click_scheduled = sc->click_at_s <= sc->restart_at_s;   // a CLICK only on one stream
         }
         if (sc->click_at_s > 0 && !s->click_scheduled &&
-            (double)snd_sink_bits(&s->sink) / ((double)link_class_baud(sc->cls) * (1.0 + sc->sender_ppm * 1e-6)) >=
+            (double)snd_sink_bits(&s->sink) / ((double)alink_class_baud(sc->cls) * (1.0 + sc->sender_ppm * 1e-6)) >=
                 sc->click_at_s) {
             uint64_t at = s->tx.frame + 2400u;
-            if (link_tx_schedule(&s->tx, at, LINK_OP_CLICK, 0, 0)) {
+            if (alink_tx_schedule(&s->tx, at, ALINK_OP_CLICK, 0, 0)) {
                 s->click_scheduled = true;
                 s->click_frame = at;
             }
@@ -164,10 +164,10 @@ static void sender_fill(sender_t *s, const scenario_t *sc, uint64_t words) {
 // One receiver: the firmware's state, the modelled hardware
 // ============================================================================
 
-#define LINK_RING_WORDS     8192u
-#define LINK_RING_BITS      (LINK_RING_WORDS * 32u)
-#define LINK_FIFO_ROWS      256u
-#define SEARCH_BUDGET       (LINK_RING_BITS / 4u)
+#define ALINK_RING_WORDS    8192u
+#define ALINK_RING_BITS      (ALINK_RING_WORDS * 32u)
+#define ALINK_FIFO_ROWS     256u
+#define SEARCH_BUDGET       (ALINK_RING_BITS / 4u)
 #define RING_TAGS           4096u           // output ring history (frames), power of two
 #define TAG_SILENCE         (-1ll)
 #define ANCHOR_SPIN_US      1100u
@@ -185,28 +185,28 @@ typedef struct {
     unsigned fs;
     latency_t lat;
     // DMA ring
-    uint32_t ring[LINK_RING_WORDS];
+    uint32_t ring[ALINK_RING_WORDS];
     uint64_t w0;                    // first sender word this receiver's ring captured
     uint64_t copied;                // sender words copied so far
-    // Firmware state (link_input.c)
-    link_fast_t lf;
+    // Firmware state (alink_input.c)
+    alink_fast_t lf;
     int phase;
     uint32_t detected_rate;
     bool loss_latch;
-    int32_t fifo[LINK_FIFO_ROWS][8];
+    int32_t fifo[ALINK_FIFO_ROWS][8];
     uint32_t fifo_head, fifo_tail;
     uint64_t pub_bits, pub_f, pub_head_f;
     uint32_t pub_p, pub_head;
     bool pub_locked;
-    link_phase_t ph;
-    link_apply_q_t aq;
+    alink_phase_t ph;
+    alink_apply_q_t aq;
     uint32_t drop_rows;
     uint64_t hold_f, hold_us;
-    link_meas_t meas;
+    alink_meas_t meas;
     uint64_t servo_last_us;
     float last_cmd, fill_smooth, fill_int, last_ff;
     bool pull_in;
-    // Main loop (main.c LINK block)
+    // Main loop (main.c ALINK block)
     bool preset_loading, prefilling;
     // Output side
     bool running;                   // outputs enabled
@@ -214,7 +214,7 @@ typedef struct {
     double vcxo_ppm;
     uint32_t wr;                    // frames written since the ring reset
     uint32_t last_prewrite;
-    int64_t tag[RING_TAGS];         // link frame per ring frame, TAG_SILENCE for silence
+    int64_t tag[RING_TAGS];         // alink frame per ring frame, TAG_SILENCE for silence
     uint8_t click[RING_TAGS];
     int8_t click_out;               // pipeline_click_output
     double soft_mute_until;         // local us
@@ -256,7 +256,7 @@ static uint32_t producer_block_bounds(const rx_t *r, uint32_t *min_frames) {
     uint32_t max = r->lat.cap;
     if (!r->running) {
         uint32_t fill = ring_fill(r);
-        uint32_t target = link_phase_prefill(&r->ph, r->lat.target, r->lat.cap, r->lat.span);
+        uint32_t target = alink_phase_prefill(&r->ph, r->lat.target, r->lat.cap, r->lat.span);
         uint32_t room = fill < target ? target - fill : 0;
         if (room < max) max = room;
     }
@@ -314,11 +314,11 @@ static bool audible(const rx_t *r) {
     return r->running && !r->preset_loading && (double)r->now_us >= r->soft_mute_until;
 }
 
-// ---- mirrors link_input.c ----------------------------------------------------
+// ---- mirrors alink_input.c ----------------------------------------------------
 
 static void publish(rx_t *r, uint64_t bits) {
     r->pub_bits = bits;
-    r->pub_locked = r->lf.state == LINK_RX_LOCKED;
+    r->pub_locked = r->lf.state == ALINK_RX_LOCKED;
     if (r->pub_locked) {
         r->pub_f = r->lf.frame;
         r->pub_p = r->lf.p;
@@ -337,8 +337,8 @@ static uint64_t ring_writer_bits(rx_t *r) {
         uint32_t w = r->snd.ring[r->copied & (SND_WORDS - 1u)];
         double ta = (double)(r->copied * 32u + 31u) / r->baud_s;
         if (t_lost1 > t_lost0 && ta >= t_lost0 && ta < t_lost1) w = 0;    // dark line
-        r->ring[(r->copied - r->w0) & (LINK_RING_WORDS - 1u)] = w;
-        // LINK_PHASE_SIM_DUMP=file:from_s:to_s writes receiver B's input words
+        r->ring[(r->copied - r->w0) & (ALINK_RING_WORDS - 1u)] = w;
+        // ALINK_PHASE_SIM_DUMP=file:from_s:to_s writes receiver B's input words
         // in that window (raw u32, gen_stream's format) for LK5's M33 emulator.
         if (dump_f && r->id == 1 && ta >= dump_from && ta < dump_to) fwrite(&w, 4, 1, dump_f);
     }
@@ -350,61 +350,61 @@ static bool arrival_since(rx_t *r, uint64_t fx, float *since) {
     if (!r->pub_locked || !r->detected_rate) return false;
     uint64_t words = (uint64_t)floor(r->t * r->baud_s / 32.0);
     uint64_t now_bits = words >= r->w0 ? (words - r->w0) * 32u : 0;
-    *since = link_phase_since(r->pub_f, fx, (int32_t)((uint32_t)now_bits - r->pub_p),
-                              (float)link_class_baud(r->lf.cls) / (float)r->detected_rate);
+    *since = alink_phase_since(r->pub_f, fx, (int32_t)((uint32_t)now_bits - r->pub_p),
+                              (float)alink_class_baud(r->lf.cls) / (float)r->detected_rate);
     return true;
 }
 
 static void decode_service(rx_t *r) {
     uint64_t bits = ring_writer_bits(r);
     if (r->phase != PH_LOCKED) {
-        link_fast_run(&r->lf, bits, SEARCH_BUDGET);
+        alink_fast_run(&r->lf, bits, SEARCH_BUDGET);
     } else {
         uint32_t head = r->fifo_head;
         for (int piece = 0; piece < 2; piece++) {
-            uint32_t space = LINK_FIFO_ROWS - (head - r->fifo_tail);
+            uint32_t space = ALINK_FIFO_ROWS - (head - r->fifo_tail);
             if (!space) break;
-            uint32_t idx = head & (LINK_FIFO_ROWS - 1u), n = LINK_FIFO_ROWS - idx;
+            uint32_t idx = head & (ALINK_FIFO_ROWS - 1u), n = ALINK_FIFO_ROWS - idx;
             if (n > space) n = space;
-            link_fast_set_output(&r->lf, &r->fifo[idx], (uint16_t)n);
-            link_fast_run(&r->lf, bits, SEARCH_BUDGET);
+            alink_fast_set_output(&r->lf, &r->fifo[idx], (uint16_t)n);
+            alink_fast_run(&r->lf, bits, SEARCH_BUDGET);
             head += r->lf.out_n;
             if (r->lf.out_n < n) break;
         }
-        link_fast_set_output(&r->lf, NULL, 0);
+        alink_fast_set_output(&r->lf, NULL, 0);
         r->fifo_head = head;
     }
     publish(r, bits);
 }
 
 static void apply_report(rx_t *r, uint8_t op, uint8_t result, uint64_t frame) {
-    link_apply_done(&r->aq, op, result, frame);
-    if (result == LINK_APPLY_APPLIED) r->ev_applied++;
-    else if (result == LINK_APPLY_LATE) r->ev_late++;
-    else if (result == LINK_APPLY_CANCELLED) r->ev_cancel++;
+    alink_apply_done(&r->aq, op, result, frame);
+    if (result == ALINK_APPLY_APPLIED) r->ev_applied++;
+    else if (result == ALINK_APPLY_LATE) r->ev_late++;
+    else if (result == ALINK_APPLY_CANCELLED) r->ev_cancel++;
     else r->ev_refused++;
 }
 
-static uint8_t apply_exec(rx_t *r, const link_apply_op_t *op) {
+static uint8_t apply_exec(rx_t *r, const alink_apply_op_t *op) {
     switch (op->op) {
-    case LINK_OP_MUTE: r->user_mute = true; return LINK_APPLY_APPLIED;
-    case LINK_OP_UNMUTE: r->user_mute = false; return LINK_APPLY_APPLIED;
-    case LINK_OP_MASTER_VOLUME: r->master_db = op->value * 0.01f; r->vol_frame = -2; return LINK_APPLY_APPLIED;
-    case LINK_OP_CLICK:
-        if (op->arg >= 8 || r->user_mute || r->stream_mute) return LINK_APPLY_REFUSED;
+    case ALINK_OP_MUTE: r->user_mute = true; return ALINK_APPLY_APPLIED;
+    case ALINK_OP_UNMUTE: r->user_mute = false; return ALINK_APPLY_APPLIED;
+    case ALINK_OP_MASTER_VOLUME: r->master_db = op->value * 0.01f; r->vol_frame = -2; return ALINK_APPLY_APPLIED;
+    case ALINK_OP_CLICK:
+        if (op->arg >= 8 || r->user_mute || r->stream_mute) return ALINK_APPLY_REFUSED;
         r->click_out = (int8_t)op->arg;
-        return LINK_APPLY_APPLIED;
-    case LINK_OP_PRESET_LOAD:
-    case LINK_OP_OUT_DELAY: return LINK_APPLY_APPLIED;
-    default: return LINK_APPLY_REFUSED;
+        return ALINK_APPLY_APPLIED;
+    case ALINK_OP_PRESET_LOAD:
+    case ALINK_OP_OUT_DELAY: return ALINK_APPLY_APPLIED;
+    default: return ALINK_APPLY_REFUSED;
     }
 }
 
 static void apply_run(rx_t *r, bool late) {
-    link_apply_op_t op;
-    link_apply_pop(&r->aq, &op);
+    alink_apply_op_t op;
+    alink_apply_pop(&r->aq, &op);
     uint8_t res = apply_exec(r, &op);
-    if (late && res == LINK_APPLY_APPLIED) res = LINK_APPLY_LATE;
+    if (late && res == ALINK_APPLY_APPLIED) res = ALINK_APPLY_LATE;
     apply_report(r, op.op, res, op.frame);
 }
 
@@ -414,19 +414,19 @@ static void deliver_rows(rx_t *r, uint32_t tail, uint32_t n, uint64_t f) {
     r->fifo_tail = tail + n;
     process_block(r, n, fr);
     r->click_out = -1;
-    link_phase_written(&r->ph, f, n);
+    alink_phase_written(&r->ph, f, n);
 }
 
 static void silence_block(rx_t *r, uint32_t n) {
     process_block(r, n, NULL);
     r->click_out = -1;
-    link_phase_written(&r->ph, r->ph.next_w, n);
+    alink_phase_written(&r->ph, r->ph.next_w, n);
 }
 
 static uint32_t deliver_span(rx_t *r, bool rows, uint32_t tail, uint64_t f, uint32_t n) {
     uint32_t done = 0;
     while (done < n) {
-        uint64_t at = link_apply_next(&r->aq), here = f + done;
+        uint64_t at = alink_apply_next(&r->aq), here = f + done;
         if (at <= here) {
             apply_run(r, at < here);
             continue;
@@ -452,7 +452,7 @@ static void reanchor(rx_t *r) {
 static uint32_t deliver_hold(rx_t *r, uint32_t head) {
     r->fifo_tail = head;
     uint32_t min_frames, max_frames = producer_block_bounds(r, &min_frames);
-    uint32_t n = link_phase_hold_frames(&r->ph, ring_fill(r), max_frames);
+    uint32_t n = alink_phase_hold_frames(&r->ph, ring_fill(r), max_frames);
     return n ? deliver_span(r, false, 0, r->ph.next_w, n) : 0;
 }
 
@@ -461,7 +461,7 @@ static bool deliver_place(rx_t *r, uint32_t *tail, uint32_t *avail, uint64_t *f)
     if (r->drop_rows) {
         k = r->drop_rows < *avail ? r->drop_rows : *avail;
         r->fifo_tail = *tail + k;
-        link_phase_written(&r->ph, *f, k);
+        alink_phase_written(&r->ph, *f, k);
         *tail += k;
         *avail -= k;
         *f += k;
@@ -469,8 +469,8 @@ static bool deliver_place(rx_t *r, uint32_t *tail, uint32_t *avail, uint64_t *f)
         if (r->drop_rows) return false;
     }
     if (!r->ph.resync) return true;
-    int64_t gap = link_phase_gap(&r->ph, *f);
-    if (!link_phase_gap_ok(gap, r->lat.span)) {
+    int64_t gap = alink_phase_gap(&r->ph, *f);
+    if (!alink_phase_gap_ok(gap, r->lat.span)) {
         reanchor(r);
         return false;
     }
@@ -505,7 +505,7 @@ static uint32_t deliver(rx_t *r) {
     uint32_t min_frames, max_frames = producer_block_bounds(r, &min_frames);
     if (max_frames == 0 || avail < min_frames || avail == 0) return 0;
     uint32_t n = avail < max_frames ? avail : max_frames;
-    if (link_apply_next(&r->aq) < f + n) return deliver_span(r, true, tail, f, n);
+    if (alink_apply_next(&r->aq) < f + n) return deliver_span(r, true, tail, f, n);
     deliver_rows(r, tail, n, f);
     return n;
 }
@@ -514,13 +514,13 @@ static bool phase_error(rx_t *r, float *e) {
     if (!r->ph.timeline || r->ph.hold || r->ph.resync) return false;
     float since;
     if (!r->running || !arrival_since(r, r->ph.next_w, &since)) return false;
-    *e = link_phase_error(&r->ph, since, ring_fill_exact(r));
+    *e = alink_phase_error(&r->ph, since, ring_fill_exact(r));
     return true;
 }
 
 static int trace;
 static void phase_act(rx_t *r, int act, int32_t frames) {
-    if (act == LINK_PHASE_ACT_RESUME) {
+    if (act == ALINK_PHASE_ACT_RESUME) {
         r->t_resume = r->t;
         r->e_resume = r->ph.e;
     }
@@ -528,9 +528,9 @@ static void phase_act(rx_t *r, int act, int32_t frames) {
         printf("    t %.6f act %d frames %d e %+.3f state %u fill %.2f wr %u out %.2f next_w %" PRIu64 " fifo %u\n", r->t, act,
                (int)frames, r->ph.e, r->ph.state, ring_fill_exact(r), r->wr, r->out_phase, r->ph.next_w,
                r->pub_head - r->fifo_tail);
-    if (act == LINK_PHASE_ACT_REANCHOR) {
+    if (act == ALINK_PHASE_ACT_REANCHOR) {
         reanchor(r);
-    } else if (act == LINK_PHASE_ACT_CORRECT) {
+    } else if (act == ALINK_PHASE_ACT_CORRECT) {
         r->corrections++;
         if (frames > 0) {
             r->drop_rows += (uint32_t)frames;
@@ -543,7 +543,7 @@ static void phase_act(rx_t *r, int act, int32_t frames) {
                 k -= n;
             }
         }
-    } else if (act == LINK_PHASE_ACT_RESUME) {
+    } else if (act == ALINK_PHASE_ACT_RESUME) {
         r->resumes++;
     }
 }
@@ -552,7 +552,7 @@ static void phase_verify(rx_t *r) {
     float e;
     if (!phase_error(r, &e)) return;
     int32_t k = 0;
-    int act = link_phase_check(&r->ph, e, true, &k);    // sets k: not in the same call's arguments
+    int act = alink_phase_check(&r->ph, e, true, &k);   // sets k: not in the same call's arguments
     phase_act(r, act, k);
 }
 
@@ -571,17 +571,17 @@ static void servo_actuate(rx_t *r, float hz, float trim) {
 }
 
 static bool phase_servo_tick(rx_t *r, float hz) {
-    if (!link_phase_active(&r->ph)) return false;
+    if (!alink_phase_active(&r->ph)) return false;
     float e, trim = 0.0f;
     if (r->ph.started && phase_error(r, &e)) {
         int32_t k = 0;
-        int act = LINK_PHASE_ACT_NONE;
-        if (r->ph.state != LINK_PHASE_ANCHORING) {
-            act = link_phase_check(&r->ph, e, true, &k);
+        int act = ALINK_PHASE_ACT_NONE;
+        if (r->ph.state != ALINK_PHASE_ANCHORING) {
+            act = alink_phase_check(&r->ph, e, true, &k);
             phase_act(r, act, k);
         }
-        if (act == LINK_PHASE_ACT_REANCHOR) link_phase_pi_reset(&r->ph.pi);
-        else if (r->ph.state == LINK_PHASE_LOCKED || r->ph.state == LINK_PHASE_PENDING) trim = link_phase_servo(&r->ph, e);
+        if (act == ALINK_PHASE_ACT_REANCHOR) alink_phase_pi_reset(&r->ph.pi);
+        else if (r->ph.state == ALINK_PHASE_LOCKED || r->ph.state == ALINK_PHASE_PENDING) trim = alink_phase_servo(&r->ph, e);
     }
     servo_actuate(r, hz, trim);
     return true;
@@ -604,7 +604,7 @@ static void fill_servo(rx_t *r, float hz) {
 
 static void update_clock_servo(rx_t *r) {
     if (r->phase != PH_LOCKED || r->detected_rate != r->fs) return;
-    float hz = link_meas_hz(&r->meas);
+    float hz = alink_meas_hz(&r->meas);
     if (hz == 0.0f) return;
     if (r->now_us - r->servo_last_us < SERVO_TICK_US) return;
     r->servo_last_us = r->now_us;
@@ -619,12 +619,12 @@ static void enter_locked(rx_t *r) {
     uint32_t was = r->detected_rate;
     r->detected_rate = rate_hz(r->lf.rate);
     r->fifo_tail = r->fifo_head;
-    link_meas_reset(&r->meas);
+    alink_meas_reset(&r->meas);
     if (r->ph.hold) {
         uint64_t f_expect = r->hold_f + (r->now_us - r->hold_us) * (uint64_t)r->detected_rate / 1000000u;
         bool same_rate = r->detected_rate == was && r->detected_rate == r->fs;
         r->relocked = same_rate;
-        if (same_rate && link_phase_relock(&r->ph, r->lf.frame, f_expect, r->lat.span)) {
+        if (same_rate && alink_phase_relock(&r->ph, r->lf.frame, f_expect, r->lat.span)) {
         } else {
             r->ph.hold = false;
             r->ph.started = false;
@@ -636,17 +636,17 @@ static void enter_locked(rx_t *r) {
 
 static bool enter_holdover(rx_t *r) {
     uint32_t fill = ring_fill(r);
-    if (!link_phase_active(&r->ph) || !link_phase_loss(&r->ph, fill)) return false;
-    r->hold_f = r->ph.next_w - fill + (uint64_t)(int64_t)link_phase_delay(&r->ph);
+    if (!alink_phase_active(&r->ph) || !alink_phase_loss(&r->ph, fill)) return false;
+    r->hold_f = r->ph.next_w - fill + (uint64_t)(int64_t)alink_phase_delay(&r->ph);
     r->hold_us = r->now_us;
     r->phase = PH_RELOCK;
     r->holdovers++;
     return true;
 }
 
-static void link_up_step(rx_t *r) {
+static void alink_up_step(rx_t *r) {
     if (r->phase == PH_LOCKED) {
-        if (r->lf.state != LINK_RX_LOCKED) {
+        if (r->lf.state != ALINK_RX_LOCKED) {
             if (!enter_holdover(r)) {
                 r->pull_in = false;
                 r->relocked = false;
@@ -655,57 +655,57 @@ static void link_up_step(rx_t *r) {
                 r->detected_rate = 0;
             }
         }
-    } else if (r->lf.state == LINK_RX_LOCKED) {
+    } else if (r->lf.state == ALINK_RX_LOCKED) {
         enter_locked(r);
     }
 }
 
-// link_input_anchor_ready(): spin for the last few frames.
+// alink_input_anchor_ready(): spin for the last few frames.
 static bool anchor_ready(rx_t *r) {
-    if (!link_phase_active(&r->ph) || !r->ph.timeline) return true;
+    if (!alink_phase_active(&r->ph) || !r->ph.timeline) return true;
     float since;
     if (!arrival_since(r, r->ph.first, &since)) return false;
-    float wait = link_phase_anchor_wait(&r->ph, since);
+    float wait = alink_phase_anchor_wait(&r->ph, since);
     if (wait > (float)(r->detected_rate / 1000u)) return false;
     uint64_t t0 = r->now_us;
     while (wait > 0.0f && r->now_us - t0 < ANCHOR_SPIN_US) {
         r->now_us += 1;             // one spin iteration: about a microsecond
         r->t = local_to_abs(r, r->now_us);
         if (!arrival_since(r, r->ph.first, &since)) return false;
-        wait = link_phase_anchor_wait(&r->ph, since);
+        wait = alink_phase_anchor_wait(&r->ph, since);
     }
     return true;
 }
 
-// link_input_poll() and the main loop's LINK block, once per pass.
+// alink_input_poll() and the main loop's ALINK block, once per pass.
 static void poll(rx_t *r) {
     decode_service(r);
-    link_up_step(r);
-    if (r->lf.state == LINK_RX_LOCKED && r->phase == PH_LOCKED) {
-        if (link_apply_take_sf(&r->aq, &(link_apply_limits_t){ 10, 9, 2048 }, &r->lf.sf) == 2)
-            apply_report(r, r->lf.sf.apply_op, LINK_APPLY_REFUSED, r->lf.sf.apply_frame);
+    alink_up_step(r);
+    if (r->lf.state == ALINK_RX_LOCKED && r->phase == PH_LOCKED) {
+        if (alink_apply_take_sf(&r->aq, &(alink_apply_limits_t){ 10, 9, 2048 }, &r->lf.sf) == 2)
+            apply_report(r, r->lf.sf.apply_op, ALINK_APPLY_REFUSED, r->lf.sf.apply_frame);
     }
     if (r->phase == PH_LOCKED && r->detected_rate)
-        link_meas_sample(&r->meas, r->now_us, r->pub_bits,
-                         1e6f * (float)r->detected_rate / (float)link_class_baud(r->lf.cls));
+        alink_meas_sample(&r->meas, r->now_us, r->pub_bits,
+                         1e6f * (float)r->detected_rate / (float)alink_class_baud(r->lf.cls));
     deliver(r);
-    if (link_phase_active(&r->ph)) {
-        if (r->ph.started && r->ph.state == LINK_PHASE_ANCHORING && !r->ph.hold && !r->ph.resync &&
+    if (alink_phase_active(&r->ph)) {
+        if (r->ph.started && r->ph.state == ALINK_PHASE_ANCHORING && !r->ph.hold && !r->ph.resync &&
             !r->drop_rows && r->phase == PH_LOCKED)
             phase_verify(r);
-        if (r->ph.hold || r->ph.state == LINK_PHASE_ANCHORING) soft_mute(r);
+        if (r->ph.hold || r->ph.state == ALINK_PHASE_ANCHORING) soft_mute(r);
     }
-    // main.c: the LINK prefill handshake.
+    // main.c: the ALINK prefill handshake.
     bool locked = r->phase == PH_LOCKED && !r->ph.hold;
     if (r->loss_latch) {
         r->loss_latch = false;
         r->prefilling = false;
         r->preset_loading = true;       // prepare_pipeline_reset(): mute
     }
-    bool rate_ready = true;         // link_input_rate_ready()
+    bool rate_ready = true;         // alink_input_rate_ready()
     if (locked && r->preset_loading && !r->prefilling) {
         r->pull_in = false;
-        if (link_phase_active(&r->ph) && !(r->relocked && !r->meas.long_valid)) {
+        if (alink_phase_active(&r->ph) && !(r->relocked && !r->meas.long_valid)) {
             r->pull_in = !(r->meas.long_valid && r->last_ff != 0.0f && fabs(r->vcxo_ppm - r->last_ff) < 1.0);
             rate_ready = !r->pull_in;
         }
@@ -714,16 +714,16 @@ static void poll(rx_t *r) {
         drain_and_disable(r);
         r->preset_loading = false;
         r->prefilling = true;
-        r->fifo_tail = r->fifo_head;    // link_input_discard_queued()
-        link_phase_drain(&r->ph);       // link_input_on_drain()
+        r->fifo_tail = r->fifo_head;    // alink_input_discard_queued()
+        alink_phase_drain(&r->ph);       // alink_input_on_drain()
         r->drop_rows = 0;
         r->pull_in = false;
-        if (link_phase_active(&r->ph)) r->ph.state = LINK_PHASE_ANCHORING;
+        if (alink_phase_active(&r->ph)) r->ph.state = ALINK_PHASE_ANCHORING;
     }
-    uint32_t target = link_phase_prefill(&r->ph, r->lat.target, r->lat.cap, r->lat.span);
+    uint32_t target = alink_phase_prefill(&r->ph, r->lat.target, r->lat.cap, r->lat.span);
     if (r->prefilling && locked && ring_fill(r) >= target && anchor_ready(r)) {
         enable_outputs(r);
-        link_phase_started(&r->ph);     // link_input_on_enabled()
+        alink_phase_started(&r->ph);     // alink_input_on_enabled()
         if (trace && r->id == 0) {
             float since = 0;
             arrival_since(r, r->ph.first, &since);
@@ -752,19 +752,19 @@ static void rx_init(rx_t *r, const scenario_t *sc, int id) {
     r->sc = sc;
     r->id = id;
     sender_init(&r->snd, sc);
-    r->baud_s = (double)link_class_baud(sc->cls) * (1.0 + sc->sender_ppm * 1e-6);
+    r->baud_s = (double)alink_class_baud(sc->cls) * (1.0 + sc->sender_ppm * 1e-6);
     r->fs = rate_hz(sc->rate);
     r->lat = latency_for(r->fs);
     r->w0 = (uint64_t)ceil(sc->boot_s[id] * r->baud_s / 32.0);
     r->copied = r->w0;
-    link_fast_init(&r->lf, r->ring, LINK_RING_WORDS, sc->cls, 1, NULL, NULL, 0);
+    alink_fast_init(&r->lf, r->ring, ALINK_RING_WORDS, sc->cls, 1, NULL, NULL, 0);
     static const uint8_t ident[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
-    link_fast_set_slots(&r->lf, ident);
-    link_phase_init(&r->ph);
-    link_phase_limits(&r->ph, r->lat.target, r->lat.cap, r->lat.span);
+    alink_fast_set_slots(&r->lf, ident);
+    alink_phase_init(&r->ph);
+    alink_phase_limits(&r->ph, r->lat.target, r->lat.cap, r->lat.span);
     uint8_t p[8] = { sc->mode, 0, (uint8_t)sc->d_local, (uint8_t)(sc->d_local >> 8), 0, 0, 0, 0 };
-    if (link_phase_set(&r->ph, p) < 0) printf("  (phase write refused)\n");
-    link_apply_init(&r->aq);
+    if (alink_phase_set(&r->ph, p) < 0) printf(" (phase write refused)\n");
+    alink_apply_init(&r->aq);
     r->phase = PH_SEARCH;
     r->preset_loading = true;
     r->click_out = -1;
@@ -788,7 +788,7 @@ static double frame_playing(const rx_t *r) {
 // receiver's e uses, before its DMA word quantisation).
 static double frame_arriving(const rx_t *r) {
     double bits = r->t * r->baud_s;
-    double bpf = (double)link_class_baud(r->sc->cls) / (double)r->fs;
+    double bpf = (double)alink_class_baud(r->sc->cls) / (double)r->fs;
     if (r->snd.restarted && bits >= (double)r->snd.restart_bits)
         return (double)r->sc->restart_f0 + (bits - (double)r->snd.restart_bits - 10.0) / bpf;
     return (double)F0 + (bits - 10.0) / bpf;
@@ -823,7 +823,7 @@ static void run_rx(rx_t *r, probe_log_t *log) {
             r->t = tp;
             double fp = frame_playing(r);
             log->fplay[next_probe] = fp;
-            log->aud[next_probe] = audible(r) && link_phase_active(&r->ph) ? (r->ph.state == LINK_PHASE_LOCKED) : 0;
+            log->aud[next_probe] = audible(r) && alink_phase_active(&r->ph) ? (r->ph.state == ALINK_PHASE_LOCKED) : 0;
             if (sc->mode == 0) log->aud[next_probe] = audible(r) && !isnan(fp);
             if (!isnan(fp)) log->lat[next_probe] = frame_arriving(r) - fp;
             next_probe++;
@@ -852,11 +852,11 @@ static void run_rx(rx_t *r, probe_log_t *log) {
         if (sc->unit_ops_at_s > 0 && !unit_ops_done && r->id == 0 && r->t >= sc->unit_ops_at_s &&
             r->phase == PH_LOCKED && !r->ph.hold) {
             uint64_t f = r->pub_f;
-            link_apply_op_t vol = { f + 100u, LINK_OP_MASTER_VOLUME, 0, -600 };
+            alink_apply_op_t vol = { f + 100u, ALINK_OP_MASTER_VOLUME, 0, -600 };
             r->vol_target = f + 100u;
-            link_apply_op_t late = { f - 200u, LINK_OP_CLICK, 1, 0 };
-            link_apply_push(&r->aq, &vol);
-            link_apply_push(&r->aq, &late);
+            alink_apply_op_t late = { f - 200u, ALINK_OP_CLICK, 1, 0 };
+            alink_apply_push(&r->aq, &vol);
+            alink_apply_push(&r->aq, &late);
             r->unit_ops = 2;
             r->ev_applied = r->ev_late = r->ev_cancel = 0;
             unit_ops_done = true;
@@ -864,13 +864,13 @@ static void run_rx(rx_t *r, probe_log_t *log) {
         poll(r);
         t_prev = r->t;      // the anchor's spin may have moved the clock (outputs stopped meanwhile)
         if (unit_ops_done && r->unit_ops == 2 && r->aq.n == 0) {
-            link_apply_op_t m1 = { r->pub_f + 100000u, LINK_OP_MUTE, 0, 0 }, m2 = { r->pub_f + 100001u, LINK_OP_UNMUTE, 0, 0 };
-            link_apply_push(&r->aq, &m1);
-            link_apply_push(&r->aq, &m2);
-            link_apply_op_t op;
-            while (r->aq.n) {   // CANCEL_ALL (link_input_apply())
-                link_apply_pop(&r->aq, &op);
-                apply_report(r, op.op, LINK_APPLY_CANCELLED, op.frame);
+            alink_apply_op_t m1 = { r->pub_f + 100000u, ALINK_OP_MUTE, 0, 0 }, m2 = { r->pub_f + 100001u, ALINK_OP_UNMUTE, 0, 0 };
+            alink_apply_push(&r->aq, &m1);
+            alink_apply_push(&r->aq, &m2);
+            alink_apply_op_t op;
+            while (r->aq.n) {   // CANCEL_ALL (alink_input_apply())
+                alink_apply_pop(&r->aq, &op);
+                apply_report(r, op.op, ALINK_APPLY_CANCELLED, op.frame);
             }
             r->unit_ops = 3;
         }
@@ -893,10 +893,10 @@ static void stats(const double *x, unsigned n, double *mean, double *sd, double 
     *mx = m;
 }
 
-// LINK_PHASE_SIM_WAV=file: the last 10 s of both outputs as one stereo
+// ALINK_PHASE_SIM_WAV=file: the last 10 s of both outputs as one stereo
 // recording (A left, B right, 24-bit, 48 kHz on the interface's own clock):
-// each receiver's DAC plays a band-limited programme at the link frame it is
-// playing, so tools/link/skew_xcorr.py measures the model's skew the way the
+// each receiver's DAC plays a band-limited programme at the alink frame it is
+// playing, so tools/alink/skew_xcorr.py measures the model's skew the way the
 // bench measures the hardware's.
 static void write_wav(const scenario_t *sc, const probe_log_t *log) {
     FILE *f = fopen(wav_path, "wb");
@@ -949,10 +949,10 @@ static void run_scenario(const scenario_t *sc) {
                "underruns %u, VCXO %+.2f ppm, phase %s e %+.3f\n",
                'A' + i, r[i].anchors, r[i].reanchors, r[i].holdovers, r[i].resumes, r[i].corrections, r[i].drops,
                r[i].underruns,
-               r[i].vcxo_ppm, r[i].ph.state == LINK_PHASE_LOCKED ? "locked" : "not locked", r[i].ph.e);
+               r[i].vcxo_ppm, r[i].ph.state == ALINK_PHASE_LOCKED ? "locked" : "not locked", r[i].ph.e);
         free(r[i].snd.ring);
         if (trace) printf("    rx %c: e_s %+.4f integ %+.3f trim %+.3f last_cmd %+.3f hz %.4f\n", 'A' + i, r[i].ph.pi.e_s,
-                          r[i].ph.pi.integ, r[i].ph.pi.trim, r[i].last_cmd, link_meas_hz(&r[i].meas));
+                          r[i].ph.pi.integ, r[i].ph.pi.trim, r[i].last_cmd, alink_meas_hz(&r[i].meas));
     }
     // Skew: both audible and phase-locked at the same instant, the last 10 s.
     unsigned n = log[0].n, from = n > 10000 ? n - 10000 : 0;
@@ -1029,7 +1029,7 @@ static void run_scenario(const scenario_t *sc) {
         else
             CHECK(r[i].reanchors == 0 && r[i].holdovers == 1, "%s: holdover and resume without a re-anchor", sc->name);
         if (sc->hold_drift_ppm != 0)
-            CHECK(r[i].corrections >= 1 && r[i].corrections <= LINK_PHASE_MAX_CORRECTIONS,
+            CHECK(r[i].corrections >= 1 && r[i].corrections <= ALINK_PHASE_MAX_CORRECTIONS,
                   "%s: whole-frame corrections within the budget, each applied once (%u)", sc->name, r[i].corrections);
         CHECK(fabs(lat_after - lat_other) < 0.1, "%s: latency 9-10 s after the loss %.3f, the other unit %.3f",
               sc->name, lat_after, lat_other);
@@ -1085,13 +1085,13 @@ static void run_scenario(const scenario_t *sc) {
 int main(int argc, char **argv) {
     snd_tables_init(&T);
     const char *only = argc > 1 ? argv[1] : NULL;
-    trace = getenv("LINK_PHASE_SIM_TRACE") != NULL;
-    wav_path = getenv("LINK_PHASE_SIM_WAV");
-    const char *dump = getenv("LINK_PHASE_SIM_DUMP");
+    trace = getenv("ALINK_PHASE_SIM_TRACE") != NULL;
+    wav_path = getenv("ALINK_PHASE_SIM_WAV");
+    const char *dump = getenv("ALINK_PHASE_SIM_DUMP");
     if (dump) {
         char path[256];
         if (sscanf(dump, "%255[^:]:%lf:%lf", path, &dump_from, &dump_to) == 3) dump_f = fopen(path, "wb");
-        if (!dump_f) printf("LINK_PHASE_SIM_DUMP: cannot open %s\n", dump);
+        if (!dump_f) printf("ALINK_PHASE_SIM_DUMP: cannot open %s\n", dump);
     }
     const scenario_t sc[] = {
         { "same stream, same boot, same clocks", 1, 1, 8, 0, { 0, 0 }, { 0.0, 0.0 }, { 0, 0 }, { 0, 0 },
@@ -1128,6 +1128,6 @@ int main(int argc, char **argv) {
         run_scenario(&sc[i]);
     }
     if (dump_f) fclose(dump_f);
-    printf("\nlink_phase_sim: %d checks, %d failures\n", checks, failures);
+    printf("\nalink_phase_sim: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

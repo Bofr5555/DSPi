@@ -117,17 +117,17 @@
 #define NOTIFY_EVT_EXT_CLIP          0xE0
 #define NOTIFY_CLIP_MIN_INTERVAL_MS  250
 
-// Link state (extension_channel_spec.md 2.8.12): the link receiver's
-// EXT_LINK_STATUS.state changed, or it re-anchored.  Rate-limited to one per
-// 250 ms by link_input.c, which holds the latest transition until then.
+// Alink state (extension_channel_spec.md 2.8.12): the alink receiver's
+// EXT_ALINK_STATUS.state changed, or it re-anchored. Rate-limited to one per
+// 250 ms by alink_input.c, which holds the latest transition until then.
 // Packet (12 bytes): [ver=2, evt=0xE1, flags=0, seq, state, class, reason, 0,
-// F_low32_LE].  Announced by NOTIFY_FEAT_LINK_STATE (link builds only).
-#define NOTIFY_EVT_LINK_STATE        0xE1
+// F_low32_LE].  Announced by NOTIFY_FEAT_ALINK_STATE (alink builds only).
+#define NOTIFY_EVT_ALINK_STATE       0xE1
 
 // Apply result (extension_channel_spec.md 2.8.12, WP LK6): one per completed
 // apply-at-frame op (applied, late, cancelled, refused), not rate-limited.
 // Packet (12 bytes): [ver=2, evt=0xE2, flags=0, seq, op, result, 0, 0,
-// target_F_low32_LE].  Announced by NOTIFY_FEAT_APPLY_RESULT (link builds only).
+// target_F_low32_LE].  Announced by NOTIFY_FEAT_APPLY_RESULT (alink builds only).
 #define NOTIFY_EVT_APPLY_RESULT      0xE2
 
 // USB sync state (extension_channel_spec.md 2.9.5, WP USB1): EXT_ALINK_USB_STATUS
@@ -173,8 +173,8 @@ typedef enum {
 // one event per NOTIFY_CLIP_MIN_INTERVAL_MS.
 #define NOTIFY_FEAT_CLIP_EVENT       (1u << 1)
 
-// NOTIFY_EVT_LINK_STATE (0xE1) is sent on link lock, loss and re-anchor.
-#define NOTIFY_FEAT_LINK_STATE       (1u << 2)
+// NOTIFY_EVT_ALINK_STATE (0xE1) is sent on alink lock, loss and re-anchor.
+#define NOTIFY_FEAT_ALINK_STATE      (1u << 2)
 
 // NOTIFY_EVT_APPLY_RESULT (0xE2) is sent once per completed apply-at-frame op.
 #define NOTIFY_FEAT_APPLY_RESULT     (1u << 3)
@@ -182,17 +182,17 @@ typedef enum {
 // NOTIFY_EVT_ALINK_USB (0xE3) is sent on USB sync state changes (WP USB1).
 #define NOTIFY_FEAT_ALINK_USB         (1u << 4)
 
-#if defined(DSPI_LINK) && DSPI_LINK
-#define NOTIFY_FEATURES_LINK         (NOTIFY_FEAT_LINK_STATE | NOTIFY_FEAT_APPLY_RESULT)
+#if defined(DSPI_ALINK) && DSPI_ALINK
+#define NOTIFY_FEATURES_ALINK        (NOTIFY_FEAT_ALINK_STATE | NOTIFY_FEAT_APPLY_RESULT)
 #else
-#define NOTIFY_FEATURES_LINK         0u
+#define NOTIFY_FEATURES_ALINK        0u
 #endif
 #if defined(DSPI_ALINK_USB) && DSPI_ALINK_USB
 #define NOTIFY_FEATURES_ALINK_USB     (NOTIFY_FEAT_ALINK_USB | NOTIFY_FEAT_APPLY_RESULT)
 #else
 #define NOTIFY_FEATURES_ALINK_USB     0u
 #endif
-#define NOTIFY_FEATURES              (NOTIFY_FEAT_BULK_SOURCE | NOTIFY_FEAT_CLIP_EVENT | NOTIFY_FEATURES_LINK | \
+#define NOTIFY_FEATURES              (NOTIFY_FEAT_BULK_SOURCE | NOTIFY_FEAT_CLIP_EVENT | NOTIFY_FEATURES_ALINK | \
                                       NOTIFY_FEATURES_ALINK_USB)
 
 // ---------------------------------------------------------------------------
@@ -279,8 +279,8 @@ void notify_push_clip(uint32_t mask);
 // passed since the last one.  now_ms is milliseconds since boot.
 void notify_clip_service(uint32_t now_ms);
 
-// Link state event (NOTIFY_EVT_LINK_STATE); the caller rate-limits.
-void notify_push_link_state(uint8_t state, uint8_t cls, uint8_t reason, uint32_t frame_low);
+// Alink state event (NOTIFY_EVT_ALINK_STATE); the caller rate-limits.
+void notify_push_alink_state(uint8_t state, uint8_t cls, uint8_t reason, uint32_t frame_low);
 
 // Apply result event (NOTIFY_EVT_APPLY_RESULT); never rate-limited.
 void notify_push_apply_result(uint8_t op, uint8_t result, uint32_t frame_low);

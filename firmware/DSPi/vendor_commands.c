@@ -44,7 +44,7 @@
 #include "upmix.h"
 #include "adat_output.h"
 #include "adat_input.h"
-#include "link_input.h"
+#include "alink_input.h"
 #if DSPI_ALINK_USB
 #include "alink_usb.h"
 #endif
@@ -53,6 +53,18 @@
 #include "core_vreg.h"
 #include "identify.h"
 #include "reset_info.h"
+
+// The alink names changed (WP ALINK2: EXT_LINK_* -> EXT_ALINK_* ...); their
+// numbers are a wire contract and must not (extension_channel_spec.md 2.8, 2.9).
+_Static_assert(EXT_ALINK_INFO == 0x8000 && EXT_ALINK_STATUS == 0x8001 && EXT_ALINK_CONFIG == 0x8002 &&
+               EXT_ALINK_SLOTS == 0x8003 && EXT_ALINK_PHASE == 0x8004 && EXT_FRAME_COUNTER == 0x8005 &&
+               EXT_APPLY_AT_FRAME == 0x8006 && EXT_ALINK_CTRL_MSG == 0x8008 && EXT_ALINK_STATS_RESET == 0x8009 &&
+               EXT_ALINK_DIAG == 0x800A && EXT_ALINK_USB == 0x8010 && EXT_ALINK_USB_STATUS == 0x8011,
+               "alink extension ids are frozen");
+_Static_assert(NOTIFY_EVT_ALINK_STATE == 0xE1 && NOTIFY_EVT_APPLY_RESULT == 0xE2 && NOTIFY_EVT_ALINK_USB == 0xE3 &&
+               NOTIFY_FEAT_ALINK_STATE == (1u << 2) && NOTIFY_FEAT_ALINK_USB == (1u << 4),
+               "alink event codes and feature bits are frozen");
+_Static_assert(INPUT_SOURCE_ALINK == 7, "the alink input source is 7 on the wire");
 #include "usb_descriptors.h"
 #include "tusb.h"
 #include "pico/audio_spdif.h"
@@ -411,8 +423,8 @@ static bool pin_used_by_fixed_peripheral_except_mck(uint8_t pin, uint8_t exclude
     if (uart_ctrl_owns_pin(pin)) return true;                 // UART control (if live)
     if (i2c_ctrl_owns_pin(pin)) return true;                  // I2C control (if live)
     if (control_surfaces_owns_pin(pin)) return true;         // Control Surfaces (live bindings)
-#if DSPI_LINK
-    if (link_input_owns_pin(pin)) return true;                // link receiver RX / LOS (LINK source, enabled)
+#if DSPI_ALINK
+    if (alink_input_owns_pin(pin)) return true;                // alink receiver RX / LOS (ALINK source, enabled)
 #endif
     return false;
 }
@@ -580,21 +592,21 @@ static const uint16_t ext_ids[] = {
     EXT_IDENTIFY,
     EXT_RESET_INFO,
     EXT_FIRMWARE_FIXES,
-#if DSPI_LINK
-    EXT_LINK_INFO,
-    EXT_LINK_STATUS,
-    EXT_LINK_CONFIG,
-    EXT_LINK_SLOTS,
-    EXT_LINK_PHASE,
+#if DSPI_ALINK
+    EXT_ALINK_INFO,
+    EXT_ALINK_STATUS,
+    EXT_ALINK_CONFIG,
+    EXT_ALINK_SLOTS,
+    EXT_ALINK_PHASE,
 #endif
-#if DSPI_LINK || DSPI_ALINK_USB
+#if DSPI_ALINK || DSPI_ALINK_USB
     EXT_FRAME_COUNTER,
     EXT_APPLY_AT_FRAME,
 #endif
-#if DSPI_LINK
-    EXT_LINK_CTRL_MSG,
-    EXT_LINK_STATS_RESET,
-    EXT_LINK_DIAG,
+#if DSPI_ALINK
+    EXT_ALINK_CTRL_MSG,
+    EXT_ALINK_STATS_RESET,
+    EXT_ALINK_DIAG,
 #endif
 #if DSPI_ALINK_USB
     EXT_ALINK_USB,
@@ -608,14 +620,14 @@ static uint16_t ext_set_len(uint16_t id) {
         case EXT_CROSSFEED_PAIR_MAP: return CROSSFEED_MAP_PAIRS;   // uint8[4]
         case EXT_CORE_VREG:          return 2;                     // {op, value}
         case EXT_IDENTIFY:           return sizeof(IdentifyRequest);
-#if DSPI_LINK
-        case EXT_LINK_CONFIG:        return LINK_CFG_LEN;
-        case EXT_LINK_SLOTS:         return LINK_SLOTS_LEN;
-        case EXT_LINK_PHASE:         return LINK_PHASE_LEN;
-        case EXT_LINK_STATS_RESET:   return 1;
+#if DSPI_ALINK
+        case EXT_ALINK_CONFIG:        return ALINK_CFG_LEN;
+        case EXT_ALINK_SLOTS:         return ALINK_SLOTS_LEN;
+        case EXT_ALINK_PHASE:         return ALINK_PHASE_LEN;
+        case EXT_ALINK_STATS_RESET:  return 1;
 #endif
-#if DSPI_LINK || DSPI_ALINK_USB
-        case EXT_APPLY_AT_FRAME:     return LINK_APPLY_LEN;
+#if DSPI_ALINK || DSPI_ALINK_USB
+        case EXT_APPLY_AT_FRAME:     return ALINK_APPLY_LEN;
 #endif
 #if DSPI_ALINK_USB
         case EXT_ALINK_USB:           return ALINK_USB_CFG_LEN;
@@ -664,37 +676,37 @@ static bool ext_handle_set(uint16_t id, const uint8_t *p, uint16_t len) {
             // generator; refused (STALL) for a bad tone output or while the
             // generator runs (identify.h).
             return identify_request(p);
-#if DSPI_LINK
-        case EXT_LINK_CONFIG: {
+#if DSPI_ALINK
+        case EXT_ALINK_CONFIG: {
             // 2.8.3: a pin the live configuration already uses for something
-            // else is refused; the link's own current pins are not "in use"
-            // against themselves (link_input_owns_pin is consulted only for
+            // else is refused; the alink's own current pins are not "in use"
+            // against themselves (alink_input_owns_pin is consulted only for
             // other functions, inside is_pin_in_use).
-            const uint8_t pins[2] = { p[LINK_CFG_RX_PIN] == 0xFF ? LINK_RX_PIN_DEFAULT : p[LINK_CFG_RX_PIN],
-                                      p[LINK_CFG_LOS_PIN] };
+            const uint8_t pins[2] = { p[ALINK_CFG_RX_PIN] == 0xFF ? ALINK_RX_PIN_DEFAULT : p[ALINK_CFG_RX_PIN],
+                                      p[ALINK_CFG_LOS_PIN] };
             for (int i = 0; i < 2; i++) {
                 if (pins[i] == 0xFF) continue;
-                if (link_input_owns_pin(pins[i])) continue;
+                if (alink_input_owns_pin(pins[i])) continue;
                 if (is_pin_in_use(pins[i], 0xFF) || i2s_clock_pin_claimed(pins[i])) return false;
             }
-            return link_input_set_config(p);
+            return alink_input_set_config(p);
         }
-        case EXT_LINK_SLOTS:
-            return link_input_set_slots(p);
-        case EXT_LINK_PHASE:
-            return link_input_set_phase(p);
-        case EXT_LINK_STATS_RESET:
-            return link_input_stats_reset(p[0]);
+        case EXT_ALINK_SLOTS:
+            return alink_input_set_slots(p);
+        case EXT_ALINK_PHASE:
+            return alink_input_set_phase(p);
+        case EXT_ALINK_STATS_RESET:
+            return alink_input_stats_reset(p[0]);
 #endif
-#if DSPI_LINK || DSPI_ALINK_USB
+#if DSPI_ALINK || DSPI_ALINK_USB
         case EXT_APPLY_AT_FRAME:
-            // Byte 12 (reserved on the link) selects the time base: 0 the
-            // link frame F, 1 the USB sample index S, 2 a USB bus frame (2.9.6).
+            // Byte 12 (reserved on the alink) selects the time base: 0 the
+            // alink frame F, 1 the USB sample index S, 2 a USB bus frame (2.9.6).
 #if DSPI_ALINK_USB
             if (p[12] != 0) return alink_usb_fw_apply(p);
 #endif
-#if DSPI_LINK
-            return link_input_apply(p);
+#if DSPI_ALINK
+            return alink_input_apply(p);
 #else
             return false;
 #endif
@@ -752,19 +764,19 @@ static bool ext_handle_get(uint16_t id, uint16_t wLength, uint8_t *resp) {
             n = sizeof(st);
             break;
         }
-#if DSPI_LINK
-        case EXT_LINK_INFO:     link_input_get_info(resp);     n = LINK_INFO_LEN;     break;
-        case EXT_LINK_STATUS:   link_input_get_status(resp);   n = LINK_STATUS_LEN;   break;
-        case EXT_LINK_CONFIG:   memcpy(resp, link_config, LINK_CFG_LEN);  n = LINK_CFG_LEN;   break;
-        case EXT_LINK_SLOTS:    memcpy(resp, link_slots, LINK_SLOTS_LEN); n = LINK_SLOTS_LEN; break;
-        case EXT_LINK_PHASE:    link_input_get_phase(resp);    n = LINK_PHASE_LEN;    break;
-        case EXT_LINK_CTRL_MSG: link_input_get_ctrl_msg(resp); n = LINK_CTRL_MSG_LEN; break;
-        case EXT_LINK_DIAG:     link_input_get_diag(resp);     n = LINK_DIAG_LEN;     break;
+#if DSPI_ALINK
+        case EXT_ALINK_INFO:     alink_input_get_info(resp);     n = ALINK_INFO_LEN;     break;
+        case EXT_ALINK_STATUS:   alink_input_get_status(resp);   n = ALINK_STATUS_LEN;   break;
+        case EXT_ALINK_CONFIG:  memcpy(resp, alink_config, ALINK_CFG_LEN);  n = ALINK_CFG_LEN;   break;
+        case EXT_ALINK_SLOTS:   memcpy(resp, alink_slots, ALINK_SLOTS_LEN); n = ALINK_SLOTS_LEN; break;
+        case EXT_ALINK_PHASE:    alink_input_get_phase(resp);    n = ALINK_PHASE_LEN;    break;
+        case EXT_ALINK_CTRL_MSG: alink_input_get_ctrl_msg(resp); n = ALINK_CTRL_MSG_LEN; break;
+        case EXT_ALINK_DIAG:     alink_input_get_diag(resp);     n = ALINK_DIAG_LEN;     break;
 #endif
-#if DSPI_LINK || DSPI_ALINK_USB
+#if DSPI_ALINK || DSPI_ALINK_USB
         case EXT_FRAME_COUNTER:
-            // 20 bytes since WP USB1: the link layout (16) plus time_base
-            // (byte 16: 0 link F, 1 USB S, 0xFF none), reserved, bus frame.
+            // 20 bytes since WP USB1: the alink layout (16) plus time_base
+            // (byte 16: 0 alink F, 1 USB S, 0xFF none), reserved, bus frame.
             memset(resp, 0, 20);
 #if DSPI_ALINK_USB
             if (alink_usb_fw_time_base_active()) {
@@ -772,8 +784,8 @@ static bool ext_handle_get(uint16_t id, uint16_t wLength, uint8_t *resp) {
             } else
 #endif
             {
-#if DSPI_LINK
-                link_input_get_frame_counter(resp);
+#if DSPI_ALINK
+                alink_input_get_frame_counter(resp);
 #else
                 resp[16] = 0xFF;
 #endif
@@ -785,12 +797,12 @@ static bool ext_handle_get(uint16_t id, uint16_t wLength, uint8_t *resp) {
             if (alink_usb_fw_time_base_active()) alink_usb_fw_get_apply(resp);
             else
 #endif
-#if DSPI_LINK
-                link_input_get_apply(resp);
+#if DSPI_ALINK
+                alink_input_get_apply(resp);
 #else
-                memset(resp, 0, LINK_APPLY_LEN);
+                memset(resp, 0, ALINK_APPLY_LEN);
 #endif
-            n = LINK_APPLY_LEN;
+            n = ALINK_APPLY_LEN;
             break;
 #endif
 #if DSPI_ALINK_USB

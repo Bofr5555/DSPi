@@ -1,13 +1,13 @@
 /*
- * bench_cmd.h - link bench: console parsing and report layouts
+ * bench_cmd.h - alink bench: console parsing and report layouts
  *
  * The bench image is driven over its USB serial console, one command per
- * line (Documentation/Bench/link_gpio_bench.md lists them, and
- * tools/link/bench.py speaks them).  Replies are single lines starting with
+ * line (Documentation/Bench/alink_gpio_bench.md lists them, and
+ * tools/alink/bench.py speaks them). Replies are single lines starting with
  * a tag (OK, ERR, ID, STAT, DIAG, XSTATUS, SCAN, EVT) followed by key=value
  * tokens, so a script can parse them without knowing their order.
  *
- * The 52-byte EXT_LINK_STATUS and 64-byte EXT_LINK_DIAG layouts of
+ * The 52-byte EXT_ALINK_STATUS and 64-byte EXT_ALINK_DIAG layouts of
  * extension_channel_spec.md 2.8.2 / 2.8.11 are packed here too, so bench
  * tools written for the DSPi receiver (SW4) can read the bench image's
  * XSTATUS and DIAG replies unchanged.
@@ -23,7 +23,7 @@
 #include <stdint.h>
 
 #include "bench_trim.h"
-#include "link_decoder.h"
+#include "alink_decoder.h"
 
 #define BENCH_MAX_ARGS      16
 #define BENCH_MAX_TX_PINS   8
@@ -66,7 +66,7 @@ bool bench_parse_tx(const bench_args_t *a, int first, const char *pins_key, benc
                     const char **err);
 
 // ---------------------------------------------------------------------------
-// EXT_LINK_STATUS (52 B) and EXT_LINK_DIAG (64 B) layouts
+// EXT_ALINK_STATUS (52 B) and EXT_ALINK_DIAG (64 B) layouts
 // ---------------------------------------------------------------------------
 
 #define BENCH_STATUS_LEN    52u
@@ -76,14 +76,14 @@ typedef struct {
     uint8_t  state;         // 0 off, 1 searching, 2 locked
     uint8_t  cls, rate, channels, hops, sender, sf_flags;
     uint64_t frame;
-    link_rx_stats_t st;
+    alink_rx_stats_t st;
 } bench_status_t;
 
 typedef struct {
     uint8_t  comma_offset;
     uint32_t ring_wr_bytes, parser_rd_bytes, tx_words, rx_xfers;
     const bench_scan_t *scan;   // NULL: no scan
-    link_rx_stats_t st;
+    alink_rx_stats_t st;
 } bench_diag_t;
 
 void bench_pack_status(uint8_t out[BENCH_STATUS_LEN], const bench_status_t *s);

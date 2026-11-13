@@ -50,7 +50,7 @@ class SkewXcorr(unittest.TestCase):
             self.assertGreaterEqual(len(rows), 2)
             for _t, lag, _p in rows:
                 self.assertAlmostEqual(lag, 0.6, delta=0.05)
-            # 0.6 sample is under one link sample: pass; with the interface's
+            # 0.6 sample is under one alink sample: pass; with the interface's
             # 0.25 subtracted the mean is 0.35.
             self.assertEqual(skew_xcorr.main([rec, "--every", "1", "--span", "0.25", "--max-lag", "8"]), 0)
             self.assertEqual(skew_xcorr.main([rec, "--every", "1", "--span", "0.25", "--max-lag", "8",

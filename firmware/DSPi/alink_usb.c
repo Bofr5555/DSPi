@@ -4,7 +4,7 @@
  *
  * RAM: the two USB IRQ entry points (alink_usb_isr_sof, alink_usb_isr_out_done)
  * and the time base.  Everything else (one call per packet in phase mode, the
- * service once per pass, the control plane) runs from flash, like the link's
+ * service once per pass, the control plane) runs from flash, like the alink's
  * phase glue; check_ram_placement.py whitelists alink_usb_fw_deliver as a cold
  * callee of usb_audio_drain_ring().
  */
@@ -35,7 +35,7 @@
 alink_usb_t alink_usb;
 alink_usb_tb_t alink_usb_tb;                // .bss; stamp set to NONE by alink_usb_fw_init()
 volatile bool alink_usb_fb_nominal;
-const link_apply_limits_t alink_usb_apply_limits = { PRESET_SLOTS, NUM_OUTPUT_CHANNELS, MAX_DELAY_SAMPLES };
+const alink_apply_limits_t alink_usb_apply_limits = { PRESET_SLOTS, NUM_OUTPUT_CHANNELS, MAX_DELAY_SAMPLES };
 
 #if defined(DSPI_ALINK_USB_GPIO)
 // Bench builds only: the sync GPIO is high for one frame at every SOF whose
@@ -165,49 +165,49 @@ void alink_usb_port_actuate(float hz, float trim, bool ff_trim) {
 void alink_usb_port_park(void) { input_servo_reset(); }
 float alink_usb_port_vcxo_ppm(void) { return soft_vcxo_current_ppm(); }
 
-uint8_t alink_usb_port_apply(const link_apply_op_t *op) {
+uint8_t alink_usb_port_apply(const alink_apply_op_t *op) {
     switch (op->op) {
-    case LINK_OP_MUTE:
-    case LINK_OP_UNMUTE: {
-        user_mute = op->op == LINK_OP_MUTE;
+    case ALINK_OP_MUTE:
+    case ALINK_OP_UNMUTE: {
+        user_mute = op->op == ALINK_OP_MUTE;
         uint8_t v = user_mute ? 1 : 0;
         notify_param_write(offsetof(WireBulkParams, user_volume.user_mute), sizeof(uint8_t), &v);
-        return LINK_APPLY_APPLIED;
+        return ALINK_APPLY_APPLIED;
     }
-    case LINK_OP_PRESET_LOAD:
+    case ALINK_OP_PRESET_LOAD:
         pending_preset_load_slot = op->arg;
         __dmb();
         preset_load_pending = true;
-        return LINK_APPLY_APPLIED;
-    case LINK_OP_MASTER_VOLUME:
+        return ALINK_APPLY_APPLIED;
+    case ALINK_OP_MASTER_VOLUME:
         update_master_volume((float)op->value * 0.01f);
-        return LINK_APPLY_APPLIED;
-    case LINK_OP_OUT_DELAY: {
+        return ALINK_APPLY_APPLIED;
+    case ALINK_OP_OUT_DELAY: {
         float fs = (float)(audio_state.freq ? audio_state.freq : 48000u);
         float ms = ((float)op->value + 0.5f) * 1000.0f / fs;
         channel_delays_ms[CH_OUT_1 + op->arg] = ms;
         dsp_update_delay_samples(fs);
         notify_param_write((uint16_t)(offsetof(WireBulkParams, delays.delay_ms) +
                                       (CH_OUT_1 + op->arg) * sizeof(float)), sizeof(float), &ms);
-        return LINK_APPLY_APPLIED;
+        return ALINK_APPLY_APPLIED;
     }
-    case LINK_OP_CLICK:
+    case ALINK_OP_CLICK:
 #if PICO_RP2350
-        // -20 dBFS, never on the PDM sub or a muted unit (as the link, 2.8.7).
-        if (op->arg >= NUM_SPDIF_INSTANCES * 2 || user_mute || audio_state.mute) return LINK_APPLY_REFUSED;
+        // -20 dBFS, never on the PDM sub or a muted unit (as the alink, 2.8.7).
+        if (op->arg >= NUM_SPDIF_INSTANCES * 2 || user_mute || audio_state.mute) return ALINK_APPLY_REFUSED;
         pipeline_click_output = (int8_t)op->arg;
-        return LINK_APPLY_APPLIED;
+        return ALINK_APPLY_APPLIED;
 #else
-        return LINK_APPLY_REFUSED;          // the RP2040's fixed-point pipeline has no click injection
+        return ALINK_APPLY_REFUSED;         // the RP2040's fixed-point pipeline has no click injection
 #endif
-    case LINK_OP_SYNC_PULSE:
+    case ALINK_OP_SYNC_PULSE:
 #if defined(DSPI_ALINK_USB_GPIO)
-        return LINK_APPLY_APPLIED;          // the ISR pulsed the GPIO at the op's SOF
+        return ALINK_APPLY_APPLIED;         // the ISR pulsed the GPIO at the op's SOF
 #else
-        return LINK_APPLY_REFUSED;
+        return ALINK_APPLY_REFUSED;
 #endif
     default:
-        return LINK_APPLY_REFUSED;
+        return ALINK_APPLY_REFUSED;
     }
 }
 
@@ -216,7 +216,7 @@ void alink_usb_port_apply_result(uint8_t op, uint8_t result, uint32_t frame) {
 }
 
 void alink_usb_port_event(uint8_t state, uint8_t reason, uint32_t frame) {
-    uint8_t ps = alink_usb.started || alink_usb.prefilling ? alink_usb.ph.state : LINK_PHASE_FREE;
+    uint8_t ps = alink_usb.started || alink_usb.prefilling ? alink_usb.ph.state : ALINK_PHASE_FREE;
     notify_push_alink_usb(state, ps, reason, frame);
 }
 
@@ -231,6 +231,8 @@ bool alink_usb_port_pulse(uint32_t frame) {
     return false;
 #endif
 }
+
+bool alink_usb_port_stream_active(void) { return usb_audio_stream_active(); }
 
 void alink_usb_port_ring_target(void) {
     // Only for the USB source: a stop on a source switch leaves the target to
@@ -337,13 +339,13 @@ void alink_usb_fw_get_frame_counter(uint8_t o[20]) {
     o[19] = (uint8_t)(bus >> 8);
 }
 
-bool alink_usb_fw_apply(const uint8_t p[LINK_APPLY_LEN]) {
-    if (active_input_source != INPUT_SOURCE_USB && p[8] != LINK_APPLY_CANCEL_ALL) return false;
+bool alink_usb_fw_apply(const uint8_t p[ALINK_APPLY_LEN]) {
+    if (active_input_source != INPUT_SOURCE_USB && p[8] != ALINK_APPLY_CANCEL_ALL) return false;
     return alink_usb_apply(&alink_usb, p);
 }
 
-void alink_usb_fw_get_apply(uint8_t o[LINK_APPLY_LEN]) {
-    link_apply_in(&alink_usb.aq, o);
+void alink_usb_fw_get_apply(uint8_t o[ALINK_APPLY_LEN]) {
+    alink_apply_in(&alink_usb.aq, o);
 }
 
 void alink_usb_fw_store(uint8_t s[ALINK_USB_STORE_LEN]) { alink_usb_store(&alink_usb, s); }

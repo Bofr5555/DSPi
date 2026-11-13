@@ -1,4 +1,4 @@
-; link_rx_20.pio; DSPi audio link NRZ receiver, class L1, 15.36 MBd (SYS2 2.6)
+; alink_rx_20.pio; DSPi audio link NRZ receiver, class L1, 15.36 MBd (SYS2 2.6)
 ;
 ; 20 sys cycles per line bit at clock divider 1.0 (307.2 MHz). Emits exactly
 ; one bit per line bit: the LEVEL the program believes the line has (a
@@ -21,7 +21,7 @@
 ; Rise and fall are detected with equal latency: a rise takes `jmp pin` +
 ; hi_entry, a fall takes the not-taken `jmp pin` + the exit jump, both
 ; 2 instruction slots, both with ENTRY_DELAY, so the window is symmetric.
-; A bench trim (tools/link_rx_test, "case ... trim") moves delay between hi_entry and
+; A bench trim (tools/alink_rx_test, "case ... trim") moves delay between hi_entry and
 ; the three fall exits to centre the window on a transceiver's measured
 ; pulse-width distortion; the loader may patch those delay fields the same
 ; way (public labels hi_entry and lo_emit locate them).
@@ -37,10 +37,10 @@
 ; A dark or stuck line emits a constant level every 20 cycles: the parser
 ; sees no commas and reports loss, as with the ADAT decoder.
 ;
-; tools/link_rx_test models this program cycle by cycle against the TX
+; tools/alink_rx_test models this program cycle by cycle against the TX
 ; program, clock offset, pulse-width distortion and jitter.
 
-.program link_rx_20
+.program alink_rx_20
 .define ENTRY_DELAY 9
 
 .wrap_target

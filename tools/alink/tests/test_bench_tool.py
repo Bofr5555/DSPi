@@ -1,10 +1,10 @@
-"""Tests for tools/link/bench.py (WP LK3) against simulated bench boards.
+"""Tests for tools/alink/bench.py (WP LK3) against simulated bench boards.
 
-The simulated boards speak the link bench console protocol
-(firmware/link_bench/link_bench.c) on a virtual clock: a healthy link
+The simulated boards speak the alink bench console protocol
+(firmware/alink_bench/alink_bench.c) on a virtual clock: a healthy alink
 locks, counts bits at the line rate and answers each TX impairment the way
 the firmware's checker and reference receiver do (the same expectations
-firmware/link_bench/tests/test_bench_logic.c proves on the real code).
+firmware/alink_bench/tests/test_bench_logic.c proves on the real code).
 Faulty boards (bit errors, an off-centre scan, a missing sync, a stalling
 TX) must turn the summary into FAIL.
 """
@@ -183,7 +183,7 @@ class FakeBoard:
         cmd = a[0]
         say = self.out.append
         if cmd == "id":
-            say(f"ID fw=link_bench ver=test chip={self.chip} clock=307200000 serial={self.name} max_links=7 "
+            say(f"ID fw=alink_bench ver=test chip={self.chip} clock=307200000 serial={self.name} max_alinks=7 "
                 "classes=L1,L2,L3")
         elif cmd == "stat":
             say(self.stat())
@@ -376,7 +376,7 @@ class SerialTransportTest(unittest.TestCase):
         try:
             rc = bench.main(["id", path], out=out.append)
             self.assertEqual(rc, 0)
-            self.assertIn("fw=link_bench", out[0])
+            self.assertIn("fw=alink_bench", out[0])
             port = bench.SerialPort(path)
             b = bench.Bench(port)
             self.assertEqual(b.stat()["role"], "idle")

@@ -1,5 +1,5 @@
 /*
- * sender_usb.c - DSPi link sender (WP LK4): the USB sound card
+ * sender_usb.c - DSPi alink sender (WP LK4): the USB sound card
  *
  * A slim copy of DSPi's UAC1 class driver (usb_audio.c), with DSPi's
  * descriptors (usb_descriptors.c built with DSPI_ROLE_SENDER):
@@ -11,9 +11,9 @@
  *   alt 8       4 ch 16-bit 96 kHz           (sender only)
  *
  * Packets become 24-bit frames in the sample FIFO (sender.h), USB channel i
- * to link slot i, with the host's volume and mute applied.  The feedback
+ * to alink slot i, with the host's volume and mute applied. The feedback
  * endpoint uses DSPi's controller (usb_feedback_controller.c) unchanged
- * except for its source: the "output words consumed" are the link frames
+ * except for its source: the "output words consumed" are the alink frames
  * on the wire (rate_shift 14: one word per sample), and the fill is the
  * sample FIFO's.  The sender's crystal is therefore the master clock.
  */
@@ -73,7 +73,7 @@ static void set_stream_rate(uint32_t rate) {
     if (rate != snd.usb_rate) {
         snd.usb_rate = rate;
         __dmb();
-        snd.usb_rate_follow = true;     // the main loop schedules RATE on the links
+        snd.usb_rate_follow = true;     // the main loop schedules RATE on the alinks
     }
 }
 
@@ -367,7 +367,7 @@ static bool drv_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, u
 }
 
 // The feedback servo.  It runs only while the encoder plays USB samples:
-// then the samples consumed per USB frame are the link frames sent, exactly
+// then the samples consumed per USB frame are the alink frames sent, exactly
 // one per frame; otherwise the host is told the nominal rate.
 static void drv_sof(uint8_t rhport, uint32_t frame_count) {
     (void)rhport;

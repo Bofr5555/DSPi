@@ -2,7 +2,7 @@
  * alink_usb_core.h - USB-direct sync (WP USB1): SOF-locked clock, USB-frame
  * time base, phase lock and apply-at-frame on the USB time base.
  *
- * Portable C11, no SDK, like link/link_phase.c: the firmware glue
+ * Portable C11, no SDK, like alink/alink_phase.c: the firmware glue
  * (alink_usb.c) and the host simulation (tools/alink_usb_sim) run the same
  * code.  The firmware supplies the alink_usb_port_*() functions at the end of
  * this header; the simulation supplies models.  Specification:
@@ -17,10 +17,10 @@
  * that booted at different times count N from different origins, but always
  * by multiples of 2048, so equal S means equal bus time on every unit.
  *
- * The phase lock is link_phase.c's (WP LK6), with S in place of the link's
+ * The phase lock is alink_phase.c's (WP LK6), with S in place of the alink's
  * frame F: e = F_arr - (next_w - fill) - D, anchor, verify, whole-sample
  * corrections, PI servo on the soft VCXO.  The rate feed-forward is the host's
- * SOF rate measured against the unit's crystal.  Unlike the link, the time
+ * SOF rate measured against the unit's crystal.  Unlike the alink, the time
  * base never goes away while the bus runs (SOF continues when the host stops
  * streaming), so once anchored the unit keeps its timeline on silence between
  * streams and places every new stream's packets by S: constant latency
@@ -37,7 +37,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "link/link_phase.h"
+#include "alink/alink_phase.h"
 
 // ---------------------------------------------------------------------------
 // Constants (extension_channel_spec.md 2.9)
@@ -218,6 +218,10 @@ typedef struct {
     uint8_t  state, reason;
     uint8_t  ev_state, ev_reason;           // last event sent
     bool     ev_pending;
+    // The latest event change was a GAP (count_gap): what was pending before
+    // it, restored when a stream stop takes that GAP back (review usb1 N1).
+    bool     ev_gap_last, ev_gap_pending0;
+    uint8_t  ev_gap_reason0;
     uint32_t ev_last_ms;
     bool     ev_once;
     uint32_t fs, spf;                        // rate the timeline runs at
@@ -228,8 +232,8 @@ typedef struct {
     bool     ticked;                         // the servo has actuated at least once
     bool     rate_locked;                    // the VCXO reached the feed-forward (latched until a reset)
     float    ff_ppm;                         // last feed-forward commanded
-    link_phase_t ph;
-    link_apply_q_t aq;
+    alink_phase_t ph;
+    alink_apply_q_t aq;
     bool     prefilling;                     // outputs drained, silence prefill (main.c)
     bool     started;                        // the outputs play our timeline
     bool     muted_gap;                      // a gap muted the stream; fade in on the next packet
@@ -287,7 +291,7 @@ void alink_usb_service(alink_usb_t *us, uint32_t now_ms);
 // The input source left USB, or mode 0: back to stock (VCXO parked, ops cancelled).
 void alink_usb_stop(alink_usb_t *us, uint8_t reason);
 
-// The main loop's anchor handshake (main.c, like the link's): wanted -> mute
+// The main loop's anchor handshake (main.c, like the alink's): wanted -> mute
 // and drain -> on_drain -> prefill (service) -> anchor_wait() <= 0 ->
 // start the outputs in sync -> on_enabled.
 bool alink_usb_anchor_wanted(const alink_usb_t *us);
@@ -307,7 +311,7 @@ void alink_usb_stream(alink_usb_t *us, bool on);
 bool alink_usb_sample_now(alink_usb_t *us, uint64_t *s, uint16_t *bus_frame);
 
 // EXT_APPLY_AT_FRAME OUT with time_base 1 (S) or 2 (bus frame): false = refused.
-bool alink_usb_apply(alink_usb_t *us, const uint8_t p[LINK_APPLY_LEN]);
+bool alink_usb_apply(alink_usb_t *us, const uint8_t p[ALINK_APPLY_LEN]);
 void alink_usb_cancel_all(alink_usb_t *us);
 // The 0xE2 frame field of a USB op: bus frame (bits 0-10) and the sample in
 // it (bits 16-23).
@@ -321,7 +325,7 @@ void alink_usb_get_status(alink_usb_t *us, uint8_t o[ALINK_USB_STATUS_LEN]);
 // ---------------------------------------------------------------------------
 
 extern alink_usb_tb_t alink_usb_tb;
-extern const link_apply_limits_t alink_usb_apply_limits;     // presets, outputs, delay
+extern const alink_apply_limits_t alink_usb_apply_limits;    // presets, outputs, delay
 uint32_t alink_usb_port_now48(void);
 uint32_t alink_usb_port_now_us(void);
 uint32_t alink_usb_port_irq_save(void);
@@ -340,11 +344,12 @@ void     alink_usb_port_write_silence(uint32_t k);
 void     alink_usb_port_actuate(float hz, float trim, bool ff_trim);
 void     alink_usb_port_park(void);                     // input_servo_reset()
 float    alink_usb_port_vcxo_ppm(void);
-uint8_t  alink_usb_port_apply(const link_apply_op_t *op);
+uint8_t  alink_usb_port_apply(const alink_apply_op_t *op);
 void     alink_usb_port_apply_result(uint8_t op, uint8_t result, uint32_t frame);
 void     alink_usb_port_event(uint8_t state, uint8_t reason, uint32_t frame);
 void     alink_usb_port_soft_mute(uint32_t samples);
 bool     alink_usb_port_pulse(uint32_t frame);          // SYNC_PULSE: arm the GPIO at that SOF; false = no GPIO
 void     alink_usb_port_ring_target(void);              // re-apply the latency option (prefill target)
+bool     alink_usb_port_stream_active(void);            // usb_audio_stream_active(): packets within the gap threshold
 
 #endif // ALINK_USB_CORE_H

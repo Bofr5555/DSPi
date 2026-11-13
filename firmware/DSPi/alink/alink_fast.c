@@ -1,10 +1,10 @@
 /*
- * link_fast.c - DSPi link protocol v1: production receiver (WP LK5)
+ * alink_fast.c - DSPi alink protocol v1: production receiver (WP LK5)
  *
- * See link_fast.h.  The state machine is link_decoder.c's, step for step
+ * See alink_fast.h. The state machine is alink_decoder.c's, step for step
  * (spec section 8); only the way bits are read and symbols decoded differs.
  * Every step runs only once every bit it reads is below the writer's
- * position, so the output does not depend on how often link_fast_run() is
+ * position, so the output does not depend on how often alink_fast_run() is
  * called, exactly as the reference does not depend on chunking.
  *
  * Positions are absolute bit numbers modulo 2^32 and are compared through
@@ -12,41 +12,41 @@
  * word (pos / 32) & ring_mask is consistent across the 2^32 wrap.
  */
 
-#include "link_fast.h"
+#include "alink_fast.h"
 
 #include <stdatomic.h>
 #include <stddef.h>
 #include <string.h>
 
-#define BAD     0x80000000u      // the bit of LINK_FAST_DEC_BAD tested
+#define BAD     0x80000000u      // the bit of ALINK_FAST_DEC_BAD tested
 
 // Cold paths (search, alignment, loss, error counting) stay out of the hot
 // functions and out of RAM.
 #define COLD    __attribute__((noinline))
 
-// On the RP2350 build (LINK_FAST_M33) the steady state at 48/96 kHz with one
+// On the RP2350 build (ALINK_FAST_M33) the steady state at 48/96 kHz with one
 // full bank runs in assembly; the C clean-frame loops (multi-bank, partial
 // bank, 44.1 kHz) and the partial-bank decoder then stay in flash, which keeps
 // the RAM-resident set near 5 KB.  Elsewhere they are the fast path.
-#if LINK_FAST_M33
+#if ALINK_FAST_M33
 #define CPATH   COLD
 #else
-#define CPATH   LINK_FAST_HOT __attribute__((noinline))
+#define CPATH   ALINK_FAST_HOT __attribute__((noinline))
 #endif
 
 // x <= avail: every bit below x has been written.
-static inline bool have(const link_fast_t *f, uint32_t x) {
+static inline bool have(const alink_fast_t *f, uint32_t x) {
     return (int32_t)(f->avail - x) >= 0;
 }
 
-// The ring without the volatile qualifier: link_fast_run() reads only words
+// The ring without the volatile qualifier: alink_fast_run() reads only words
 // the writer has finished, after a compiler fence.
-static inline const uint32_t *ring_words(const link_fast_t *f) {
+static inline const uint32_t *ring_words(const alink_fast_t *f) {
     return (const uint32_t *)(uintptr_t)f->ring;
 }
 
 // The 32 bits starting at absolute bit pos.
-static inline uint32_t bits32(const link_fast_t *f, uint32_t pos) {
+static inline uint32_t bits32(const alink_fast_t *f, uint32_t pos) {
     const uint32_t *r = ring_words(f);
     uint32_t wi = pos >> 5, o = pos & 31u;
     uint32_t w0 = r[wi & f->ring_mask];
@@ -55,20 +55,20 @@ static inline uint32_t bits32(const link_fast_t *f, uint32_t pos) {
 }
 
 // The symbol occupying bits [end - 10, end).
-static inline uint32_t sym_end(const link_fast_t *f, uint32_t end) {
+static inline uint32_t sym_end(const alink_fast_t *f, uint32_t end) {
     return bits32(f, end - 10u) >> 22;
 }
 
 static inline bool is_comma(uint32_t sym) {
-    return sym == LINK_SYM_K28_5_RDN || sym == LINK_SYM_K28_5_RDP;
+    return sym == ALINK_SYM_K28_5_RDN || sym == ALINK_SYM_K28_5_RDP;
 }
 
-static LINK_FAST_HOT void lf_emit(link_fast_t *f, link_rx_event_t *ev) {
+static ALINK_FAST_HOT void lf_emit(alink_fast_t *f, alink_rx_event_t *ev) {
     if (f->cb) f->cb(f->ctx, ev);
 }
 
-static COLD void lf_emit_simple(link_fast_t *f, link_rx_event_type_t type) {
-    link_rx_event_t ev;
+static COLD void lf_emit_simple(alink_fast_t *f, alink_rx_event_type_t type) {
+    alink_rx_event_t ev;
     memset(&ev, 0, sizeof(ev));
     ev.type = type;
     ev.frame = f->frame;
@@ -89,19 +89,19 @@ static inline uint32_t mod_u64(uint64_t v, uint32_t d) {
 // Cache everything that depends on (rate, channels) and F mod den, and zero
 // the samples of channels the new layout does not have (the reference
 // zeroes them on every frame).
-static COLD void set_layout(link_fast_t *f) {
+static COLD void set_layout(alink_fast_t *f) {
     f->num = f->ratio[f->cls][f->rate][0];
     f->den = f->ratio[f->cls][f->rate][1];
     f->fmod = (uint16_t)(f->den == 1u ? 0u : mod_u64(f->frame, f->den));
-    unsigned c = f->channels, nb = (c + LINK_BANK_CHANNELS - 1u) / LINK_BANK_CHANNELS;
-    f->layout = (uint8_t)(LINK_HEAD_SYMBOLS + 3u * c + 2u * nb);
+    unsigned c = f->channels, nb = (c + ALINK_BANK_CHANNELS - 1u) / ALINK_BANK_CHANNELS;
+    f->layout = (uint8_t)(ALINK_HEAD_SYMBOLS + 3u * c + 2u * nb);
     f->nbanks = (uint8_t)nb;
     f->decode_banks = (uint8_t)(f->bank_mask & ((1u << nb) - 1u));
-    for (unsigned ch = c; ch < LINK_MAX_CHANNELS; ch++) f->samples[ch] = 0;
+    for (unsigned ch = c; ch < ALINK_MAX_CHANNELS; ch++) f->samples[ch] = 0;
 }
 
-// Symbols in the current frame (link_frame_symbols() from F mod den).
-static inline unsigned frame_syms(const link_fast_t *f) {
+// Symbols in the current frame (alink_frame_symbols() from F mod den).
+static inline unsigned frame_syms(const alink_fast_t *f) {
     if (f->den == 1u) return f->num;
     uint32_t m = f->fmod, n = f->num, d = f->den;
     return ((m + 1u) * n) / d - (m * n) / d;
@@ -112,7 +112,7 @@ static inline unsigned frame_syms(const link_fast_t *f) {
 // ---------------------------------------------------------------------------
 
 // HDR, CTL and CRC8 after the comma ending at p (bits p .. p + 29).
-static inline bool lf_head_at(link_fast_t *f, uint32_t p, uint8_t *hdr, uint8_t *ctl, bool count) {
+static inline bool lf_head_at(alink_fast_t *f, uint32_t p, uint8_t *hdr, uint8_t *ctl, bool count) {
     uint32_t x = bits32(f, p);
     uint32_t e0 = f->dec[x >> 22], e1 = f->dec[(x >> 12) & 0x3FFu], e2 = f->dec[(x >> 2) & 0x3FFu];
     if ((e0 | e1 | e2) & BAD) {
@@ -125,7 +125,7 @@ static inline bool lf_head_at(link_fast_t *f, uint32_t p, uint8_t *hdr, uint8_t 
     return true;
 }
 
-static inline uint16_t crc16_tab(const link_fast_t *f, const uint8_t *p, unsigned n) {
+static inline uint16_t crc16_tab(const alink_fast_t *f, const uint8_t *p, unsigned n) {
     uint32_t crc = 0xFFFFu;
     for (unsigned i = 0; i < n; i++) crc = (crc << 8) ^ f->crc16[((crc >> 8) ^ p[i]) & 0xFFu];
     return (uint16_t)crc;
@@ -137,13 +137,13 @@ static inline uint64_t lf_get_u64le(const uint8_t *p) {
     return v;
 }
 
-// link_sf_unpack() with the table CRC and the cached capacities, then the
+// alink_sf_unpack() with the table CRC and the cached capacities, then the
 // class check: the same checks in the same order.
-static LINK_FAST_HOT int lf_sf_check(link_fast_t *f, link_sf_t *sf) {
+static ALINK_FAST_HOT int lf_sf_check(alink_fast_t *f, alink_sf_t *sf) {
     const uint8_t *in = f->sf_bytes;
-    if (crc16_tab(f, in, 30) != (uint16_t)(in[30] | (in[31] << 8))) return LINK_SF_ERR_CRC;
-    if (in[0] != LINK_SF_MAGIC) return LINK_SF_ERR_MAGIC;
-    if (in[1] != LINK_PROTOCOL_VERSION) return LINK_SF_ERR_VERSION;
+    if (crc16_tab(f, in, 30) != (uint16_t)(in[30] | (in[31] << 8))) return ALINK_SF_ERR_CRC;
+    if (in[0] != ALINK_SF_MAGIC) return ALINK_SF_ERR_MAGIC;
+    if (in[1] != ALINK_PROTOCOL_VERSION) return ALINK_SF_ERR_VERSION;
     sf->flags = in[2];
     sf->rate = in[3];
     sf->channels = in[4];
@@ -155,17 +155,17 @@ static LINK_FAST_HOT int lf_sf_check(link_fast_t *f, link_sf_t *sf) {
     sf->apply_op = in[24];
     sf->apply_arg = in[25];
     sf->apply_value = (int16_t)(uint16_t)(in[26] | (in[27] << 8));
-    if (sf->frame % LINK_SF_LEN) return LINK_SF_ERR_FRAME;
-    if (sf->cls < 1u || sf->cls > 3u || sf->rate > LINK_RATE_96K || sf->channels < 1u ||
+    if (sf->frame % ALINK_SF_LEN) return ALINK_SF_ERR_FRAME;
+    if (sf->cls < 1u || sf->cls > 3u || sf->rate > ALINK_RATE_96K || sf->channels < 1u ||
         sf->channels > f->cap[sf->cls][sf->rate])
-        return LINK_SF_ERR_LAYOUT;
-    if (sf->apply_op > LINK_OP_MAX || (sf->apply_op == LINK_OP_NONE) != (sf->apply_frame == 0))
-        return LINK_SF_ERR_APPLY;
-    if (sf->cls != f->cls) return LINK_RX_SF_CLASS;
-    return LINK_SF_OK;
+        return ALINK_SF_ERR_LAYOUT;
+    if (sf->apply_op > ALINK_OP_MAX || (sf->apply_op == ALINK_OP_NONE) != (sf->apply_frame == 0))
+        return ALINK_SF_ERR_APPLY;
+    if (sf->cls != f->cls) return ALINK_RX_SF_CLASS;
+    return ALINK_SF_OK;
 }
 
-static LINK_FAST_HOT void lf_sf_collect(link_fast_t *f, unsigned idx, uint8_t ctl, uint8_t hdr) {
+static ALINK_FAST_HOT void lf_sf_collect(alink_fast_t *f, unsigned idx, uint8_t ctl, uint8_t hdr) {
     bool cont = f->prev_hdr >= 0 && hdr == (uint8_t)(f->prev_hdr + 1);
     if (idx == 0) {
         f->sf_bytes[0] = ctl;
@@ -179,19 +179,19 @@ static LINK_FAST_HOT void lf_sf_collect(link_fast_t *f, unsigned idx, uint8_t ct
     f->prev_hdr = hdr;
 }
 
-static COLD void lf_sf_error(link_fast_t *f, int err) {
-    link_rx_event_t ev;
+static COLD void lf_sf_error(alink_fast_t *f, int err) {
+    alink_rx_event_t ev;
     memset(&ev, 0, sizeof(ev));
-    ev.type = LINK_RX_EV_SF_ERROR;
+    ev.type = ALINK_RX_EV_SF_ERROR;
     ev.frame = f->frame;
     ev.sf_error = err;
     f->stats.superframe_errors++;
     lf_emit(f, &ev);
 }
 
-static LINK_FAST_HOT void lf_adopt_sf(link_fast_t *f, const link_sf_t *sf) {
+static ALINK_FAST_HOT void lf_adopt_sf(alink_fast_t *f, const alink_sf_t *sf) {
     f->sf = *sf;
-    f->apply_pending = sf->apply_op == LINK_OP_RATE && sf->apply_frame > f->frame;
+    f->apply_pending = sf->apply_op == ALINK_OP_RATE && sf->apply_frame > f->frame;
     if (sf->rate != f->rate || sf->channels != f->channels) {
         f->rate = sf->rate;
         f->channels = sf->channels;
@@ -203,7 +203,7 @@ static LINK_FAST_HOT void lf_adopt_sf(link_fast_t *f, const link_sf_t *sf) {
 // State changes
 // ---------------------------------------------------------------------------
 
-static void lf_clear_frame_state(link_fast_t *f) {
+static void lf_clear_frame_state(alink_fast_t *f) {
     f->fails = 0;
     f->prev_hdr = -1;
     f->sf_count = 0;
@@ -212,15 +212,15 @@ static void lf_clear_frame_state(link_fast_t *f) {
     memset(f->samples, 0, sizeof(f->samples));
 }
 
-static void lf_enter_search(link_fast_t *f, uint32_t q) {
-    f->state = LINK_RX_SEARCH;
+static void lf_enter_search(alink_fast_t *f, uint32_t q) {
+    f->state = ALINK_RX_SEARCH;
     f->q = q;
     lf_clear_frame_state(f);
 }
 
-static COLD void lf_loss(link_fast_t *f) {
-    if (f->state == LINK_RX_LOCKED) f->stats.loss_count++;
-    lf_emit_simple(f, LINK_RX_EV_LOSS);
+static COLD void lf_loss(alink_fast_t *f) {
+    if (f->state == ALINK_RX_LOCKED) f->stats.loss_count++;
+    lf_emit_simple(f, ALINK_RX_EV_LOSS);
     lf_enter_search(f, f->p + 1u);
 }
 
@@ -229,7 +229,7 @@ static COLD void lf_loss(link_fast_t *f) {
 // ---------------------------------------------------------------------------
 
 // Bit 31 - j set when a K28.5 (either RD) occupies bits [q + j - 10, q + j).
-static inline uint32_t comma_mask(const link_fast_t *f, uint32_t q) {
+static inline uint32_t comma_mask(const alink_fast_t *f, uint32_t q) {
     uint32_t hi = bits32(f, q - 10u), lo = bits32(f, q + 22u);
 #define SH(t) ((hi << (t)) | (lo >> (32 - (t))))
     uint32_t s0 = hi, s1 = SH(1), s2 = SH(2), s3 = SH(3), s4 = SH(4);
@@ -243,7 +243,7 @@ static inline uint32_t comma_mask(const link_fast_t *f, uint32_t q) {
     return rdn | rdp;
 }
 
-static COLD bool lf_step_search(link_fast_t *f) {
+static COLD bool lf_step_search(alink_fast_t *f) {
     if (!have(f, f->q + 30u)) return false;
     while (have(f, f->q + 30u)) {
         uint32_t n = f->avail - f->q - 30u + 1u;   // positions with q + 30 <= avail
@@ -255,15 +255,15 @@ static COLD bool lf_step_search(link_fast_t *f) {
             uint32_t q = f->q + j;
             uint8_t hdr, ctl;
             if (lf_head_at(f, q, &hdr, &ctl, false)) {
-                f->state = LINK_RX_ALIGNED;
+                f->state = ALINK_RX_ALIGNED;
                 f->p = q;
                 f->body_done = false;
                 f->comma_ok = true;
                 f->slip = 0;
                 lf_clear_frame_state(f);
-                link_rx_event_t ev;
+                alink_rx_event_t ev;
                 memset(&ev, 0, sizeof(ev));
-                ev.type = LINK_RX_EV_ALIGN;
+                ev.type = ALINK_RX_EV_ALIGN;
                 ev.bitpos = f->avail64 - (uint32_t)(f->avail - q);
                 lf_emit(f, &ev);
                 return true;
@@ -279,37 +279,37 @@ static COLD bool lf_step_search(link_fast_t *f) {
 // ALIGNED
 // ---------------------------------------------------------------------------
 
-static COLD bool lf_body_aligned(link_fast_t *f) {
+static COLD bool lf_body_aligned(alink_fast_t *f) {
     if (!have(f, f->p + 30u)) return false;
     uint8_t hdr, ctl;
     if (!lf_head_at(f, f->p, &hdr, &ctl, true)) {
         f->stats.crc8_errors++;
         f->prev_hdr = -1;
         f->sf_count = 0;
-        if (++f->fails >= LINK_RX_FAIL_LIMIT) { lf_loss(f); return true; }
+        if (++f->fails >= ALINK_RX_FAIL_LIMIT) { lf_loss(f); return true; }
         f->body_done = true;
         return true;
     }
     f->fails = 0;
-    unsigned idx = hdr & (LINK_SF_LEN - 1u);
+    unsigned idx = hdr & (ALINK_SF_LEN - 1u);
     lf_sf_collect(f, idx, ctl, hdr);
-    if (idx == LINK_SF_LEN - 1u && f->sf_count == LINK_SF_LEN) {
-        link_sf_t sf;
+    if (idx == ALINK_SF_LEN - 1u && f->sf_count == ALINK_SF_LEN) {
+        alink_sf_t sf;
         int err = lf_sf_check(f, &sf);
-        if (err == LINK_SF_OK && (uint8_t)(sf.frame + LINK_SF_LEN - 1u) != hdr) err = LINK_RX_SF_COUNTER;
-        if (err != LINK_SF_OK) {
+        if (err == ALINK_SF_OK && (uint8_t)(sf.frame + ALINK_SF_LEN - 1u) != hdr) err = ALINK_RX_SF_COUNTER;
+        if (err != ALINK_SF_OK) {
             lf_sf_error(f, err);
         } else {
-            f->state = LINK_RX_LOCKED;
-            f->frame = sf.frame + LINK_SF_LEN - 1u;
+            f->state = ALINK_RX_LOCKED;
+            f->frame = sf.frame + ALINK_SF_LEN - 1u;
             memset(f->bank_fails, 0, sizeof(f->bank_fails));
             memset(f->samples, 0, sizeof(f->samples));
             lf_adopt_sf(f, &sf);
             set_layout(f);
             f->stats.lock_count++;
-            link_rx_event_t ev;
+            alink_rx_event_t ev;
             memset(&ev, 0, sizeof(ev));
-            ev.type = LINK_RX_EV_LOCK;
+            ev.type = ALINK_RX_EV_LOCK;
             ev.frame = f->frame;
             ev.sf = &f->sf;
             lf_emit(f, &ev);
@@ -319,10 +319,10 @@ static COLD bool lf_body_aligned(link_fast_t *f) {
     return true;
 }
 
-static COLD bool lf_next_aligned(link_fast_t *f) {
-    unsigned num = f->ratio[f->cls][LINK_RATE_44K1][0], den = f->ratio[f->cls][LINK_RATE_44K1][1];
-    unsigned maxgap = (num + den - 1u) / den;   // link_frame_symbols_max(cls, 44.1 kHz)
-    for (unsigned i = LINK_HEAD_SYMBOLS; i <= maxgap; i++) {
+static COLD bool lf_next_aligned(alink_fast_t *f) {
+    unsigned num = f->ratio[f->cls][ALINK_RATE_44K1][0], den = f->ratio[f->cls][ALINK_RATE_44K1][1];
+    unsigned maxgap = (num + den - 1u) / den;   // alink_frame_symbols_max(cls, 44.1 kHz)
+    for (unsigned i = ALINK_HEAD_SYMBOLS; i <= maxgap; i++) {
         uint32_t end = f->p + 10u * i;
         if (!have(f, end)) return false;
         if (is_comma(sym_end(f, end))) {
@@ -365,11 +365,11 @@ static inline int32_t sext24(uint32_t u) {
     return (int32_t)(u << 8) >> 8;
 }
 
-#if !LINK_FAST_M33 || !LINK_FAST_M33_SW
+#if !ALINK_FAST_M33 || !ALINK_FAST_M33_SW
 // A full bank (8 channels, 26 symbols) starting at bit o of linear words
 // r[0..9].  True when every symbol is a data code group and the CRC-16
 // matches; the samples go to out[0..7] either way.
-static CPATH bool bank8(const link_fast_t *f, const uint32_t *r, unsigned o, int32_t *out) {
+static CPATH bool bank8(const alink_fast_t *f, const uint32_t *r, unsigned o, int32_t *out) {
     uint32_t a[9];
     for (unsigned i = 0; i < 9u; i++) a[i] = funnel(r + i, o);
     const uint32_t *dec = f->dec;
@@ -392,7 +392,7 @@ static CPATH bool bank8(const link_fast_t *f, const uint32_t *r, unsigned o, int
 
 #endif
 
-#if LINK_FAST_CRC_DMA
+#if ALINK_FAST_CRC_DMA
 // CRC-16 of a bank by the RP2350 DMA sniffer (CRC-16-CCITT, polynomial
 // 0x1021, seeded with 0xFFFF): a memory-to-memory transfer of the bank's 24
 // payload bytes, packed MSB first into 6 words, on channel f->crc_dma, which
@@ -403,7 +403,7 @@ static CPATH bool bank8(const link_fast_t *f, const uint32_t *r, unsigned o, int
 #define LF_DMA_SNIFF_DATA   (*(volatile uint32_t *)(uintptr_t)(LF_DMA_BASE + 0x458u))
 #define LF_DMA_BUSY         0x04000000u     // CHx_CTRL BUSY (RP2350)
 
-static inline void crc_dma_start(const link_fast_t *f, const uint32_t *w, unsigned n) {
+static inline void crc_dma_start(const alink_fast_t *f, const uint32_t *w, unsigned n) {
     atomic_thread_fence(memory_order_seq_cst);  // the words are in memory before the DMA reads them
     LF_DMA_SNIFF_DATA = 0xFFFFu;
     volatile uint32_t *ch = LF_DMA_CH(f->crc_dma);
@@ -411,16 +411,16 @@ static inline void crc_dma_start(const link_fast_t *f, const uint32_t *w, unsign
     ch[7] = n;                                  // AL1_TRANS_COUNT_TRIG
 }
 
-static inline uint32_t crc_dma_result(const link_fast_t *f) {
+static inline uint32_t crc_dma_result(const alink_fast_t *f) {
     volatile uint32_t *ch = LF_DMA_CH(f->crc_dma);
     while (ch[4] & LF_DMA_BUSY) {}              // AL1_CTRL
     return LF_DMA_SNIFF_DATA;
 }
 
-#if !LINK_FAST_M33
+#if !ALINK_FAST_M33
 // bank8() with the CRC in the sniffer: the samples are joined first, packed
 // into words for the DMA, and sign-extended while it runs.
-static LINK_FAST_HOT __attribute__((noinline)) bool bank8_dma(const link_fast_t *f, const uint32_t *r, unsigned o,
+static ALINK_FAST_HOT __attribute__((noinline)) bool bank8_dma(const alink_fast_t *f, const uint32_t *r, unsigned o,
                                                               int32_t *out) {
     uint32_t a[9];
     for (unsigned i = 0; i < 9u; i++) a[i] = funnel(r + i, o);
@@ -445,12 +445,12 @@ static LINK_FAST_HOT __attribute__((noinline)) bool bank8_dma(const link_fast_t 
 
 #endif
 
-void link_fast_set_crc_dma(link_fast_t *f, int ch) {
+void alink_fast_set_crc_dma(alink_fast_t *f, int ch) {
     f->crc_dma = (int8_t)(ch < 0 ? -1 : ch);
     f->m33.dma_ch = ch < 0 ? 0 : LF_DMA_CH(ch);
 }
 
-uint32_t link_fast_crc_dma_probe(link_fast_t *f, const uint32_t words[6]) {
+uint32_t alink_fast_crc_dma_probe(alink_fast_t *f, const uint32_t words[6]) {
     crc_dma_start(f, words, 6);
     return crc_dma_result(f) & 0xFFFFu;
 }
@@ -458,7 +458,7 @@ uint32_t link_fast_crc_dma_probe(link_fast_t *f, const uint32_t words[6]) {
 
 // A last bank of k < 8 channels at bit o of linear words r: the same
 // checks, symbol by symbol (only a partial last bank takes this path).
-static CPATH bool bank_k(const link_fast_t *f, const uint32_t *r, unsigned o, unsigned k, int32_t *out) {
+static CPATH bool bank_k(const alink_fast_t *f, const uint32_t *r, unsigned o, unsigned k, int32_t *out) {
     uint32_t err = 0, crc = 0xFFFFu, e[3];
     for (unsigned i = 0; i < k; i++) {
         for (unsigned j = 0; j < 3u; j++, o += 10u) {
@@ -475,30 +475,30 @@ static CPATH bool bank_k(const link_fast_t *f, const uint32_t *r, unsigned o, un
     return !((err | c0 | c1) & BAD) && ((crc ^ (c0 & 0xFFu) ^ ((c1 & 0xFFu) << 8)) & 0xFFFFu) == 0;
 }
 
-#if LINK_FAST_M33
+#if ALINK_FAST_M33
 bool lf_bank8_sw_m33(const uint32_t *r, unsigned o, int32_t *out, const lf_m33_ctx_t *c);
 bool lf_bank8_dma_m33(const uint32_t *r, unsigned o, int32_t *out, const lf_m33_ctx_t *c);
 uint32_t lf_clean_m33(lf_clean_ctx_t *c);
 _Static_assert(offsetof(lf_clean_ctx_t, dec) == 56 && offsetof(lf_clean_ctx_t, bankfn) == 72 &&
                offsetof(lf_clean_ctx_t, out) == 88 && offsetof(lf_clean_ctx_t, prev_hdr) == 108,
-               "link_fast_m33_loop.S context layout");
+               "alink_fast_m33_loop.S context layout");
 _Static_assert(offsetof(lf_m33_ctx_t, dec) == 0 && offsetof(lf_m33_ctx_t, crc16) == 4 &&
-               offsetof(lf_m33_ctx_t, dma_ch) == 8, "link_fast_m33.S context layout");
+               offsetof(lf_m33_ctx_t, dma_ch) == 8, "alink_fast_m33.S context layout");
 #endif
 
 // A full bank at bit o of linear words r, by whichever decoder this build has.
-static inline bool full_bank(const link_fast_t *f, const uint32_t *r, unsigned o, int32_t *out) {
-#if LINK_FAST_M33
-#if LINK_FAST_CRC_DMA
+static inline bool full_bank(const alink_fast_t *f, const uint32_t *r, unsigned o, int32_t *out) {
+#if ALINK_FAST_M33
+#if ALINK_FAST_CRC_DMA
     if (f->crc_dma >= 0) return lf_bank8_dma_m33(r, o, out, &f->m33);
 #endif
-#if LINK_FAST_M33_SW
+#if ALINK_FAST_M33_SW
     return lf_bank8_sw_m33(r, o, out, &f->m33);
 #else
     return bank8(f, r, o, out);
 #endif
 #else
-#if LINK_FAST_CRC_DMA
+#if ALINK_FAST_CRC_DMA
     if (f->crc_dma >= 0) return bank8_dma(f, r, o, out);
 #endif
     return bank8(f, r, o, out);
@@ -506,22 +506,22 @@ static inline bool full_bank(const link_fast_t *f, const uint32_t *r, unsigned o
 }
 
 // Code errors of a failed bank (cold: only when a bank fails).
-static COLD void count_code_errors(link_fast_t *f, uint32_t start, unsigned nsym) {
+static COLD void count_code_errors(alink_fast_t *f, uint32_t start, unsigned nsym) {
     for (unsigned j = 0; j < nsym; j++)
         if (f->dec[sym_end(f, start + 10u * (j + 1u))] & BAD) f->stats.code_errors++;
 }
 
 // Idle padding that is not all D21.5: count the symbols that differ (cold).
-static COLD void count_idle_errors(link_fast_t *f, uint32_t r0, uint32_t r1) {
+static COLD void count_idle_errors(alink_fast_t *f, uint32_t r0, uint32_t r1) {
     for (uint32_t end = r0 + 10u; end != r1 + 10u; end += 10u)
-        if (sym_end(f, end) != LINK_SYM_IDLE) f->stats.idle_errors++;
+        if (sym_end(f, end) != ALINK_SYM_IDLE) f->stats.idle_errors++;
 }
 
 // Idle padding: the symbols occupying bits [b0, b1) of linear words r
 // must all be D21.5, which on the line is 1010... starting with a 1 at b0,
 // so whole words are compared with that pattern; the per-symbol count (at
 // absolute positions from abs0) runs only when something differs.
-static inline void check_idles(link_fast_t *f, const uint32_t *r, uint32_t b0, uint32_t b1, uint32_t abs0) {
+static inline void check_idles(alink_fast_t *f, const uint32_t *r, uint32_t b0, uint32_t b1, uint32_t abs0) {
     uint32_t pat = (b0 & 1u) ? 0x55555555u : 0xAAAAAAAAu;
     const uint32_t *w = r + (b0 >> 5), *wl = r + ((b1 - 1u) >> 5);
     uint32_t diff = (*w ^ pat) & (0xFFFFFFFFu >> (b0 & 31u));
@@ -541,45 +541,45 @@ static inline void check_idles(link_fast_t *f, const uint32_t *r, uint32_t b0, u
 
 // A bank failed its symbols or CRC: counters, HOLD on the first consecutive
 // failure, ZERO from the second (cold).
-static COLD uint8_t bank_failed(link_fast_t *f, unsigned b, uint32_t start, unsigned k) {
-    count_code_errors(f, start, LINK_BANK_SYMBOLS(k));
+static COLD uint8_t bank_failed(alink_fast_t *f, unsigned b, uint32_t start, unsigned k) {
+    count_code_errors(f, start, ALINK_BANK_SYMBOLS(k));
     f->stats.crc16_errors++;
     if (f->bank_fails[b] < 0xFFu) f->bank_fails[b]++;
-    if (f->bank_fails[b] == 1u) return LINK_BANK_HOLD;
-    memset(f->samples + LINK_BANK_CHANNELS * b, 0, k * sizeof(int32_t));
-    return LINK_BANK_ZERO;
+    if (f->bank_fails[b] == 1u) return ALINK_BANK_HOLD;
+    memset(f->samples + ALINK_BANK_CHANNELS * b, 0, k * sizeof(int32_t));
+    return ALINK_BANK_ZERO;
 }
 
-// FRAME event (only with link_fast_t.frame_events, i.e. on the host tests).
-static COLD void emit_frame(link_fast_t *f, uint8_t flags, const uint8_t *status) {
-    link_rx_event_t *ev = &f->ev;
-    ev->type = LINK_RX_EV_FRAME;
+// FRAME event (only with alink_fast_t.frame_events, i.e. on the host tests).
+static COLD void emit_frame(alink_fast_t *f, uint8_t flags, const uint8_t *status) {
+    alink_rx_event_t *ev = &f->ev;
+    ev->type = ALINK_RX_EV_FRAME;
     ev->frame = f->frame;
     ev->flags = flags;
     ev->slip = f->slip;
     ev->channels = f->channels;
-    memcpy(ev->bank_status, status, LINK_MAX_BANKS);
+    memcpy(ev->bank_status, status, ALINK_MAX_BANKS);
     ev->samples = f->samples;
     lf_emit(f, ev);
 }
 
 // Index 31 of the superframe: check it, adopt it, correct F.
-static LINK_FAST_HOT __attribute__((noinline)) void sf_complete(link_fast_t *f) {
-    link_sf_t sf;
-    int err = f->sf_count == LINK_SF_LEN ? lf_sf_check(f, &sf) : LINK_RX_SF_INCOMPLETE;
-    if (err != LINK_SF_OK) {
+static ALINK_FAST_HOT __attribute__((noinline)) void sf_complete(alink_fast_t *f) {
+    alink_sf_t sf;
+    int err = f->sf_count == ALINK_SF_LEN ? lf_sf_check(f, &sf) : ALINK_RX_SF_INCOMPLETE;
+    if (err != ALINK_SF_OK) {
         lf_sf_error(f, err);
         return;
     }
-    if (sf.frame + LINK_SF_LEN - 1u != f->frame) {
+    if (sf.frame + ALINK_SF_LEN - 1u != f->frame) {
         f->stats.counter_errors++;
-        f->frame = sf.frame + LINK_SF_LEN - 1u;
+        f->frame = sf.frame + ALINK_SF_LEN - 1u;
         set_layout(f);  // F mod den
     }
     lf_adopt_sf(f, &sf);
-    link_rx_event_t sev;
+    alink_rx_event_t sev;
     memset(&sev, 0, sizeof(sev));
-    sev.type = LINK_RX_EV_SUPERFRAME;
+    sev.type = ALINK_RX_EV_SUPERFRAME;
     sev.frame = f->frame;
     sev.sf = &f->sf;
     lf_emit(f, &sev);
@@ -587,10 +587,10 @@ static LINK_FAST_HOT __attribute__((noinline)) void sf_complete(link_fast_t *f) 
 
 // Frame F with its comma ending at p and s symbols (spec 8.4).  False when
 // it ended in a loss (the receiver is then in SEARCH).
-static inline bool lf_frame(link_fast_t *f, uint32_t p, unsigned s, const uint32_t *wp) {
+static inline bool lf_frame(alink_fast_t *f, uint32_t p, unsigned s, const uint32_t *wp) {
     unsigned o = p & 31u;
-    uint8_t flags = f->comma_ok ? 0u : LINK_RXF_COMMA_MISSING;
-    if (f->slip) flags |= LINK_RXF_SLIP;
+    uint8_t flags = f->comma_ok ? 0u : ALINK_RXF_COMMA_MISSING;
+    if (f->slip) flags |= ALINK_RXF_SLIP;
 
     // Head: HDR, CTL, CRC8 in bits p .. p + 29.
     uint32_t x = funnel(wp, o);
@@ -603,26 +603,26 @@ static inline bool lf_frame(link_fast_t *f, uint32_t p, unsigned s, const uint32
     }
     if (!good) {
         f->stats.crc8_errors++;
-        flags |= LINK_RXF_HEAD_BAD;
+        flags |= ALINK_RXF_HEAD_BAD;
     } else if ((uint8_t)e0 != (uint8_t)f->frame) {
         f->stats.counter_errors++;
-        flags |= LINK_RXF_COUNTER;
+        flags |= ALINK_RXF_COUNTER;
         good = false;
     }
 
     // Banks in the mask; the others are stepped over unread.
-    uint8_t status[LINK_MAX_BANKS] = { 0 };
+    uint8_t status[ALINK_MAX_BANKS] = { 0 };
     for (unsigned m = f->decode_banks; m; m &= m - 1u) {
         unsigned b = (unsigned)__builtin_ctz(m);
-        uint32_t boff = o + 10u * (LINK_HEAD_SYMBOLS - 1u + b * LINK_BANK_SYMBOLS(LINK_BANK_CHANNELS));
+        uint32_t boff = o + 10u * (ALINK_HEAD_SYMBOLS - 1u + b * ALINK_BANK_SYMBOLS(ALINK_BANK_CHANNELS));
         const uint32_t *br = wp + (boff >> 5);
         unsigned bo = boff & 31u;
-        int32_t *out = f->samples + LINK_BANK_CHANNELS * b;
-        int32_t tmp[LINK_BANK_CHANNELS];
-        unsigned k = f->channels - LINK_BANK_CHANNELS * b;
+        int32_t *out = f->samples + ALINK_BANK_CHANNELS * b;
+        int32_t tmp[ALINK_BANK_CHANNELS];
+        unsigned k = f->channels - ALINK_BANK_CHANNELS * b;
         bool ok;
-        if (k >= LINK_BANK_CHANNELS) {
-            k = LINK_BANK_CHANNELS;
+        if (k >= ALINK_BANK_CHANNELS) {
+            k = ALINK_BANK_CHANNELS;
             ok = full_bank(f, br, bo, tmp);
             if (ok) memcpy(out, tmp, sizeof(tmp));
         } else {
@@ -631,7 +631,7 @@ static inline bool lf_frame(link_fast_t *f, uint32_t p, unsigned s, const uint32
                 for (unsigned i = 0; i < k; i++) out[i] = tmp[i];
         }
         if (ok) {
-            status[b] = LINK_BANK_OK;
+            status[b] = ALINK_BANK_OK;
             f->bank_fails[b] = 0;
         } else {
             status[b] = bank_failed(f, b, p - o + boff, k);
@@ -651,17 +651,17 @@ static inline bool lf_frame(link_fast_t *f, uint32_t p, unsigned s, const uint32
     if (f->frame_events) emit_frame(f, flags, status);
 
     // Superframe assembly (8.4 step 5).
-    unsigned idx = (unsigned)f->frame & (LINK_SF_LEN - 1u);
+    unsigned idx = (unsigned)f->frame & (ALINK_SF_LEN - 1u);
     if (good) {
         lf_sf_collect(f, idx, (uint8_t)e1, (uint8_t)e0);
     } else {
         f->sf_count = 0;
         f->prev_hdr = -1;
     }
-    if (idx == LINK_SF_LEN - 1u) sf_complete(f);
+    if (idx == ALINK_SF_LEN - 1u) sf_complete(f);
 
-    if (flags & (LINK_RXF_COMMA_MISSING | LINK_RXF_HEAD_BAD | LINK_RXF_COUNTER)) {
-        if (++f->fails >= LINK_RX_FAIL_LIMIT) {
+    if (flags & (ALINK_RXF_COMMA_MISSING | ALINK_RXF_HEAD_BAD | ALINK_RXF_COUNTER)) {
+        if (++f->fails >= ALINK_RX_FAIL_LIMIT) {
             f->p = p;
             lf_loss(f);
             return false;
@@ -673,10 +673,10 @@ static inline bool lf_frame(link_fast_t *f, uint32_t p, unsigned s, const uint32
 }
 
 // A RATE apply reached its target frame: switch the layout when it fits (cold).
-static COLD void rate_switch(link_fast_t *f) {
+static COLD void rate_switch(alink_fast_t *f) {
     unsigned arg = f->sf.apply_arg;
     unsigned c = f->sf.apply_value ? (unsigned)f->sf.apply_value : f->channels;
-    if (arg <= LINK_RATE_96K && f->sf.apply_value >= 0 && c >= 1u && c <= f->cap[f->cls][arg]) {
+    if (arg <= ALINK_RATE_96K && f->sf.apply_value >= 0 && c >= 1u && c <= f->cap[f->cls][arg]) {
         f->rate = (uint8_t)arg;
         f->channels = (uint8_t)c;
         set_layout(f);
@@ -686,7 +686,7 @@ static COLD void rate_switch(link_fast_t *f) {
 
 // No comma at e: the slip window (-1, +1, -2, +2), else the flywheel (cold).
 // x holds bits e - 12 .. e + 19.  Returns where the next frame starts.
-static COLD uint32_t slip_or_flywheel(link_fast_t *f, uint32_t x, uint32_t e) {
+static COLD uint32_t slip_or_flywheel(alink_fast_t *f, uint32_t x, uint32_t e) {
     static const int8_t order[4] = { -1, 1, -2, 2 };
     for (unsigned i = 0; i < 4u; i++) {
         int d = order[i];
@@ -703,11 +703,11 @@ static COLD uint32_t slip_or_flywheel(link_fast_t *f, uint32_t x, uint32_t e) {
     return e;
 }
 
-// FRAME event for a clean frame (link_fast_t.frame_events only).
-static COLD void emit_clean_frame(link_fast_t *f, uint64_t frame, unsigned banks) {
-    uint8_t status[LINK_MAX_BANKS] = { 0 };
-    for (unsigned b = 0; b < LINK_MAX_BANKS; b++)
-        if ((banks >> b) & 1u) status[b] = LINK_BANK_OK;
+// FRAME event for a clean frame (alink_fast_t.frame_events only).
+static COLD void emit_clean_frame(alink_fast_t *f, uint64_t frame, unsigned banks) {
+    uint8_t status[ALINK_MAX_BANKS] = { 0 };
+    for (unsigned b = 0; b < ALINK_MAX_BANKS; b++)
+        if ((banks >> b) & 1u) status[b] = ALINK_BANK_OK;
     uint64_t keep = f->frame;
     f->frame = frame;
     emit_frame(f, 0, status);
@@ -744,7 +744,7 @@ static inline uint32_t idle_diff(const uint32_t *r, uint32_t b0, uint32_t b1) {
 // is 0, the superframe assembly takes CTL), so they are applied from locals
 // here.  It stops, before touching anything, at the first frame that is not
 // clean; lf_locked() then takes that frame through lf_frame().
-static CPATH void lf_clean(link_fast_t *f) {
+static CPATH void lf_clean(alink_fast_t *f) {
     if (!f->comma_ok || f->slip || f->body_done) return;
     const uint32_t avail = f->avail, mask = f->ring_mask;
     const uint32_t *ring = ring_words(f);
@@ -759,10 +759,10 @@ static CPATH void lf_clean(link_fast_t *f) {
     for (;;) {
         unsigned s = den == 1u ? num : ((fmod + 1u) * num) / den - (fmod * num) / den;
         uint32_t e = p + 10u * s;
-        if ((int32_t)(avail - (e + LINK_RX_SLIP_MAX)) < 0 || out_n >= out_cap) break;
-        unsigned o = p & 31u, idx = (unsigned)frame & (LINK_SF_LEN - 1u);
+        if ((int32_t)(avail - (e + ALINK_RX_SLIP_MAX)) < 0 || out_n >= out_cap) break;
+        unsigned o = p & 31u, idx = (unsigned)frame & (ALINK_SF_LEN - 1u);
         uint32_t wb = (p >> 5) & mask;
-        if (wb + (o + 10u * s + 2u) / 32u + 2u > mask + 1u || idx == LINK_SF_LEN - 1u) break;
+        if (wb + (o + 10u * s + 2u) / 32u + 2u > mask + 1u || idx == ALINK_SF_LEN - 1u) break;
         if (f->apply_pending && frame + 1u == f->sf.apply_frame) break;
         const uint32_t *wp = ring + wb;
 
@@ -781,14 +781,14 @@ static CPATH void lf_clean(link_fast_t *f) {
         if (s > layout && idle_diff(wp, o + 10u * (layout - 1u), o + 10u * (s - 1u))) break;
 
         // Banks into temporaries; committed only if all pass.
-        int32_t tmp[LINK_MAX_BANKS][LINK_BANK_CHANNELS];
+        int32_t tmp[ALINK_MAX_BANKS][ALINK_BANK_CHANNELS];
         bool ok = true;
         for (unsigned m = banks; m && ok; m &= m - 1u) {
             unsigned b = (unsigned)__builtin_ctz(m);
-            uint32_t boff = o + 10u * (LINK_HEAD_SYMBOLS - 1u + b * LINK_BANK_SYMBOLS(LINK_BANK_CHANNELS));
+            uint32_t boff = o + 10u * (ALINK_HEAD_SYMBOLS - 1u + b * ALINK_BANK_SYMBOLS(ALINK_BANK_CHANNELS));
             const uint32_t *br = wp + (boff >> 5);
-            unsigned k = c - LINK_BANK_CHANNELS * b;
-            if (k >= LINK_BANK_CHANNELS)
+            unsigned k = c - ALINK_BANK_CHANNELS * b;
+            if (k >= ALINK_BANK_CHANNELS)
                 ok = full_bank(f, br, boff & 31u, tmp[b]);
             else
                 ok = bank_k(f, br, boff & 31u, k, tmp[b]);
@@ -798,9 +798,9 @@ static CPATH void lf_clean(link_fast_t *f) {
         // Commit (8.4 steps 2, 4, 5, 6 and 8.5 for a clean frame).
         for (unsigned m = banks; m; m &= m - 1u) {
             unsigned b = (unsigned)__builtin_ctz(m);
-            unsigned k = c - LINK_BANK_CHANNELS * b;
-            int32_t *dst = f->samples + LINK_BANK_CHANNELS * b;
-            if (k >= LINK_BANK_CHANNELS)
+            unsigned k = c - ALINK_BANK_CHANNELS * b;
+            int32_t *dst = f->samples + ALINK_BANK_CHANNELS * b;
+            if (k >= ALINK_BANK_CHANNELS)
                 memcpy(dst, tmp[b], sizeof(tmp[b]));
             else
                 for (unsigned i = 0; i < k; i++) dst[i] = tmp[b][i];
@@ -852,20 +852,20 @@ typedef struct { int32_t v[8]; } lf_row_t;
 // Frames lf_clean_fixed() may take from the current one before any boundary
 // (index 31 of the superframe, a RATE switch, the output block, the writer,
 // the ring's wrap); 0 when none.  *wb is the ring word holding bit p.
-static inline uint32_t clean_budget(const link_fast_t *f, uint32_t *wb) {
+static inline uint32_t clean_budget(const alink_fast_t *f, uint32_t *wb) {
     if (!f->comma_ok || f->slip || f->body_done) return 0;
     const uint32_t s10 = 10u * f->num, mask = f->ring_mask, p = f->p;
-    uint32_t n = 31u - ((uint32_t)f->frame & (LINK_SF_LEN - 1u));
+    uint32_t n = 31u - ((uint32_t)f->frame & (ALINK_SF_LEN - 1u));
     if (f->apply_pending) {
         uint64_t d = f->sf.apply_frame - f->frame;      // >= 1 while pending
         if (d - 1u < n) n = (uint32_t)(d - 1u);
     }
     if (f->out && (uint32_t)(f->out_cap - f->out_n) < n) n = f->out_cap - f->out_n;
-    int32_t room = (int32_t)(f->avail - p - LINK_RX_SLIP_MAX);
+    int32_t room = (int32_t)(f->avail - p - ALINK_RX_SLIP_MAX);
     if (room < (int32_t)s10) return 0;
     if ((uint32_t)room / s10 < n) n = (uint32_t)room / s10;
     const unsigned o = p & 31u;
-    const uint32_t nw = (o + s10 + LINK_RX_SLIP_MAX) / 32u + 2u;
+    const uint32_t nw = (o + s10 + ALINK_RX_SLIP_MAX) / 32u + 2u;
     *wb = (p >> 5) & mask;
     if (*wb + nw > mask + 1u) return 0;
     uint32_t wrap = ((mask + 1u - nw - *wb + 1u) * 32u - o + s10 - 1u) / s10;
@@ -873,7 +873,7 @@ static inline uint32_t clean_budget(const link_fast_t *f, uint32_t *wb) {
 }
 
 // Commit what a clean run took: positions, F, the superframe assembly.
-static inline void clean_commit(link_fast_t *f, uint32_t done, uint32_t flo, unsigned sf_count, int prev_hdr) {
+static inline void clean_commit(alink_fast_t *f, uint32_t done, uint32_t flo, unsigned sf_count, int prev_hdr) {
     if (!done) return;
     f->p += done * 10u * f->num;
     f->frame = (f->frame & ~0xFFFFFFFFull) | flo;   // no carry: index 31 is never taken here
@@ -884,20 +884,20 @@ static inline void clean_commit(link_fast_t *f, uint32_t done, uint32_t flo, uns
     if (f->out) f->out_n = (uint16_t)(f->out_n + done);
 }
 
-#if LINK_FAST_M33
+#if ALINK_FAST_M33
 // The common case in assembly: 48/96 kHz, one full bank, delivered whole or
 // not at all, a bank decoder in assembly.  False when the case is not its own
 // (lf_clean_fixed() then runs); true otherwise, however many frames it took.
-static LINK_FAST_HOT __attribute__((noinline)) bool lf_clean_asm(link_fast_t *f) {
+static ALINK_FAST_HOT __attribute__((noinline)) bool lf_clean_asm(alink_fast_t *f) {
     const unsigned banks = f->decode_banks;
     if (!banks || (banks & (banks - 1u)) || f->frame_events || (f->out && f->slot_run < 0)) return false;
     unsigned b = (unsigned)__builtin_ctz(banks);
-    if (f->channels - LINK_BANK_CHANNELS * b < LINK_BANK_CHANNELS) return false;
+    if (f->channels - ALINK_BANK_CHANNELS * b < ALINK_BANK_CHANNELS) return false;
     bool (*bankfn)(const uint32_t *, unsigned, int32_t *, const lf_m33_ctx_t *) = 0;
-#if LINK_FAST_CRC_DMA
+#if ALINK_FAST_CRC_DMA
     if (f->crc_dma >= 0) bankfn = lf_bank8_dma_m33;
 #endif
-#if LINK_FAST_M33_SW
+#if ALINK_FAST_M33_SW
     if (!bankfn) bankfn = lf_bank8_sw_m33;
 #endif
     if (!bankfn) return false;
@@ -911,7 +911,7 @@ static LINK_FAST_HOT __attribute__((noinline)) bool lf_clean_asm(link_fast_t *f)
     const uint32_t b0 = o + 10u * (layout - 1u), b1 = o + 10u * (s - 1u);
     const uint32_t iw0 = b0 >> 5, iw1 = (b1 - 1u) >> 5;
     const uint32_t fm = 0xFFFFFFFFu >> (b0 & 31u), lm = ~(0x7FFFFFFFu >> ((b1 - 1u) & 31u));
-    uint32_t boff = o + 10u * (LINK_HEAD_SYMBOLS - 1u + b * LINK_BANK_SYMBOLS(LINK_BANK_CHANNELS));
+    uint32_t boff = o + 10u * (ALINK_HEAD_SYMBOLS - 1u + b * ALINK_BANK_SYMBOLS(ALINK_BANK_CHANNELS));
     lf_clean_ctx_t k = {
         .wp = ring_words(f) + wb, .n = n, .step = 4u * (s10 / 32u), .o = o, .ro = 32u - o,
         .xw = 4u * xw, .xs = xs, .xro = 32u - xs,
@@ -919,7 +919,7 @@ static LINK_FAST_HOT __attribute__((noinline)) bool lf_clean_asm(link_fast_t *f)
         .lm = pad && iw0 != iw1 ? lm : 0u, .pat = (b0 & 1u) ? 0x55555555u : 0xAAAAAAAAu,
         .mid = pad && iw1 > iw0 ? iw1 - iw0 - 1u : 0u,
         .dec = f->dec, .crc8 = f->crc8, .bw = 4u * (boff >> 5), .bo = boff & 31u, .bankfn = bankfn,
-        .m33 = &f->m33, .samples = f->samples + LINK_BANK_CHANNELS * b, .fails = &f->bank_fails[b],
+        .m33 = &f->m33, .samples = f->samples + ALINK_BANK_CHANNELS * b, .fails = &f->bank_fails[b],
         .out = f->out ? f->out + f->out_n : 0, .src = f->slot_run >= 0 ? f->samples + f->slot_run : 0,
         .flo = (uint32_t)f->frame, .sf_bytes = f->sf_bytes, .sf_count = f->sf_count, .prev_hdr = f->prev_hdr,
     };
@@ -929,7 +929,7 @@ static LINK_FAST_HOT __attribute__((noinline)) bool lf_clean_asm(link_fast_t *f)
 }
 #endif
 
-static CPATH void lf_clean_fixed(link_fast_t *f) {
+static CPATH void lf_clean_fixed(alink_fast_t *f) {
     uint32_t wb;
     uint32_t n = clean_budget(f, &wb);
     if (!n) return;
@@ -980,13 +980,13 @@ static CPATH void lf_clean_fixed(link_fast_t *f) {
             if (diff) break;
         }
         // Banks into temporaries, committed only if all pass.
-        int32_t tmp[LINK_MAX_BANKS][LINK_BANK_CHANNELS];
+        int32_t tmp[ALINK_MAX_BANKS][ALINK_BANK_CHANNELS];
         bool ok = true;
         for (unsigned m = banks; m && ok; m &= m - 1u) {
             unsigned b = (unsigned)__builtin_ctz(m);
-            uint32_t boff = o + 10u * (LINK_HEAD_SYMBOLS - 1u + b * LINK_BANK_SYMBOLS(LINK_BANK_CHANNELS));
-            unsigned k = c - LINK_BANK_CHANNELS * b;
-            ok = k >= LINK_BANK_CHANNELS ? full_bank(f, wp + (boff >> 5), boff & 31u, tmp[b])
+            uint32_t boff = o + 10u * (ALINK_HEAD_SYMBOLS - 1u + b * ALINK_BANK_SYMBOLS(ALINK_BANK_CHANNELS));
+            unsigned k = c - ALINK_BANK_CHANNELS * b;
+            ok = k >= ALINK_BANK_CHANNELS ? full_bank(f, wp + (boff >> 5), boff & 31u, tmp[b])
                                          : bank_k(f, wp + (boff >> 5), boff & 31u, k, tmp[b]);
         }
         if (!ok) break;
@@ -994,9 +994,9 @@ static CPATH void lf_clean_fixed(link_fast_t *f) {
         // Commit.
         for (unsigned m = banks; m; m &= m - 1u) {
             unsigned b = (unsigned)__builtin_ctz(m);
-            unsigned k = c - LINK_BANK_CHANNELS * b;
-            int32_t *dst = f->samples + LINK_BANK_CHANNELS * b;
-            if (k >= LINK_BANK_CHANNELS)
+            unsigned k = c - ALINK_BANK_CHANNELS * b;
+            int32_t *dst = f->samples + ALINK_BANK_CHANNELS * b;
+            if (k >= ALINK_BANK_CHANNELS)
                 *(lf_row_t *)dst = *(const lf_row_t *)tmp[b];
             else
                 for (unsigned i = 0; i < k; i++) dst[i] = tmp[b][i];
@@ -1011,7 +1011,7 @@ static CPATH void lf_clean_fixed(link_fast_t *f) {
             out++;
         }
         if (f->frame_events) emit_clean_frame(f, (f->frame & ~0xFFFFFFFFull) | flo, banks);
-        unsigned idx = flo & (LINK_SF_LEN - 1u);
+        unsigned idx = flo & (ALINK_SF_LEN - 1u);
         uint8_t hdr = (uint8_t)e0;
         if (idx == 0) {
             f->sf_bytes[0] = (uint8_t)e1;
@@ -1028,33 +1028,33 @@ static CPATH void lf_clean_fixed(link_fast_t *f) {
     clean_commit(f, done, flo, sf_count, prev_hdr);
 }
 
-#if LINK_FAST_M33
-LINK_FAST_HOT unsigned link_fast_run_clean(link_fast_t *f, uint64_t avail_bits) {
+#if ALINK_FAST_M33
+ALINK_FAST_HOT unsigned alink_fast_run_clean(alink_fast_t *f, uint64_t avail_bits) {
     atomic_signal_fence(memory_order_seq_cst);
     f->avail64 = avail_bits;
     f->avail = (uint32_t)avail_bits;
-    if (f->state != LINK_RX_LOCKED || f->den != 1u) return 0;
+    if (f->state != ALINK_RX_LOCKED || f->den != 1u) return 0;
     uint32_t frames0 = f->stats.frames;
     (void)lf_clean_asm(f);
     return f->stats.frames - frames0;
 }
 
-LINK_FAST_HOT bool link_fast_needs_general(const link_fast_t *f) {
-    if (f->state != LINK_RX_LOCKED || f->den != 1u) return true;
+ALINK_FAST_HOT bool alink_fast_needs_general(const alink_fast_t *f) {
+    if (f->state != ALINK_RX_LOCKED || f->den != 1u) return true;
     if (f->out && f->out_n >= f->out_cap) return false;
-    return (int32_t)(f->avail - (f->p + 10u * f->num + LINK_RX_SLIP_MAX)) >= 0;
+    return (int32_t)(f->avail - (f->p + 10u * f->num + ALINK_RX_SLIP_MAX)) >= 0;
 }
 #endif
 
 // LOCKED frames while their bits are in the ring and the output block has room.
 // Each frame is read through a linear view: the ring itself, or (for the
 // one frame per ring pass that crosses the wrap) a copy of its words.
-static LINK_FAST_HOT void lf_locked(link_fast_t *f) {
+static ALINK_FAST_HOT void lf_locked(alink_fast_t *f) {
     const uint32_t avail = f->avail, mask = f->ring_mask;
     const uint32_t *ring = ring_words(f);
     for (;;) {
         if (f->den == 1u) {
-#if LINK_FAST_M33
+#if ALINK_FAST_M33
             if (!lf_clean_asm(f)) lf_clean_fixed(f);
 #else
             lf_clean_fixed(f);
@@ -1080,7 +1080,7 @@ static LINK_FAST_HOT void lf_locked(link_fast_t *f) {
         }
         // The next comma (8.5), needs bits up to e + 2.
         uint32_t e = p + 10u * s;
-        if ((int32_t)(avail - (e + LINK_RX_SLIP_MAX)) < 0) break;
+        if ((int32_t)(avail - (e + ALINK_RX_SLIP_MAX)) < 0) break;
         uint32_t xo = (p & 31u) + 10u * s - 12u;
         uint32_t x = funnel(wp + (xo >> 5), xo & 31u);
         f->frame++;
@@ -1102,8 +1102,8 @@ static LINK_FAST_HOT void lf_locked(link_fast_t *f) {
 // Entry points
 // ---------------------------------------------------------------------------
 
-void link_fast_init(link_fast_t *f, const volatile uint32_t *ring, uint32_t ring_words, unsigned cls,
-                    uint8_t bank_mask, link_rx_cb_t cb, void *ctx, uint64_t start_bit) {
+void alink_fast_init(alink_fast_t *f, const volatile uint32_t *ring, uint32_t ring_words, unsigned cls,
+                    uint8_t bank_mask, alink_rx_cb_t cb, void *ctx, uint64_t start_bit) {
     memset(f, 0, sizeof(*f));
     f->avail64 = start_bit;
     f->avail = (uint32_t)start_bit;
@@ -1114,10 +1114,10 @@ void link_fast_init(link_fast_t *f, const volatile uint32_t *ring, uint32_t ring
     f->cb = cb;
     f->ctx = ctx;
     for (unsigned c = 1; c <= 3u; c++)
-        for (unsigned r = 0; r <= LINK_RATE_96K; r++) {
-            f->cap[c][r] = (uint8_t)link_max_channels(c, r);
-            // Symbols per frame num / den in lowest terms (link_codec.c frame_ratio()).
-            uint32_t n = link_class_baud(c), d = 10u * link_rate_hz(r), a = n, b = d;
+        for (unsigned r = 0; r <= ALINK_RATE_96K; r++) {
+            f->cap[c][r] = (uint8_t)alink_max_channels(c, r);
+            // Symbols per frame num / den in lowest terms (alink_codec.c frame_ratio()).
+            uint32_t n = alink_class_baud(c), d = 10u * alink_rate_hz(r), a = n, b = d;
             while (b) { uint32_t t = a % b; a = b; b = t; }
             f->ratio[c][r][0] = (uint16_t)(n / a);
             f->ratio[c][r][1] = (uint16_t)(d / a);
@@ -1134,11 +1134,11 @@ void link_fast_init(link_fast_t *f, const volatile uint32_t *ring, uint32_t ring
     for (unsigned s = 0; s < 1024u; s++) {
         uint8_t byte = 0;
         bool k = false;
-        unsigned m = link_8b10b_decode((uint16_t)s, &byte, &k);
-        uint32_t e = m ? byte | (k ? LINK_FAST_DEC_K : 0u) | ((m & 1u) ? LINK_FAST_DEC_RDN : 0u) |
-                             ((m & 2u) ? LINK_FAST_DEC_RDP : 0u)
+        unsigned m = alink_8b10b_decode((uint16_t)s, &byte, &k);
+        uint32_t e = m ? byte | (k ? ALINK_FAST_DEC_K : 0u) | ((m & 1u) ? ALINK_FAST_DEC_RDN : 0u) |
+                             ((m & 2u) ? ALINK_FAST_DEC_RDP : 0u)
                        : 0u;
-        if (!m || k) e |= LINK_FAST_DEC_BAD;
+        if (!m || k) e |= ALINK_FAST_DEC_BAD;
         f->dec[s] = e;
     }
     for (unsigned i = 0; i < 8u; i++) f->slot_src[i] = &f->zero;
@@ -1149,12 +1149,12 @@ void link_fast_init(link_fast_t *f, const volatile uint32_t *ring, uint32_t ring
     lf_enter_search(f, (uint32_t)start_bit + 10u);
 }
 
-void link_fast_restart(link_fast_t *f, unsigned cls, uint64_t start_bit) {
+void alink_fast_restart(alink_fast_t *f, unsigned cls, uint64_t start_bit) {
     // Everything before the tables is state or configuration; keep the latter.
     const volatile uint32_t *ring = f->ring;
     uint32_t ring_mask = f->ring_mask;
     uint8_t bank_mask = f->bank_mask;
-    link_rx_cb_t cb = f->cb;
+    alink_rx_cb_t cb = f->cb;
     void *ctx = f->ctx;
     int32_t (*out)[8] = f->out;
     uint16_t out_cap = f->out_cap;
@@ -1163,7 +1163,7 @@ void link_fast_restart(link_fast_t *f, unsigned cls, uint64_t start_bit) {
     int8_t slot_run = f->slot_run, crc_dma = f->crc_dma;
     bool frame_events = f->frame_events;
     lf_m33_ctx_t m33 = f->m33;
-    memset(f, 0, offsetof(link_fast_t, cap));
+    memset(f, 0, offsetof(alink_fast_t, cap));
     f->ring = ring;
     f->ring_mask = ring_mask;
     f->cls = (uint8_t)cls;
@@ -1182,26 +1182,26 @@ void link_fast_restart(link_fast_t *f, unsigned cls, uint64_t start_bit) {
     lf_enter_search(f, (uint32_t)start_bit + 10u);
 }
 
-void link_fast_set_slots(link_fast_t *f, const uint8_t slots[8]) {
-    f->slot_run = slots[0] % LINK_BANK_CHANNELS == 0 && slots[0] < LINK_MAX_CHANNELS ? (int8_t)slots[0] : -1;
+void alink_fast_set_slots(alink_fast_t *f, const uint8_t slots[8]) {
+    f->slot_run = slots[0] % ALINK_BANK_CHANNELS == 0 && slots[0] < ALINK_MAX_CHANNELS ? (int8_t)slots[0] : -1;
     for (unsigned i = 0; i < 8u; i++) {
-        f->slot_src[i] = slots[i] < LINK_MAX_CHANNELS ? &f->samples[slots[i]] : &f->zero;
+        f->slot_src[i] = slots[i] < ALINK_MAX_CHANNELS ? &f->samples[slots[i]] : &f->zero;
         if (slots[i] != slots[0] + i) f->slot_run = -1;
     }
 }
 
 
-void link_fast_set_bank_mask(link_fast_t *f, uint8_t bank_mask) {
-    for (unsigned b = 0; b < LINK_MAX_BANKS; b++)
+void alink_fast_set_bank_mask(alink_fast_t *f, uint8_t bank_mask) {
+    for (unsigned b = 0; b < ALINK_MAX_BANKS; b++)
         if (((f->bank_mask & ~bank_mask) >> b) & 1u) {
-            memset(f->samples + LINK_BANK_CHANNELS * b, 0, LINK_BANK_CHANNELS * sizeof(int32_t));
+            memset(f->samples + ALINK_BANK_CHANNELS * b, 0, ALINK_BANK_CHANNELS * sizeof(int32_t));
             f->bank_fails[b] = 0;
         }
     f->bank_mask = bank_mask;
     f->decode_banks = (uint8_t)(bank_mask & ((1u << f->nbanks) - 1u));
 }
 
-unsigned link_fast_run(link_fast_t *f, uint64_t avail_bits, uint32_t search_budget_bits) {
+unsigned alink_fast_run(alink_fast_t *f, uint64_t avail_bits, uint32_t search_budget_bits) {
     // Ring words below the writer's position are complete; read them only
     // after the caller read that position.
     atomic_signal_fence(memory_order_seq_cst);
@@ -1211,24 +1211,24 @@ unsigned link_fast_run(link_fast_t *f, uint64_t avail_bits, uint32_t search_budg
 
     // The oldest bit a step can still read: the comma before p (and the
     // slip window, 2 more), or 10 before the next search position.
-    uint32_t oldest = (f->state == LINK_RX_SEARCH ? f->q : f->p) - 12u;
-    if ((int32_t)(f->avail - oldest) > (int32_t)(ring_bits - LINK_FAST_GUARD_BITS)) {
+    uint32_t oldest = (f->state == ALINK_RX_SEARCH ? f->q : f->p) - 12u;
+    if ((int32_t)(f->avail - oldest) > (int32_t)(ring_bits - ALINK_FAST_GUARD_BITS)) {
         f->overruns++;
-        if (f->state != LINK_RX_SEARCH) lf_loss(f);
+        if (f->state != ALINK_RX_SEARCH) lf_loss(f);
         f->q = f->avail - ring_bits / 2u;
-    } else if (f->state == LINK_RX_SEARCH && search_budget_bits &&
+    } else if (f->state == ALINK_RX_SEARCH && search_budget_bits &&
                (int32_t)(f->avail - f->q) > (int32_t)search_budget_bits) {
         f->q = f->avail - search_budget_bits / 2u;
     }
 
     uint32_t frames0 = f->stats.frames;
     for (;;) {
-        if (f->state == LINK_RX_LOCKED) {
+        if (f->state == ALINK_RX_LOCKED) {
             lf_locked(f);
-            if (f->state == LINK_RX_LOCKED) break;
+            if (f->state == ALINK_RX_LOCKED) break;
             continue;
         }
-        bool progressed = f->state == LINK_RX_SEARCH ? lf_step_search(f)
+        bool progressed = f->state == ALINK_RX_SEARCH ? lf_step_search(f)
                           : f->body_done             ? lf_next_aligned(f)
                                                      : lf_body_aligned(f);
         if (!progressed) break;

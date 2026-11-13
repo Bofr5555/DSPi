@@ -5,13 +5,13 @@
  * The bench generator's streams (with its TX impairments) go through the
  * model's TX program, a wire with clock offset, pulse-width distortion and
  * jitter, and the RX program, as in test_bench_model.c.  Whatever bits come
- * out, damaged or not, link_fast (DSPi/link/link_fast.c) must log exactly
- * what link_decoder.c logs: every event, frame, flag, bank status, sample
+ * out, damaged or not, alink_fast (DSPi/alink/alink_fast.c) must log exactly
+ * what alink_decoder.c logs: every event, frame, flag, bank status, sample
  * and counter.  Built by run.sh like test_bench_model.c.
  */
 
 #define main lk2_model_main
-#include "link_pio_model.c"
+#include "alink_pio_model.c"
 #undef main
 
 #include "bench_cmd.h"
@@ -30,7 +30,7 @@ typedef struct {
     unsigned imp_kind; int imp_n; unsigned imp_at;
 } McCase;
 
-#include "link_fast.h"
+#include "alink_fast.h"
 #include <inttypes.h>
 
 typedef struct { char *s; size_t n, cap; uint64_t origin; } flog_t;
@@ -43,21 +43,21 @@ static void flog_add(flog_t *l, const char *t) {
     l->n += k;
 }
 
-static void flog_cb(void *ctx, const link_rx_event_t *ev) {
+static void flog_cb(void *ctx, const alink_rx_event_t *ev) {
     flog_t *l = ctx;
     char t[160];
     switch (ev->type) {
-    case LINK_RX_EV_ALIGN: snprintf(t, sizeof(t), "A%" PRIu64, ev->bitpos - l->origin); break;
-    case LINK_RX_EV_LOCK: snprintf(t, sizeof(t), "L%" PRIu64, ev->frame); break;
-    case LINK_RX_EV_SUPERFRAME: snprintf(t, sizeof(t), "S"); break;
-    case LINK_RX_EV_SF_ERROR: snprintf(t, sizeof(t), "E%d", ev->sf_error); break;
-    case LINK_RX_EV_LOSS: snprintf(t, sizeof(t), "X"); break;
-    case LINK_RX_EV_FRAME: {
+    case ALINK_RX_EV_ALIGN: snprintf(t, sizeof(t), "A%" PRIu64, ev->bitpos - l->origin); break;
+    case ALINK_RX_EV_LOCK: snprintf(t, sizeof(t), "L%" PRIu64, ev->frame); break;
+    case ALINK_RX_EV_SUPERFRAME: snprintf(t, sizeof(t), "S"); break;
+    case ALINK_RX_EV_SF_ERROR: snprintf(t, sizeof(t), "E%d", ev->sf_error); break;
+    case ALINK_RX_EV_LOSS: snprintf(t, sizeof(t), "X"); break;
+    case ALINK_RX_EV_FRAME: {
         uint32_t h = 0x811C9DC5u;
         for (unsigned ch = 0; ch < ev->channels; ch++)
             for (int b = 0; b < 4; b++) h = (h ^ (((uint32_t)ev->samples[ch] >> (8 * b)) & 0xFFu)) * 0x01000193u;
         char banks[9];
-        unsigned nb = link_bank_count(ev->channels);
+        unsigned nb = alink_bank_count(ev->channels);
         for (unsigned b = 0; b < nb; b++) banks[b] = ".ohz"[ev->bank_status[b]];
         banks[nb] = 0;
         snprintf(t, sizeof(t), "F%" PRIu64 ":%x:%d:%s:%08" PRIx32, ev->frame, ev->flags, ev->slip, banks, h);
@@ -67,7 +67,7 @@ static void flog_cb(void *ctx, const link_rx_event_t *ev) {
     flog_add(l, t);
 }
 
-static void flog_stats(flog_t *l, const link_rx_stats_t *s) {
+static void flog_stats(flog_t *l, const alink_rx_stats_t *s) {
     char t[200];
     snprintf(t, sizeof(t), "#%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u", s->lock_count, s->loss_count, s->crc8_errors,
              s->crc16_errors, s->bit_slips, s->superframe_errors, s->comma_errors, s->counter_errors,
@@ -75,8 +75,8 @@ static void flog_stats(flog_t *l, const link_rx_stats_t *s) {
     flog_add(l, t);
 }
 
-static link_rx_t fm_ref;
-static link_fast_t fm_fast;
+static alink_rx_t fm_ref;
+static alink_fast_t fm_fast;
 static uint32_t fm_ring[256];
 
 // One model run; returns 1 when both receivers agree, and counts frames.
@@ -115,17 +115,17 @@ static int fm_case(const McCase *c, uint8_t mask, unsigned *frames_out) {
     static char a[1 << 20], b[1 << 20];
     flog_t la = { a, 0, sizeof(a), 0 }, lb = { b, 0, sizeof(b), 0 };
     a[0] = b[0] = 0;
-    link_rx_init(&fm_ref, c->cls, mask, flog_cb, &la);
-    link_rx_push(&fm_ref, rw, nw * 32u);
+    alink_rx_init(&fm_ref, c->cls, mask, flog_cb, &la);
+    alink_rx_push(&fm_ref, rw, nw * 32u);
     flog_stats(&la, &fm_ref.stats);
     // The production receiver reads a 1 KB ring filled 37 words at a time.
-    link_fast_init(&fm_fast, fm_ring, 256, c->cls, mask, flog_cb, &lb, 0);
+    alink_fast_init(&fm_fast, fm_ring, 256, c->cls, mask, flog_cb, &lb, 0);
     fm_fast.frame_events = true;
     for (size_t i = 0; i < nw;) {
         size_t k = nw - i < 37 ? nw - i : 37;
         for (size_t j = 0; j < k; j++) fm_ring[(i + j) & 255u] = rw[i + j];
         i += k;
-        link_fast_run(&fm_fast, (uint64_t)i * 32u, 0);
+        alink_fast_run(&fm_fast, (uint64_t)i * 32u, 0);
     }
     flog_stats(&lb, &fm_fast.stats);
     int same = strcmp(a, b) == 0 && fm_fast.overruns == 0;
@@ -165,7 +165,7 @@ int main(void) {
         { 2, BENCH_IMP_FLIP, 4 }, { 1, BENCH_IMP_IDLE, 30 }, { 3, BENCH_IMP_SLIP, 3 }, { 2, BENCH_IMP_IDLE, 2 },
     };
     for (size_t i = 0; i < sizeof(imps) / sizeof(imps[0]); i++) {
-        McCase c = { .cls = imps[i].cls, .rate = LINK_RATE_48K, .channels = 8, .frames = 300, .ppm = 300,
+        McCase c = { .cls = imps[i].cls, .rate = ALINK_RATE_48K, .channels = 8, .frames = 300, .ppm = 300,
                      .imp_kind = imps[i].kind, .imp_n = imps[i].n, .imp_at = 150 };
         unsigned f;
         CHECK(fm_case(&c, 0xFF, &f), "impairment %zu", i);

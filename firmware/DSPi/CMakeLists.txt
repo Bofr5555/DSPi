@@ -24,8 +24,8 @@ set_source_files_properties(
 add_executable(DSPi
     adat_input.c
     adat_input.h
-    link_input.c
-    link_input.h
+    alink_input.c
+    alink_input.h
     adat_output.c
     adat_output.h
     audio_input.c
@@ -220,45 +220,56 @@ endif()
 pico_generate_pio_header(DSPi ${CMAKE_CURRENT_SOURCE_DIR}/i2s_input.pio)
 pico_generate_pio_header(DSPi ${CMAKE_CURRENT_SOURCE_DIR}/adat_input.pio)
 
-# DSPI_LINK (WP LK5): the multi-unit audio link receiver, INPUT_SOURCE_LINK.
-# RP2350 only (PIO2, DMA 5/6, the M33 decoder).  The decoder (link/) is the
+# DSPI_ALINK (WP LK5): the multi-unit audio link receiver, INPUT_SOURCE_ALINK.
+# RP2350 only (PIO2, DMA 5/6, the M33 decoder).  The decoder (alink/) is the
 # portable C of LK1/LK5 plus the generated M33 assembly; its hot functions go
-# to .time_critical like DSP_TIME_CRITICAL.  DSPI_LINK_DECODE_CORE1 moves the
-# decode service to the Core 1 EQ worker (link_input.h).
-option(DSPI_LINK "Build the link receiver input (RP2350)" ON)
-option(DSPI_LINK_DECODE_CORE1 "Run the link decoder on Core 1 in EQ-worker mode" OFF)
-if (DSPI_LINK AND NOT PICO_PLATFORM STREQUAL "rp2040")
+# to .time_critical like DSP_TIME_CRITICAL.  DSPI_ALINK_DECODE_CORE1 moves the
+# decode service to the Core 1 EQ worker (alink_input.h).
+# Deprecated spellings, accepted for one release: -DDSPI_LINK and
+# -DDSPI_LINK_DECODE_CORE1 (renamed for the alink naming rule, WP ALINK2).
+foreach(_alink_opt DSPI_ALINK DSPI_ALINK_DECODE_CORE1)
+    string(REPLACE "DSPI_ALINK" "DSPI_LINK" _alink_old ${_alink_opt})
+    if (DEFINED ${_alink_old})
+        message(WARNING "${_alink_old} is deprecated: use ${_alink_opt} (taking ${_alink_old}=${${_alink_old}})")
+        set(${_alink_opt} ${${_alink_old}} CACHE BOOL "" FORCE)
+        unset(${_alink_old} CACHE)
+        unset(${_alink_old})
+    endif()
+endforeach()
+option(DSPI_ALINK "Build the alink receiver input (RP2350)" ON)
+option(DSPI_ALINK_DECODE_CORE1 "Run the alink decoder on Core 1 in EQ-worker mode" OFF)
+if (DSPI_ALINK AND NOT PICO_PLATFORM STREQUAL "rp2040")
     target_sources(DSPi PRIVATE
-        link/link_codec.c
-        link/link_fast.c
-        link/link_phase.c
-        link/bench_trim.c
-        link/link_fast_m33.S
-        link/link_fast_m33_loop.S
+        alink/alink_codec.c
+        alink/alink_fast.c
+        alink/alink_phase.c
+        alink/bench_trim.c
+        alink/alink_fast_m33.S
+        alink/alink_fast_m33_loop.S
     )
-    set_source_files_properties(link_input.c link/link_fast.c PROPERTIES COMPILE_FLAGS "-O3")
-    foreach(p link_rx_20 link_rx_10 link_rx_5)
+    set_source_files_properties(alink_input.c alink/alink_fast.c PROPERTIES COMPILE_FLAGS "-O3")
+    foreach(p alink_rx_20 alink_rx_10 alink_rx_5)
         pico_generate_pio_header(DSPi ${CMAKE_CURRENT_SOURCE_DIR}/${p}.pio)
     endforeach()
-    target_compile_definitions(DSPi PRIVATE DSPI_LINK=1 LINK_FAST_M33=1 LINK_FAST_CRC_DMA=1
-        "LINK_FAST_HOT=__attribute__((section(\".time_critical.link\")))")
-    if (DSPI_LINK_DECODE_CORE1)
-        target_compile_definitions(DSPi PRIVATE DSPI_LINK_DECODE_CORE1=1)
+    target_compile_definitions(DSPi PRIVATE DSPI_ALINK=1 ALINK_FAST_M33=1 ALINK_FAST_CRC_DMA=1
+        "ALINK_FAST_HOT=__attribute__((section(\".time_critical.alink\")))")
+    if (DSPI_ALINK_DECODE_CORE1)
+        target_compile_definitions(DSPi PRIVATE DSPI_ALINK_DECODE_CORE1=1)
     endif()
 endif()
 
 # DSPI_ALINK_USB (WP USB1): alink USB-direct units.  SOF-locked clock, USB-frame
 # time base, phase lock and apply-at-frame over USB (EXT_ALINK_USB, spec 2.9).
 # RP2040 and RP2350.  Opt-in at run time (mode 0 by default: stock behaviour).
-# It reuses link/link_phase.c (built above on link builds).
+# It reuses alink/alink_phase.c (built above on alink builds).
 # DSPI_ALINK_USB_GPIO=<pin>: bench builds only, a GPIO pulsed at every 128th
 # SOF and at SYNC_PULSE ops (Documentation/Bench/usb_direct_bench.md E0).
 option(DSPI_ALINK_USB "Build the alink USB-direct sync (SOF lock, phase lock)" ON)
 set(DSPI_ALINK_USB_GPIO "" CACHE STRING "Bench only: GPIO for the SOF / SYNC_PULSE marker (empty = none)")
 if (DSPI_ALINK_USB)
     target_sources(DSPi PRIVATE alink_usb.c alink_usb/alink_usb_core.c)
-    if (NOT (DSPI_LINK AND NOT PICO_PLATFORM STREQUAL "rp2040"))
-        target_sources(DSPi PRIVATE link/link_phase.c)
+    if (NOT (DSPI_ALINK AND NOT PICO_PLATFORM STREQUAL "rp2040"))
+        target_sources(DSPi PRIVATE alink/alink_phase.c)
     endif()
     target_compile_definitions(DSPi PRIVATE DSPI_ALINK_USB=1)
     if (PICO_PLATFORM MATCHES "rp2350")

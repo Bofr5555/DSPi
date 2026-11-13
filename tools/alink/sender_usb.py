@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""sender_usb.py - the link sender's extension block over Linux usbfs (WP LK4).
+"""sender_usb.py - the alink sender's extension block over Linux usbfs (WP LK4).
 
-A DSPi link sender (firmware/DSPi-Sender) answers REQ_EXTENSION (0x00) on its
-vendor interface (2) with the sender's part of the link block
+A DSPi alink sender (firmware/DSPi-Sender) answers REQ_EXTENSION (0x00) on its
+vendor interface (2) with the sender's part of the alink block
 (Documentation/Features/extension_channel_spec.md 2.8).  This module reads and
 writes those sub-commands with plain control transfers on the device node
-(/dev/bus/usb/BBB/DDD), standard library only, so tools/link/bench.py can
+(/dev/bus/usb/BBB/DDD), standard library only, so tools/alink/bench.py can
 configure a sender and read its frame counter in the same container that
 talks to the bench boards.  A refused request (STALL) raises SenderRefused.
 
     dev = SenderUsb("/dev/bus/usb/003/012")
-    tx = dev.link_tx()            # dict of EXT_LINK_TX
-    dev.set_link_tx(tx | dict(link_enable=1, test_pattern=1))
+    tx = dev.alink_tx()           # dict of EXT_ALINK_TX
+    dev.set_alink_tx(tx | dict(alink_enable=1, test_pattern=1))
 """
 
 from __future__ import annotations
@@ -26,18 +26,18 @@ REQ_EXTENSION = 0x00
 ITF_VENDOR = 2
 
 EXT_LIST = 0x0000
-EXT_LINK_INFO = 0x8000
-EXT_LINK_STATUS = 0x8001
-EXT_LINK_CONFIG = 0x8002
+EXT_ALINK_INFO = 0x8000
+EXT_ALINK_STATUS = 0x8001
+EXT_ALINK_CONFIG = 0x8002
 EXT_FRAME_COUNTER = 0x8005
-EXT_LINK_TX = 0x8007
-EXT_LINK_CTRL_MSG = 0x8008
-EXT_LINK_STATS_RESET = 0x8009
-EXT_LINK_DIAG = 0x800A
+EXT_ALINK_TX = 0x8007
+EXT_ALINK_CTRL_MSG = 0x8008
+EXT_ALINK_STATS_RESET = 0x8009
+EXT_ALINK_DIAG = 0x800A
 
 RATE_CODE = {"44k1": 0, "48k": 1, "96k": 2}
 RATE_NAME = {v: k for k, v in RATE_CODE.items()}
-TX_FIELDS = ("link_enable", "cls", "channels", "rate", "test_pattern", "slot_map_id", "sync_pin",
+TX_FIELDS = ("alink_enable", "cls", "channels", "rate", "test_pattern", "slot_map_id", "sync_pin",
              "txdis_mask", "los_mask", "usb_alt", "flags")
 TX_FMT = "<HBBBBBBHHBBH"
 
@@ -57,7 +57,7 @@ USBDEVFS_CONTROL = (3 << 30) | (ctypes.sizeof(_Ctrl) << 16) | (ord("U") << 8) | 
 
 
 def pack_tx(d: dict) -> bytes:
-    return struct.pack(TX_FMT, d["link_enable"], d["cls"], d["channels"], d["rate"], d["test_pattern"],
+    return struct.pack(TX_FMT, d["alink_enable"], d["cls"], d["channels"], d["rate"], d["test_pattern"],
                        d.get("slot_map_id", 0), d["sync_pin"], d["txdis_mask"], d.get("los_mask", 0),
                        d.get("usb_alt", 0), d.get("flags", 0), 0)
 
@@ -80,7 +80,7 @@ def pack_ctrl(frame: int, op: int, arg: int = 0, value: int = 0, system_flags: i
 
 
 def unpack_diag(b: bytes) -> dict | None:
-    """The sender layout of EXT_LINK_DIAG (byte 0 = 0x81); None for another layout."""
+    """The sender layout of EXT_ALINK_DIAG (byte 0 = 0x81); None for another layout."""
     if len(b) < 64 or b[0] != 0x81:
         return None
     eng, cls, delay = b[1], b[2], b[3]
@@ -129,25 +129,25 @@ class SenderUsb:
         return list(struct.unpack(f"<{len(b) // 2}H", b[:len(b) // 2 * 2]))
 
     def info(self) -> bytes:
-        return self.get(EXT_LINK_INFO, 32)
+        return self.get(EXT_ALINK_INFO, 32)
 
-    def link_tx(self) -> dict:
-        return unpack_tx(self.get(EXT_LINK_TX, 16))
+    def alink_tx(self) -> dict:
+        return unpack_tx(self.get(EXT_ALINK_TX, 16))
 
-    def set_link_tx(self, d: dict) -> None:
-        self.set(EXT_LINK_TX, pack_tx(d))
+    def set_alink_tx(self, d: dict) -> None:
+        self.set(EXT_ALINK_TX, pack_tx(d))
 
     def frame(self) -> int:
         return struct.unpack_from("<Q", self.get(EXT_FRAME_COUNTER, 16))[0]
 
     def ctrl_in(self) -> dict:
-        return unpack_ctrl_in(self.get(EXT_LINK_CTRL_MSG, 24))
+        return unpack_ctrl_in(self.get(EXT_ALINK_CTRL_MSG, 24))
 
     def ctrl(self, frame: int, op: int, arg: int = 0, value: int = 0, system_flags: int = 0) -> None:
-        self.set(EXT_LINK_CTRL_MSG, pack_ctrl(frame, op, arg, value, system_flags))
+        self.set(EXT_ALINK_CTRL_MSG, pack_ctrl(frame, op, arg, value, system_flags))
 
     def stats_reset(self) -> None:
-        self.set(EXT_LINK_STATS_RESET, b"\x01")
+        self.set(EXT_ALINK_STATS_RESET, b"\x01")
 
     def diag(self) -> dict | None:
-        return unpack_diag(self.get(EXT_LINK_DIAG, 64))
+        return unpack_diag(self.get(EXT_ALINK_DIAG, 64))

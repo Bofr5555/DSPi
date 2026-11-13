@@ -1,7 +1,7 @@
 /*
- * bench_decode.h - link bench: cycles per frame of LK5's receiver (WP LK5)
+ * bench_decode.h - alink bench: cycles per frame of LK5's receiver (WP LK5)
  *
- * The `decode` console command (bench_decode.c): runs link_fast over a canned
+ * The `decode` console command (bench_decode.c): runs alink_fast over a canned
  * stream in RAM or the live RX ring and reports DWT cycles per frame.
  */
 

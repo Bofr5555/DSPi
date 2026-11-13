@@ -1,27 +1,27 @@
-# DSPi link sender (WP LK4, SYS2 section 4): a Pico 2 as a USB sound card that
-# drives up to 8 link outputs.  Built instead of DSPi when the top-level
+# DSPi alink sender (WP LK4, SYS2 section 4): a Pico 2 as a USB sound card that
+# drives up to 8 alink outputs. Built instead of DSPi when the top-level
 # option DSPI_ROLE_SENDER is ON:
 #
 #   cmake -S firmware -B <dir> -G Ninja -DPICO_PLATFORM=rp2350-arm-s -DPICO_BOARD=pico2 -DDSPI_ROLE_SENDER=ON
 #   cmake --build <dir>        -> <dir>/DSPi-Sender/dspi_sender-rp2350.uf2
 #
-# -DDSPI_SENDER_BENCH=ON gives dspi_sender_bench-rp2350.uf2: link 0 (GP2)
-# sends the PRBS-7 test pattern from boot and SYNC is on GP21, so a link
-# bench RX board (firmware/link_bench) checks it with no host on the sender.
+# -DDSPI_SENDER_BENCH=ON gives dspi_sender_bench-rp2350.uf2: alink 0 (GP2)
+# sends the PRBS-7 test pattern from boot and SYNC is on GP21, so an alink
+# bench RX board (firmware/alink_bench) checks it with no host on the sender.
 #
 # It shares DSPi's USB descriptors (usb_descriptors.c with DSPI_ROLE_SENDER:
 # two more alts), feedback controller, soft VCXO, flash clock helpers and
-# the link codec (firmware/DSPi/link) and LK2's PIO programs; its own
+# the alink codec (firmware/DSPi/alink) and LK2's PIO programs; its own
 # sources are the encoder core, the engine, the UAC1 driver and the vendor
 # requests.  RP2350 only.
 
 if (NOT PICO_PLATFORM MATCHES "^rp2350")
-    message(FATAL_ERROR "DSPI_ROLE_SENDER needs PICO_PLATFORM=rp2350-arm-s: the link is RP2350-only")
+    message(FATAL_ERROR "DSPI_ROLE_SENDER needs PICO_PLATFORM=rp2350-arm-s: the alink is RP2350-only")
 endif()
 
 set(DSPI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../DSPi)
 
-option(DSPI_SENDER_BENCH "Sender bench build: link 0 sends PRBS-7 from boot, SYNC on GP21" OFF)
+option(DSPI_SENDER_BENCH "Sender bench build: alink 0 sends PRBS-7 from boot, SYNC on GP21" OFF)
 if (DSPI_SENDER_BENCH)
     set(SENDER_NAME dspi_sender_bench-rp2350)
 else()
@@ -34,28 +34,28 @@ add_executable(DSPi-Sender
     sender_usb.c
     sender_vendor.c
     sender_store.c
-    sender_link.c
+    sender_alink.c
     sender_fanout.c
     ${DSPI_DIR}/usb_descriptors.c
     ${DSPI_DIR}/usb_feedback_controller.c
     ${DSPI_DIR}/soft_vcxo.c
     ${DSPI_DIR}/flash_clkdiv.c
-    ${DSPI_DIR}/link/link_codec.c
-    ${DSPI_DIR}/link/link_decoder.c
+    ${DSPI_DIR}/alink/alink_codec.c
+    ${DSPI_DIR}/alink/alink_decoder.c
 )
 set_target_properties(DSPi-Sender PROPERTIES OUTPUT_NAME ${SENDER_NAME})
 target_compile_options(DSPi-Sender PRIVATE -O2 -Wall -Wextra)
-set_source_files_properties(sender_link.c sender_fanout.c ${DSPI_DIR}/link/link_codec.c
+set_source_files_properties(sender_alink.c sender_fanout.c ${DSPI_DIR}/alink/alink_codec.c
     PROPERTIES COMPILE_FLAGS "-O3")
 
-foreach(p link_tx_20 link_tx_10 link_tx_5 link_rx_20 link_rx_10 link_rx_5)
+foreach(p alink_tx_20 alink_tx_10 alink_tx_5 alink_rx_20 alink_rx_10 alink_rx_5)
     pico_generate_pio_header(DSPi-Sender ${DSPI_DIR}/${p}.pio)
 endforeach()
 
 target_include_directories(DSPi-Sender PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${DSPI_DIR}
-    ${DSPI_DIR}/link
+    ${DSPI_DIR}/alink
     ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 

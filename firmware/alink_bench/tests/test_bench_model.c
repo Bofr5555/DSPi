@@ -1,8 +1,8 @@
 /*
- * test_bench_model.c - the link bench logic driven through LK2's PIO model
+ * test_bench_model.c - the alink bench logic driven through LK2's PIO model
  *
- * tools/link_rx_test/link_pio_model.c (LK2, unchanged) runs the assembled
- * link_tx_N / link_rx_N programs cycle by cycle with a clock offset, pulse-
+ * tools/alink_rx_test/alink_pio_model.c (LK2, unchanged) runs the assembled
+ * alink_tx_N / alink_rx_N programs cycle by cycle with a clock offset, pulse-
  * width distortion and jitter on the line.  This test feeds it the bench
  * generator's stream and gives what the RX program emits to the bench's
  * acquisition, bit error rate tester and reference runner, i.e. the
@@ -19,7 +19,7 @@
  */
 
 #define main lk2_model_main
-#include "link_pio_model.c"
+#include "alink_pio_model.c"
 #undef main
 
 #include "bench_check.h"
@@ -48,12 +48,12 @@ typedef struct {
     bool acquired;
     bench_bert_stats_t bert;
     bool synced_end;
-    link_rx_stats_t ref;
+    alink_rx_stats_t ref;
     uint32_t sample_errors;
     uint64_t rx_bits;
 } McResult;
 
-static link_rx_t mc_scratch;
+static alink_rx_t mc_scratch;
 
 static void mc_run(const McCase *c, McResult *res) {
     memset(res, 0, sizeof(*res));
@@ -137,7 +137,7 @@ static void test_clean_classes(void) {
     static const double ppms[] = { -1000, -300, 0, 300, 1000 };
     for (unsigned cls = 1; cls <= 3; cls++)
         for (unsigned pi = 0; pi < 5; pi++) {
-            McCase c = { .cls = cls, .rate = LINK_RATE_48K, .channels = 8, .frames = 200, .ppm = ppms[pi],
+            McCase c = { .cls = cls, .rate = ALINK_RATE_48K, .channels = 8, .frames = 200, .ppm = ppms[pi],
                          .phase = 0.37 * pi };
             McResult r;
             mc_run(&c, &r);
@@ -163,7 +163,7 @@ static void test_wrong_class(void) {
     for (unsigned cls = 1; cls <= 3; cls++)
         for (unsigned rx = 1; rx <= 3; rx++) {
             if (rx == cls) continue;
-            McCase c = { .cls = cls, .rate = LINK_RATE_48K, .channels = 8, .frames = 120, .rx_cls = rx };
+            McCase c = { .cls = cls, .rate = ALINK_RATE_48K, .channels = 8, .frames = 120, .rx_cls = rx };
             McResult r;
             mc_run(&c, &r);
             CHECK(!r.acquired && r.ref.lock_count == 0, "TX %s into RX %s must not lock", bench_class_name(cls),
@@ -197,7 +197,7 @@ static void scan(unsigned cls, double pwd, double jit, double ppm, bench_scan_t 
     bench_scan_begin(sc, bench_trim_max(p->rx, p->rx_len, (unsigned)p->rx_hi_entry, (unsigned)p->rx_lo_emit));
     int t;
     while (bench_scan_next(sc, &t)) {
-        McCase c = { .cls = cls, .rate = LINK_RATE_48K, .channels = 8, .frames = 140, .ppm = ppm, .pwd = pwd,
+        McCase c = { .cls = cls, .rate = ALINK_RATE_48K, .channels = 8, .frames = 140, .ppm = ppm, .pwd = pwd,
                      .jit = jit, .trim = t, .phase = 0.5 };
         McResult r;
         mc_run(&c, &r);
@@ -242,7 +242,7 @@ static void test_impairments_through_pio(void) {
         { 1, BENCH_IMP_IDLE, 30, 3, 0, 1, 2, 3 },
     };
     for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        McCase c = { .cls = cases[i].cls, .rate = LINK_RATE_48K, .channels = 8, .frames = 400, .ppm = 300,
+        McCase c = { .cls = cases[i].cls, .rate = ALINK_RATE_48K, .channels = 8, .frames = 400, .ppm = 300,
                      .imp_kind = cases[i].kind, .imp_n = cases[i].n, .imp_at = 160 };
         McResult r;
         mc_run(&c, &r);

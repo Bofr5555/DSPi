@@ -12,13 +12,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// DSPI_LINK: the link receiver (INPUT_SOURCE_LINK, link_input.c) is built in.
+// DSPI_ALINK: the alink receiver (INPUT_SOURCE_ALINK, alink_input.c) is built in.
 // RP2350 only (the RP2040 has no PIO2); set by firmware/DSPi/CMakeLists.txt.
-#ifndef DSPI_LINK
-#define DSPI_LINK 0
+#ifndef DSPI_ALINK
+#define DSPI_ALINK 0
 #endif
-#ifndef DSPI_LINK_DECODE_CORE1
-#define DSPI_LINK_DECODE_CORE1 0
+#ifndef DSPI_ALINK_DECODE_CORE1
+#define DSPI_ALINK_DECODE_CORE1 0
 #endif
 
 // Input source identifiers (extensible — leave gaps for future types)
@@ -30,10 +30,10 @@ typedef enum {
     INPUT_SOURCE_SPDIF2 = 4,   // Optional SPDIF input 2 (disabled until enabled by host)
     INPUT_SOURCE_SPDIF3 = 5,   // Optional SPDIF input 3 (disabled until enabled by host)
     INPUT_SOURCE_SPDIF4 = 6,   // Optional SPDIF input 4 (disabled until enabled by host)
-    INPUT_SOURCE_LINK   = 7,   // Multi-unit audio link receiver (RP2350 link builds only; link_input.h)
+    INPUT_SOURCE_ALINK  = 7,   // Multi-unit audio link receiver (RP2350 alink builds only; alink_input.h)
 } InputSource;
 
-#define INPUT_SOURCE_MAX    INPUT_SOURCE_LINK     // Highest valid value
+#define INPUT_SOURCE_MAX    INPUT_SOURCE_ALINK    // Highest valid value
 
 // Number of selectable SPDIF inputs. Input 0 (INPUT_SOURCE_SPDIF) is the
 // always-present one; inputs 1..3 (SPDIF2..SPDIF4) are optional and share the
@@ -236,7 +236,7 @@ static inline bool adat_slave_mode_active(void) {
            active_input_source == INPUT_SOURCE_ADAT;
 }
 
-// Structurally valid input source value. ADAT (3) and LINK (7) are
+// Structurally valid input source value. ADAT (3) and ALINK (7) are
 // structurally valid on both platforms so presets round-trip; selectability
 // is gated separately.
 static inline bool input_source_valid(uint8_t src) {
@@ -294,11 +294,11 @@ static inline bool input_source_selectable(uint8_t src) {
         return false;   // no PIO/DMA/channel budget on RP2040
 #endif
     }
-    if (src == INPUT_SOURCE_LINK) {
-        // Selectable on link builds even with EXT_LINK_CONFIG.enable 0: the
+    if (src == INPUT_SOURCE_ALINK) {
+        // Selectable on alink builds even with EXT_ALINK_CONFIG.enable 0: the
         // source then plays silence (extension_channel_spec.md 2.8.3).  Stock
         // and RP2040 builds refuse 7 like an unknown source.
-#if DSPI_LINK
+#if DSPI_ALINK
         return true;
 #else
         return false;
@@ -351,31 +351,31 @@ bool spdif_input_enable_acceptable(uint8_t idx);
 // paths can validate a stored ADAT input pin before applying it.
 bool adat_input_pin_acceptable(uint8_t pin);
 
-// Link receiver configuration (EXT_LINK_CONFIG, 8 bytes, and EXT_LINK_SLOTS,
+// Alink receiver configuration (EXT_ALINK_CONFIG, 8 bytes, and EXT_ALINK_SLOTS,
 // 8 bytes; extension_channel_spec.md 2.8.3 / 2.8.4).  Device-global, not in
 // the bulk parameters or presets; persisted with REQ_SAVE_OUTPUT_CONFIG in the
-// preset directory's link block.  Defined in audio_input.c on both platforms
-// so the directory round-trips; only link builds act on them.
-#define LINK_CFG_ENABLE     0
-#define LINK_CFG_RX_PIN     1
-#define LINK_CFG_CLASS      2
-#define LINK_CFG_TX_PIN     3
-#define LINK_CFG_LOS_PIN    4
-#define LINK_CFG_TXDIS_PIN  5
-#define LINK_CFG_FLAGS      6
-#define LINK_CFG_LEN        8
-#define LINK_SLOTS_LEN      8
-#define LINK_RX_PIN_DEFAULT 0       // "build default" for rx_pin 0xFF (receiver: GP0)
-extern uint8_t link_config[LINK_CFG_LEN];
-extern uint8_t link_slots[LINK_SLOTS_LEN];
-// EXT_LINK_PHASE's persisted part (WP LK6): mode, d_local (u16 LE),
-// hops_offset (i16 LE); factory 1, 128, 0.  Same lifecycle as link_config.
-#define LINK_PHASE_STORE_LEN 5
-extern uint8_t link_phase_store[LINK_PHASE_STORE_LEN];
-void link_phase_store_defaults(uint8_t p[LINK_PHASE_STORE_LEN]);
+// preset directory's alink block. Defined in audio_input.c on both platforms
+// so the directory round-trips; only alink builds act on them.
+#define ALINK_CFG_ENABLE    0
+#define ALINK_CFG_RX_PIN    1
+#define ALINK_CFG_CLASS     2
+#define ALINK_CFG_TX_PIN    3
+#define ALINK_CFG_LOS_PIN   4
+#define ALINK_CFG_TXDIS_PIN 5
+#define ALINK_CFG_FLAGS     6
+#define ALINK_CFG_LEN       8
+#define ALINK_SLOTS_LEN     8
+#define ALINK_RX_PIN_DEFAULT 0      // "build default" for rx_pin 0xFF (receiver: GP0)
+extern uint8_t alink_config[ALINK_CFG_LEN];
+extern uint8_t alink_slots[ALINK_SLOTS_LEN];
+// EXT_ALINK_PHASE's persisted part (WP LK6): mode, d_local (u16 LE),
+// hops_offset (i16 LE); factory 1, 128, 0.  Same lifecycle as alink_config.
+#define ALINK_PHASE_STORE_LEN 5
+extern uint8_t alink_phase_store[ALINK_PHASE_STORE_LEN];
+void alink_phase_store_defaults(uint8_t p[ALINK_PHASE_STORE_LEN]);
 // Factory values: disabled, default pin, auto class, no repeater/LOS/TX_DISABLE,
 // mute on loss + automatic re-anchor; identity slots.
-void link_config_defaults(uint8_t cfg[LINK_CFG_LEN], uint8_t slots[LINK_SLOTS_LEN]);
+void alink_config_defaults(uint8_t cfg[ALINK_CFG_LEN], uint8_t slots[ALINK_SLOTS_LEN]);
 
 // I2S input rate wire/flash encoding (1 byte): 0 = 44100, 1 = 48000,
 // 2 = 96000. Unknown values decode to 48000.

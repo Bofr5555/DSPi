@@ -1,9 +1,9 @@
 /*
- * bench_check.h - link bench: receiver-side checks
+ * bench_check.h - alink bench: receiver-side checks
  *
- * Three consumers of the raw bit ring a link_rx_N program fills:
+ * Three consumers of the raw bit ring an alink_rx_N program fills:
  *
- *  - bench_acquire(): runs LK1's reference receiver (link_decoder.c,
+ *  - bench_acquire(): runs LK1's reference receiver (alink_decoder.c,
  *    unchanged) over a snapshot of the ring until it is locked, and returns
  *    where frame F starts, its running disparity and the superframe.
  *  - bench_bert_*: from that state, regenerates the stream the bench
@@ -11,8 +11,8 @@
  *    it: a bit error rate tester at line rate.  It follows bit slips of up
  *    to 3 bits and declares loss of sync after a run of bad frames.
  *  - bench_ref_*: feeds the same ring to a reference receiver as fast as
- *    the CPU allows, for the protocol counters of spec 8.9 (EXT_LINK_STATUS
- *    and EXT_LINK_DIAG).  When it falls a ring behind it restarts at the
+ *    the CPU allows, for the protocol counters of spec 8.9 (EXT_ALINK_STATUS
+ *    and EXT_ALINK_DIAG). When it falls a ring behind it restarts at the
  *    oldest data and counts a gap, so its counters cover a known fraction
  *    of the stream.
  *
@@ -28,7 +28,7 @@
 #include <stdint.h>
 
 #include "bench_gen.h"
-#include "link_decoder.h"
+#include "alink_decoder.h"
 
 // ---------------------------------------------------------------------------
 // Ring view
@@ -55,8 +55,8 @@ typedef struct {
     uint64_t frame;         // F of the frame found
     uint64_t start;         // absolute bit of its comma's first bit
     unsigned rd;            // running disparity before the comma
-    link_sf_t sf;           // the superframe in force
-    link_rx_stats_t stats;  // the snapshot decoder's counters
+    alink_sf_t sf;          // the superframe in force
+    alink_rx_stats_t stats; // the snapshot decoder's counters
 } bench_acq_t;
 
 // Bits a snapshot needs to guarantee one lock: 64 frames plus a search
@@ -67,7 +67,7 @@ uint32_t bench_acquire_bits(unsigned cls);
 // reference receiver of class cls; true with *out filled at the first
 // locked frame that starts at a comma with a good head.  rx is scratch.
 bool bench_acquire(const uint32_t *words, uint64_t first_bit, size_t nbits, unsigned cls,
-                   link_rx_t *rx, bench_acq_t *out);
+                   alink_rx_t *rx, bench_acq_t *out);
 
 // ---------------------------------------------------------------------------
 // Bit error rate tester
@@ -115,19 +115,19 @@ unsigned bench_bert_run(bench_bert_t *b, const bench_ring_t *r, uint64_t oldest,
 // ---------------------------------------------------------------------------
 
 typedef struct {
-    link_rx_t rx;
+    alink_rx_t rx;
     uint8_t  cls, pay;
     uint64_t base;          // absolute bit of the current decoder's bit 0
     uint64_t pos;           // next absolute bit to push (a word boundary)
     bool     restart;       // restart at the next run (bench_ref_restart)
-    link_rx_stats_t acc;    // counters of finished decoder instances
+    alink_rx_stats_t acc;   // counters of finished decoder instances
     uint32_t gaps;          // restarts after falling a ring behind
     uint64_t bits;          // bits pushed in total
     uint32_t sample_errors; // OK banks whose samples differ from the bench payload
     uint32_t events_lock, events_loss;
     uint64_t last_frame;    // F of the last delivered frame
     uint8_t  comma_offset;  // bit offset of the last comma in the 32-bit words
-    int32_t  expect[LINK_MAX_CHANNELS];
+    int32_t  expect[ALINK_MAX_CHANNELS];
 } bench_ref_t;
 
 void bench_ref_init(bench_ref_t *r, unsigned cls, unsigned pay);
@@ -143,8 +143,8 @@ size_t bench_ref_run(bench_ref_t *r, const bench_ring_t *ring, uint64_t oldest, 
 static inline void bench_ref_restart(bench_ref_t *r) { r->restart = true; }
 
 // Counters of every instance so far.
-void bench_ref_stats(const bench_ref_t *r, link_rx_stats_t *out);
+void bench_ref_stats(const bench_ref_t *r, alink_rx_stats_t *out);
 
-void bench_stats_add(link_rx_stats_t *acc, const link_rx_stats_t *s);
+void bench_stats_add(alink_rx_stats_t *acc, const alink_rx_stats_t *s);
 
 #endif // BENCH_CHECK_H

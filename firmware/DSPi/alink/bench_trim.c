@@ -1,8 +1,8 @@
 /*
- * bench_trim.c - link RX sampling trim and the trim scan (link bench, DSPi receiver)
+ * bench_trim.c - alink RX sampling trim and the trim scan (alink bench, DSPi receiver)
  *
  * See bench_trim.h.  bench_trim_patch() is the apply_trim() of
- * tools/link_rx_test/link_pio_model.c; the host tests check that both give
+ * tools/alink_rx_test/alink_pio_model.c; the host tests check that both give
  * the same instruction words.
  */
 

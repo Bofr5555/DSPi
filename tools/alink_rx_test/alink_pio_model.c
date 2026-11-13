@@ -1,6 +1,6 @@
 /*
- * link_pio_model.c; cycle-accurate model of the DSPi audio link PIO programs
- * (firmware/DSPi/link_tx_N.pio, link_rx_N.pio; SYS2 2.6/2.7, WP LK2).
+ * alink_pio_model.c; cycle-accurate model of the DSPi audio link PIO programs
+ * (firmware/DSPi/alink_tx_N.pio, alink_rx_N.pio; SYS2 2.6/2.7, WP LK2).
  *
  * Unlike tools/adat_rx_test, which transcribes its program into a switch,
  * this model runs the pioasm output itself: a small PIO interpreter executes
@@ -9,26 +9,26 @@
  * source of truth. run.sh assembles them and builds this file.
  *
  * Signal chain per case:
- *   8b/10b frames (link_8b10b_shim.h: K28.5 + PRBS bytes, plus idle and
- *   all-zero frames) -> link_tx_N on the sender's clock (307.2 MHz scaled by
+ *   8b/10b frames (alink_8b10b_shim.h: K28.5 + PRBS bytes, plus idle and
+ *   all-zero frames) -> alink_tx_N on the sender's clock (307.2 MHz scaled by
  *   the clock offset) -> edge list -> channel (pulse-width distortion: rising
  *   edges -PWD/2, falling +PWD/2, so positive PWD widens high pulses; per-edge
- *   jitter) -> link_rx_N on the receiver's 307.2 MHz clock, behind the GPIO's
+ *   jitter) -> alink_rx_N on the receiver's 307.2 MHz clock, behind the GPIO's
  *   2-cycle input synchroniser, at a chosen sub-cycle start phase.
  * Oracle: the received bit stream is aligned to the sent one and compared;
  * any divergence is an error event (in this architecture a timing violation
  * is a dropped or duplicated bit, i.e. a slip); and every K28.5 must sit at
  * the frame stride, which is what the firmware's parser relies on.
  *
- * cc -O2 -I<pioasm output dir> -DPICO_NO_HARDWARE=1 -o link_pio_model link_pio_model.c -lm
- *   ./link_pio_model                 regression matrix, exit 1 on any failure
- *   ./link_pio_model sweep           margin tables (offset, PWD, jitter, trim)
- *   ./link_pio_model case N ppm pwd_ns jitter_ns [trim [phase [jmodel]]]
+ * cc -O2 -I<pioasm output dir> -DPICO_NO_HARDWARE=1 -o alink_pio_model alink_pio_model.c -lm
+ *   ./alink_pio_model                regression matrix, exit 1 on any failure
+ *   ./alink_pio_model sweep          margin tables (offset, PWD, jitter, trim)
+ *   ./alink_pio_model case N ppm pwd_ns jitter_ns [trim [phase [jmodel]]]
  * jmodel: 0 corner (each edge +-J/2, random sign: hits every worst-case pair),
  * 1 uniform in [-J/2, J/2], 2 gaussian with sigma = J.
  * trim: cycles of entry delay moved from the fall exits to hi_entry (the
  * PWD centring the RX headers describe); phase: RX start, in sys cycles.
- * LINK_MODEL_DUMP=1 prints the first sent and received bits of each case.
+ * ALINK_MODEL_DUMP=1 prints the first sent and received bits of each case.
  */
 
 #include <math.h>
@@ -38,13 +38,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "link_8b10b_shim.h"
-#include "link_rx_10.pio.h"
-#include "link_rx_20.pio.h"
-#include "link_rx_5.pio.h"
-#include "link_tx_10.pio.h"
-#include "link_tx_20.pio.h"
-#include "link_tx_5.pio.h"
+#include "alink_8b10b_shim.h"
+#include "alink_rx_10.pio.h"
+#include "alink_rx_20.pio.h"
+#include "alink_rx_5.pio.h"
+#include "alink_tx_10.pio.h"
+#include "alink_tx_20.pio.h"
+#include "alink_tx_5.pio.h"
 
 #define SYS_HZ      307200000.0
 #define T_SYS_NS    (1e9 / SYS_HZ)
@@ -52,7 +52,7 @@
 #define FS_HZ       48000u
 
 // ============================================================================
-// PIO INTERPRETER (the subset the link programs use; anything else aborts)
+// PIO INTERPRETER (the subset the alink programs use; anything else aborts)
 // ============================================================================
 
 typedef struct {
@@ -97,7 +97,7 @@ static uint32_t sm_src(Sm *s, uint32_t src) {
 }
 
 // Executes the instruction at pc; returns the cycles it occupies (1 + delay).
-// IN shifts left and OUT shifts left (MSB first), threshold 32, as the link
+// IN shifts left and OUT shifts left (MSB first), threshold 32, as the alink
 // programs are configured. Returns 0 when a pull finds no data (TX done).
 static uint32_t sm_step(Sm *s) {
     uint16_t ins = s->prog[s->pc];
@@ -190,15 +190,15 @@ typedef struct {
 
 #define RXLEN(p) (uint32_t)(sizeof(p##_program_instructions) / sizeof(uint16_t))
 static const Prog progs[3] = {
-    { 20, "L1", link_rx_20_program_instructions, RXLEN(link_rx_20), link_rx_20_wrap_target, link_rx_20_wrap,
-      link_rx_20_offset_hi_entry, link_rx_20_offset_lo_emit,
-      link_tx_20_program_instructions, RXLEN(link_tx_20), link_tx_20_wrap_target, link_tx_20_wrap },
-    { 10, "L2", link_rx_10_program_instructions, RXLEN(link_rx_10), link_rx_10_wrap_target, link_rx_10_wrap,
-      link_rx_10_offset_hi_entry, link_rx_10_offset_lo_emit,
-      link_tx_10_program_instructions, RXLEN(link_tx_10), link_tx_10_wrap_target, link_tx_10_wrap },
-    { 5, "L3", link_rx_5_program_instructions, RXLEN(link_rx_5), link_rx_5_wrap_target, link_rx_5_wrap,
-      link_rx_5_offset_hi_entry, link_rx_5_offset_lo_emit,
-      link_tx_5_program_instructions, RXLEN(link_tx_5), link_tx_5_wrap_target, link_tx_5_wrap },
+    { 20, "L1", alink_rx_20_program_instructions, RXLEN(alink_rx_20), alink_rx_20_wrap_target, alink_rx_20_wrap,
+      alink_rx_20_offset_hi_entry, alink_rx_20_offset_lo_emit,
+      alink_tx_20_program_instructions, RXLEN(alink_tx_20), alink_tx_20_wrap_target, alink_tx_20_wrap },
+    { 10, "L2", alink_rx_10_program_instructions, RXLEN(alink_rx_10), alink_rx_10_wrap_target, alink_rx_10_wrap,
+      alink_rx_10_offset_hi_entry, alink_rx_10_offset_lo_emit,
+      alink_tx_10_program_instructions, RXLEN(alink_tx_10), alink_tx_10_wrap_target, alink_tx_10_wrap },
+    { 5, "L3", alink_rx_5_program_instructions, RXLEN(alink_rx_5), alink_rx_5_wrap_target, alink_rx_5_wrap,
+      alink_rx_5_offset_hi_entry, alink_rx_5_offset_lo_emit,
+      alink_tx_5_program_instructions, RXLEN(alink_tx_5), alink_tx_5_wrap_target, alink_tx_5_wrap },
 };
 
 static const Prog *prog_for(uint32_t n) {
@@ -266,7 +266,7 @@ static void stream_make(Stream *st, uint32_t n_bits_min, uint32_t symbols, uint3
     for (uint32_t f = 0; f < frames; f++) {
         for (uint32_t sym = 0; sym < symbols; sym++) {
             uint8_t byte = (f & 7) == 0 ? 0xB5 : (f & 7) == 4 ? 0x00 : (uint8_t)rng();
-            uint32_t cg = link_shim_encode(byte, sym == 0, &rd);
+            uint32_t cg = alink_shim_encode(byte, sym == 0, &rd);
             for (int i = 9; i >= 0; i--) st->bits[k++] = (cg >> i) & 1u;
         }
     }
@@ -291,7 +291,7 @@ static bool stream_check(const Stream *st) {
     size_t bad = 0;
     for (size_t i = 0; i < st->n; i++) {
         w = ((w << 1) | st->bits[i]) & 0x3FFu;
-        if (i >= 9 && (w == LINK_K28_5_RDN || w == LINK_K28_5_RDP) && (i - 9) % st->frame_bits) bad++;
+        if (i >= 9 && (w == ALINK_K28_5_RDN || w == ALINK_K28_5_RDP) && (i - 9) % st->frame_bits) bad++;
     }
     bool ok = maxrun <= 5 && hi - lo <= 6 && bad == 0;
     if (!ok) printf("stream check FAILED: max run %d, DSV %d, misplaced commas %zu\n", maxrun, hi - lo, bad);
@@ -313,7 +313,7 @@ static bool tx_pull(void *ctx, uint32_t *w) {
 static int tx_no_pin(void *ctx) { (void)ctx; return 0; }
 static void tx_no_push(void *ctx, uint32_t w) { (void)ctx; (void)w; }
 
-// Runs link_tx_N cycle by cycle on a clock offset by `ppm` and records the
+// Runs alink_tx_N cycle by cycle on a clock offset by `ppm` and records the
 // pin's transitions. The line idles low before the first bit.
 static void tx_run(const Prog *p, Stream *st, double ppm, Edges *e) {
     Sm s;
@@ -441,7 +441,7 @@ static Verdict judge(const Stream *st, const Rx *r) {
     int64_t first = -1;
     for (size_t k = 0; k < r->n; k++) {
         w = ((w << 1) | r->bits[k]) & 0x3FFu;
-        if (k >= 9 && (w == LINK_K28_5_RDN || w == LINK_K28_5_RDP)) {
+        if (k >= 9 && (w == ALINK_K28_5_RDN || w == ALINK_K28_5_RDP)) {
             v.commas++;
             if (first < 0) first = (int64_t)k;
             else if (((int64_t)k - first) % st->frame_bits) v.comma_bad++;
@@ -483,7 +483,7 @@ static bool run(const Case *c, Verdict *out) {
     r.bits = malloc(r.cap);
     rx_run(p, rp, c->trim, &e, c->phase, &r);
     Verdict v = judge(&st, &r);
-    const char *dump = getenv("LINK_MODEL_DUMP");
+    const char *dump = getenv("ALINK_MODEL_DUMP");
     if (dump && *dump) {
         printf("tx:");
         for (int i = 0; i < 160; i++) putchar('0' + st.bits[i]);

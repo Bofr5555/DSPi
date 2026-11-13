@@ -1,5 +1,5 @@
 /*
- * bench_cmd.c - link bench: console parsing and report layouts
+ * bench_cmd.c - alink bench: console parsing and report layouts
  *
  * See bench_cmd.h.
  */
@@ -56,17 +56,17 @@ static bool ieq(const char *a, const char *b) {
 
 bool bench_parse_class(const char *s, unsigned *cls) {
     if (!s) return false;
-    if (ieq(s, "l1") || !strcmp(s, "1")) { *cls = LINK_CLASS_L1; return true; }
-    if (ieq(s, "l2") || !strcmp(s, "2")) { *cls = LINK_CLASS_L2; return true; }
-    if (ieq(s, "l3") || !strcmp(s, "3")) { *cls = LINK_CLASS_L3; return true; }
+    if (ieq(s, "l1") || !strcmp(s, "1")) { *cls = ALINK_CLASS_L1; return true; }
+    if (ieq(s, "l2") || !strcmp(s, "2")) { *cls = ALINK_CLASS_L2; return true; }
+    if (ieq(s, "l3") || !strcmp(s, "3")) { *cls = ALINK_CLASS_L3; return true; }
     return false;
 }
 
 bool bench_parse_rate(const char *s, unsigned *rate) {
     if (!s) return false;
-    if (ieq(s, "44k1") || !strcmp(s, "44.1") || !strcmp(s, "44100")) { *rate = LINK_RATE_44K1; return true; }
-    if (ieq(s, "48k") || !strcmp(s, "48") || !strcmp(s, "48000")) { *rate = LINK_RATE_48K; return true; }
-    if (ieq(s, "96k") || !strcmp(s, "96") || !strcmp(s, "96000")) { *rate = LINK_RATE_96K; return true; }
+    if (ieq(s, "44k1") || !strcmp(s, "44.1") || !strcmp(s, "44100")) { *rate = ALINK_RATE_44K1; return true; }
+    if (ieq(s, "48k") || !strcmp(s, "48") || !strcmp(s, "48000")) { *rate = ALINK_RATE_48K; return true; }
+    if (ieq(s, "96k") || !strcmp(s, "96") || !strcmp(s, "96000")) { *rate = ALINK_RATE_96K; return true; }
     return false;
 }
 
@@ -97,25 +97,25 @@ bool bench_parse_pins(const char *s, uint8_t *pins, unsigned *n, unsigned max) {
 
 const char *bench_class_name(unsigned cls) {
     switch (cls) {
-    case LINK_CLASS_L1: return "L1";
-    case LINK_CLASS_L2: return "L2";
-    case LINK_CLASS_L3: return "L3";
+    case ALINK_CLASS_L1: return "L1";
+    case ALINK_CLASS_L2: return "L2";
+    case ALINK_CLASS_L3: return "L3";
     default: return "none";
     }
 }
 
 const char *bench_rate_name(unsigned rate) {
     switch (rate) {
-    case LINK_RATE_44K1: return "44k1";
-    case LINK_RATE_48K: return "48k";
-    case LINK_RATE_96K: return "96k";
+    case ALINK_RATE_44K1: return "44k1";
+    case ALINK_RATE_48K: return "48k";
+    case ALINK_RATE_96K: return "96k";
     default: return "none";
     }
 }
 
 unsigned bench_default_channels(unsigned cls, unsigned rate) {
-    unsigned want = cls == LINK_CLASS_L1 ? 8u : cls == LINK_CLASS_L2 ? 16u : 32u;
-    unsigned max = link_max_channels(cls, rate);
+    unsigned want = cls == ALINK_CLASS_L1 ? 8u : cls == ALINK_CLASS_L2 ? 16u : 32u;
+    unsigned max = alink_max_channels(cls, rate);
     return want < max ? want : max;
 }
 
@@ -134,7 +134,7 @@ bool bench_parse_tx(const bench_args_t *a, int first, const char *pins_key, benc
     long v;
     const char *s;
     if ((s = bench_kv(a, "ch"))) {
-        if (!bench_parse_int(s, 1, (long)link_max_channels(cls, rate), &v)) { *err = "ch"; return false; }
+        if (!bench_parse_int(s, 1, (long)alink_max_channels(cls, rate), &v)) { *err = "ch"; return false; }
         c->channels = (uint8_t)v;
     }
     if ((s = bench_kv(a, "pay"))) {

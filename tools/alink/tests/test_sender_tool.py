@@ -2,7 +2,7 @@
 
 The RX board is LK3's simulated bench board (test_bench_tool.FakeBoard) with
 class auto-detection added; the sender is LK7's control-plane model of a
-sender build (tools/midi_ctrl/fake_device.FakeLink("sender"), which follows
+sender build (tools/midi_ctrl/fake_device.FakeAlink("sender"), which follows
 extension_channel_spec.md 2.8.8-2.8.9) behind sender_usb's interface, its
 frame counter driven by the same virtual clock as the wire.  Checked: a
 healthy sender passes every step (BER, frame counter, encoder budget, RATE
@@ -52,7 +52,7 @@ class AutoRxBoard(FakeBoard):
 
 
 class _Dev:
-    def link_event(self, *a):
+    def alink_event(self, *a):
         pass
 
     def notify_apply(self, *a):
@@ -60,11 +60,11 @@ class _Dev:
 
 
 class FakeSender:
-    """sender_usb.SenderUsb's interface over FakeLink("sender") and the wire."""
+    """sender_usb.SenderUsb's interface over FakeAlink("sender") and the wire."""
 
     def __init__(self, clock, wire, immediate_layout=False):
         self.clock, self.wire = clock, wire
-        self.link = fake_device.FakeLink("sender")
+        self.alink = fake_device.FakeAlink("sender")
         self.dev = _Dev()
         self.t_last = clock.t
         self.immediate = immediate_layout
@@ -73,19 +73,19 @@ class FakeSender:
         self._wire_update()
 
     def _fs(self):
-        return FS[sender_usb.RATE_NAME[self.link.tx_layout[1]]]
+        return FS[sender_usb.RATE_NAME[self.alink.tx_layout[1]]]
 
     def _sync(self):
         fs = self._fs()
         n = int((self.clock.t - self.t_last) * fs)
         if n > 0:
-            self.link.advance(n, self.dev)
+            self.alink.advance(n, self.dev)
             self.t_last += n / fs
         self._wire_update()
 
     def _wire_update(self):
-        enabled = struct.unpack_from("<H", self.link.tx)[0] != 0
-        layout = self.link.tx_layout if enabled else None
+        enabled = struct.unpack_from("<H", self.alink.tx)[0] != 0
+        layout = self.alink.tx_layout if enabled else None
         if layout != self.layout:
             self.layout = layout
             w = self.wire
@@ -93,20 +93,20 @@ class FakeSender:
                 cls, rate, ch = layout
                 w.stream = (CLS_NAME[cls], sender_usb.RATE_NAME[rate], ch)
                 w.t0 = self.clock.t
-                w.f0 = self.link.frame
+                w.f0 = self.alink.frame
             else:
                 w.stream = None
 
     def get(self, sub, length=64):
         self._sync()
         if sub == 0x0000:
-            return struct.pack("<9H", 0x0003, *self.link.ids)[:length]
+            return struct.pack("<9H", 0x0003, *self.alink.ids)[:length]
         if sub == 0x800A:
             d = bytearray(64)
-            d[0], d[1], d[2] = 0x81, 1, self.link.tx_layout[0]
+            d[0], d[1], d[2] = 0x81, 1, self.alink.tx_layout[0]
             struct.pack_into("<12I", d, 4, 410, 640, 6400, 240, 0, 0, 0, 0, 0, 786432, 0, 0)
             return bytes(d)
-        b = self.link.get(sub)
+        b = self.alink.get(sub)
         if b is None:
             raise sender_usb.SenderRefused(hex(sub))
         return b[:length]
@@ -116,19 +116,19 @@ class FakeSender:
         if self.immediate and sub == 0x8007:
             # A broken sender: switches the layout at once, no RATE.
             mask, cls, chans, rate = struct.unpack_from("<HBBB", payload)
-            self.link.tx[:] = payload
-            self.link.tx_layout = (cls, rate, chans)
+            self.alink.tx[:] = payload
+            self.alink.tx_layout = (cls, rate, chans)
             self._wire_update()
             return
-        if not self.link.set(sub, bytes(payload), self.dev):
+        if not self.alink.set(sub, bytes(payload), self.dev):
             raise sender_usb.SenderRefused(hex(sub))
         self._wire_update()
 
     # The SenderUsb helpers, on top of get/set.
     ext_list = sender_usb.SenderUsb.ext_list
     info = sender_usb.SenderUsb.info
-    link_tx = sender_usb.SenderUsb.link_tx
-    set_link_tx = sender_usb.SenderUsb.set_link_tx
+    alink_tx = sender_usb.SenderUsb.alink_tx
+    set_alink_tx = sender_usb.SenderUsb.set_alink_tx
     frame = sender_usb.SenderUsb.frame
     ctrl_in = sender_usb.SenderUsb.ctrl_in
     ctrl = sender_usb.SenderUsb.ctrl
@@ -162,16 +162,16 @@ class SenderToolTest(unittest.TestCase):
                            {"R": rx}, snd)
         t = self.text()
         self.assertEqual(rc, 0, t)
-        for step in ("sender: link sender firmware", "EXT_LINK_TX written", "L1 48k: BER",
+        for step in ("sender: alink sender firmware", "EXT_ALINK_TX written", "L1 48k: BER",
                      "frame counter tracks TX", "encoder within budget", "RATE scheduled",
                      "a second layout change is refused while RATE is pending", "receiver follows to 96k C=3",
                      "CTRL_MSG apply carried, a second refused", "the apply ends at its frame",
-                     "class change L1 -> L2 restarts the links"):
+                     "class change L1 -> L2 restarts the alinks"):
             self.assertRegex(t, r"PASS  .*" + step.replace("(", r"\(").replace(")", r"\)"), step)
         self.assertNotIn("FAIL", t)
-        # Left as configured: link 0, PRBS, L1 48 kHz 8 channels.
-        tx = snd.link_tx()
-        self.assertEqual((tx["link_enable"], tx["cls"], tx["rate"], tx["channels"], tx["test_pattern"]),
+        # Left as configured: alink 0, PRBS, L1 48 kHz 8 channels.
+        tx = snd.alink_tx()
+        self.assertEqual((tx["alink_enable"], tx["cls"], tx["rate"], tx["channels"], tx["test_pattern"]),
                          (1, 1, 1, 8, 1))
 
     def test_lk4_sender_l2_over_usb(self):
@@ -209,13 +209,13 @@ class SenderToolTest(unittest.TestCase):
         snd = FakeSender(self.clock, w)
         rc = self.run_tool(["sender-diag", "--usb", "U", "--pattern", "tone"], {}, snd)
         self.assertEqual(rc, 0)
-        self.assertEqual(snd.link_tx()["test_pattern"], 3)
+        self.assertEqual(snd.alink_tx()["test_pattern"], 3)
         t = self.text()
         self.assertIn("'enc_cycles_avg': 410", t)
         self.assertIn("'cls': 1", t)
 
     def test_lk4_sender_usb_layouts(self):
-        tx = dict(link_enable=0x81, cls=3, channels=18, rate=2, test_pattern=1, slot_map_id=0, sync_pin=21,
+        tx = dict(alink_enable=0x81, cls=3, channels=18, rate=2, test_pattern=1, slot_map_id=0, sync_pin=21,
                   txdis_mask=0x00FF, los_mask=0x30, usb_alt=7, flags=1)
         b = sender_usb.pack_tx(tx)
         self.assertEqual(b.hex(" "), "81 00 03 12 02 01 00 15 ff 00 30 00 07 01 00 00")

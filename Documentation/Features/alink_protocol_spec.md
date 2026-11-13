@@ -3,14 +3,14 @@
 *Protocol version: 1 (superframe byte 1). Status: normative, 2026-11-13 (WP LK1, fixup after review lk). Not yet used by any firmware
 image: the sender (WP LK4), the receiver input (LK5), phase lock (LK6) and the repeater (LK8) build on it.*
 
-The link carries the audio of a whole system from one sender (the master clock) to any number of receivers (a DSPi
+The alink carries the audio of a whole system from one sender (the master clock) to any number of receivers (a DSPi
 or a K340 with a receiver module) over optical or SFP lines, one frame per sample period, with a 64-bit frame
 counter and a control sub-channel. The system design is SYS2 (`~/.cache/dspi-build/work/sys2/SPEC.md`); this
-document is the normative line protocol it calls for. The control commands for the link (`0x8000`-`0x80FF`) are in
+document is the normative line protocol it calls for. The control commands for the alink (`0x8000`-`0x80FF`) are in
 `extension_channel_spec.md` section 2.8.
 
-The reference implementation is bit-exact and portable: C in `firmware/DSPi/link/`, a Python twin in
-`tools/link/`, and shared test vectors in `firmware/tests/link_vectors.json` (section 9). Where this text and the
+The reference implementation is bit-exact and portable: C in `firmware/DSPi/alink/`, a Python twin in
+`tools/alink/`, and shared test vectors in `firmware/tests/alink_vectors.json` (section 9). Where this text and the
 reference code disagree, that is a bug; report it.
 
 Writing style note: this doc avoids em-dashes per project convention.
@@ -48,8 +48,8 @@ and hardware (SYS2 section 6).
   (AFBR-1629Z/2529Z, an SFP's TD-) are corrected with the GPIO's output or input override, not in the code.
 - **Word alignment:** a frame is `10 S_F` bits (5.6). At 48 and 96 kHz that is a whole number of 32-bit words for
   every class, so a locked comma sits at a fixed bit offset inside its word. At 44.1 kHz it is not, so encoders and
-  decoders keep a bit cursor that runs across frames and across a ring's wrap (the reference does: `link_bitw_t`
-  appends at any bit position, and `link_rx_push()` takes bits in any chunks).
+  decoders keep a bit cursor that runs across frames and across a ring's wrap (the reference does: `alink_bitw_t`
+  appends at any bit position, and `alink_rx_push()` takes bits in any chunks).
 
 ## 3. Line-rate classes
 
@@ -59,14 +59,14 @@ system clock and integer multiples of 48 kHz x 10.
 | Class | Code | Line rate | PIO cycles per bit at 307.2 MHz | Bit period | Typical medium |
 |---|---|---|---|---|---|
 | L1 | 1 | 15.36 MBd | 20 | 65.1 ns | TOSLINK-class 25 Mb/s parts (PLR237 / PLT237) |
-| L2 | 2 | 30.72 MBd | 10 | 32.6 ns | Broadcom 50 MBd Versatile Link, SFP |
+| L2 | 2 | 30.72 MBd | 10 | 32.6 ns | Broadcom 50 MBd Versatile Alink, SFP |
 | L3 | 3 | 61.44 MBd | 5 | 16.3 ns | SFP 100BASE-FX (experimental) |
 
 - Both ends run the same nominal rate; the receiver's sampler re-phases on every transition and its soft VCXO
   removes the rate error (SYS2 2.6, 2.8). The protocol has no rate negotiation: a receiver either knows the class or
   detects it by trying each sampler (SYS2 2.6) and confirms it with superframe byte 5.
 - Codes 0 and 4..255 are reserved. A 38.4 MBd class (SYS2 "L2+") is not part of version 1.
-- The line MUST NOT be left at a constant level while a link is enabled: a sender sends frames from power-up, with
+- The line MUST NOT be left at a constant level while an alink is enabled: a sender sends frames from power-up, with
   zero samples until it has audio (SYS2 3.3).
 
 ## 4. Line code: 8b/10b
@@ -167,7 +167,7 @@ CRC8 fails (section 8.4).
 
 ### 5.3 Banks and channel order
 
-Channel n of the frame (the "link slot" of `EXT_LINK_SLOTS`) is in bank `n / 8` at position `n mod 8`. There is no
+Channel n of the frame (the "alink slot" of `EXT_ALINK_SLOTS`) is in bank `n / 8` at position `n mod 8`. There is no
 per-channel signalling: C comes from the superframe, and a sender that has fewer audio channels sends zeros in the
 rest.
 
@@ -223,8 +223,8 @@ C MUST satisfy `layout(C) <= min S_F` at the class and rate in effect, and `1 <=
 | L3 | 41 | 38 | 18 |
 
 **This table is normative and is the only capacity table** (coordinator decision, 2026-11-13). Code takes it from
-`link_max_channels(class, rate)` in C or `link_codec.CAPACITY[(class, rate)]` in Python, never from a copy:
-`EXT_LINK_TX.channels` (`extension_channel_spec.md` 2.8.8), the sender (LK4), the fake device and the clients
+`alink_max_channels(class, rate)` in C or `alink_codec.CAPACITY[(class, rate)]` in Python, never from a copy:
+`EXT_ALINK_TX.channels` (`extension_channel_spec.md` 2.8.8), the sender (LK4), the fake device and the clients
 accept exactly C = 1 .. this value. The SYS2 figures (16 on L3 at 96 kHz; the 48 kHz values at 44.1 kHz) are
 superseded. Defaults are whole banks: 8 on L1, 16 on L2, 32 on L3 at 48 kHz.
 
@@ -268,7 +268,7 @@ Example (vector `sf/typical`): F = 2^40, 48 kHz, 8 channels, L1, hops 0, sender 
 ### 6.2 Fields
 
 - **flags b1 and b2** are derived: b2 is set exactly when `apply_op` is not 0, b1 exactly when it is RATE. The
-  sender's other flags come from its state (`EXT_LINK_TX`).
+  sender's other flags come from its state (`EXT_ALINK_TX`).
 - **rate, channels** describe the 32 frames of this superframe. They change only at a superframe boundary
   announced by a RATE apply (6.5).
 - **class** is the class of the line it is sent on; a receiver rejects a superframe whose class differs from the
@@ -279,13 +279,13 @@ Example (vector `sf/typical`): F = 2^40, 48 kHz, 8 channels, L1, hops 0, sender 
 
 A superframe is valid when, in this order: its CRC matches; magic is `0xA5`; version is 1; `frame mod 32 = 0`; class
 is 1..3, rate is 0..2 and C is 1..the capacity of 5.7 for that class and rate; `apply_op` is 0..8 and
-`apply_op = 0` exactly when `apply_frame = 0`. The reference `link_sf_unpack()` returns the first failing check
-(`LINK_SF_ERR_CRC` 1, `MAGIC` 2, `VERSION` 3, `FRAME` 4, `LAYOUT` 5, `APPLY` 6). Reserved bytes 28-29 are not
+`apply_op = 0` exactly when `apply_frame = 0`. The reference `alink_sf_unpack()` returns the first failing check
+(`ALINK_SF_ERR_CRC` 1, `MAGIC` 2, `VERSION` 3, `FRAME` 4, `LAYOUT` 5, `APPLY` 6). Reserved bytes 28-29 are not
 checked. A receiver adds the checks of 8.6.
 
 ### 6.4 Apply at frame N
 
-Bytes 16-27 carry one pending operation for every unit on the link: "at frame N, do op". A superframe carries the
+Bytes 16-27 carry one pending operation for every unit on the alink: "at frame N, do op". A superframe carries the
 pending apply exactly when it completes before the target, that is when `frame + 32 <= N` (the superframe's last
 frame is before N). The sender MUST therefore announce at least one full superframe ahead: N at least
 `next superframe start + 32`. It SHOULD announce far more (SYS2 3.3 uses 2400 frames, 50 ms, for RATE) so that a
@@ -316,13 +316,13 @@ describe the next frame it will encode, so a sender reads them before it fills t
 whose new layout does not fit (5.7) MUST NOT be sent, and a receiver ignores it. A receiver that missed the
 announcement loses lock at N and re-locks (8.8).
 
-RATE is the protocol's own op: it travels only in the superframe and acts on every unit of the link at once.
+RATE is the protocol's own op: it travels only in the superframe and acts on every unit of the alink at once.
 **`EXT_APPLY_AT_FRAME` (per unit, 2.8.7) refuses op 6** (coordinator decision, 2026-11-13): a receiver follows the
 layout its stream carries and never re-plans for a rate the stream does not have. A host changes the rate on the
-sender, through `EXT_LINK_TX` or `EXT_LINK_CTRL_MSG` (2.8.8, 2.8.9), where RATE takes value 0; the sender puts the
-new C in `value` itself when its channel count changes. `EXT_LINK_CTRL_MSG` follows the carriage rules of 6.4 and
+sender, through `EXT_ALINK_TX` or `EXT_ALINK_CTRL_MSG` (2.8.8, 2.8.9), where RATE takes value 0; the sender puts the
+new C in `value` itself when its channel count changes. `EXT_ALINK_CTRL_MSG` follows the carriage rules of 6.4 and
 this section (target at least one complete superframe ahead, RATE targets a multiple of 32, a layout that does not
-fit refused), as `link_tx_schedule()` does.
+fit refused), as `alink_tx_schedule()` does.
 
 ### 6.6 The frame counter
 
@@ -340,27 +340,27 @@ fit refused), as `link_tx_schedule()` does.
 
 A sender MUST: send continuously from power-up (frames of zero samples until audio is present, b3 clear); start
 with RD- and carry RD; send every frame exactly `S_F` symbols long (5.6); keep C within 5.7; refresh the superframe
-only at superframe boundaries; and change the layout only through RATE (6.5). All links of a star send the same bit
+only at superframe boundaries; and change the layout only through RATE (6.5). All alinks of a star send the same bit
 stream (SYS2 4.2).
 
 ### 7.2 Repeaters and fan-outs (the hop byte)
 
-A repeater (a receiver with a transmit pin) or a fan-out (a sender slaved to a link input) re-emits the stream it
+A repeater (a receiver with a transmit pin) or a fan-out (a sender slaved to an alink input) re-emits the stream it
 receives, delayed by a whole number of frames, its **hop delay** `d_hop`, which it reports
-(`extension_channel_spec.md` 2.8.2, `EXT_LINK_STATUS.hop_delay_frames`):
+(`extension_channel_spec.md` 2.8.2, `EXT_ALINK_STATUS.hop_delay_frames`):
 
 - The hop delay is at least 1 frame and is the re-emitter's own: a store-and-forward re-emitter needs a whole input
   frame before its copy can start, plus its FIFOs (LK4's fan-out: 2-3 frames). It is constant while the re-emitter
   stays locked; after a re-alignment it may differ, and the re-emitter reports the new value.
 - The re-emitted frame F carries the same F, the same payload and the same layout; HDR is unchanged.
 - Its superframe is the received one with `hops = min(hops + 1, 255)` and `class` set to the class of the outgoing
-  line, CRC recomputed (`link_sf_repeat()`). 255 means "255 or more".
+  line, CRC recomputed (`alink_sf_repeat()`). 255 means "255 or more".
 - It re-encodes (its own RD and padding), so its output is again a conforming stream. A repeater that has no valid
   superframe yet sends only D21.5 idles (no commas, so downstream units see no stream rather than a wrong one,
   and the line still never sits at a constant level).
 - Receivers use hops to compute `D_local = D - hops` (SYS2 3.1), which counts one frame per hop; the hub writes it
-  (`EXT_LINK_PHASE.d_local`). The hub compensates the rest of each re-emitter's delay through
-  `EXT_LINK_PHASE.hops_offset`: a unit behind re-emitters with hop delays `d_1 .. d_h` gets
+  (`EXT_ALINK_PHASE.d_local`). The hub compensates the rest of each re-emitter's delay through
+  `EXT_ALINK_PHASE.hops_offset`: a unit behind re-emitters with hop delays `d_1 .. d_h` gets
   `hops_offset = -sum(d_k - 1)`, so that its effective delay `d_local + hops_offset` is `D - sum(d_k)` and it plays
   frame F at the same moment as a unit fed directly. The hub reads each re-emitter's `hop_delay_frames` and knows from
   its own configuration which re-emitters feed which unit (the stream does not say: hops counts re-emitters, not
@@ -368,7 +368,7 @@ receives, delayed by a whole number of frames, its **hop delay** `d_hop`, which 
 
 ## 8. Reference receiver
 
-This section is the bit-exact behaviour of `link_decoder.c` / `Decoder`: alignment, lock, the counters and what is
+This section is the bit-exact behaviour of `alink_decoder.c` / `Decoder`: alignment, lock, the counters and what is
 delivered for every frame. A firmware receiver MUST behave the same on the same bits. It MAY decode fewer banks
 (the bank mask) and MAY be faster; what it then does with the frames (servo, mute ramps, holdover) is LK5/LK6.
 
@@ -464,7 +464,7 @@ the next complete valid superframe: 32 to 63 frames after the line is good again
 
 ### 8.9 Counters
 
-| Counter | Counts | `EXT_LINK_STATUS` field (2.8.2) |
+| Counter | Counts | `EXT_ALINK_STATUS` field (2.8.2) |
 |---|---|---|
 | `lock_count` | entries into LOCKED | `lock_count` |
 | `loss_count` | losses from LOCKED | `loss_count` |
@@ -472,13 +472,13 @@ the next complete valid superframe: 32 to 63 frames after the line is good again
 | `crc16_errors` | failed banks (non-data symbol or CRC-16) | `crc16_errors` |
 | `bit_slips` | commas found 1-2 bits off | `bit_slips` |
 | `superframe_errors` | rejected superframes (8.6) | `superframe_errors` |
-| `comma_errors` | flywheel frames | `EXT_LINK_DIAG` offset 40 (u32) |
-| `counter_errors` | HDR mismatches and F corrections | `EXT_LINK_DIAG` offset 44 (u32) |
-| `code_errors` | non-data symbols in heads and decoded banks | `EXT_LINK_DIAG` offset 48 (u32) |
-| `idle_errors` | non-idle padding symbols | `EXT_LINK_DIAG` offset 52 (u32) |
+| `comma_errors` | flywheel frames | `EXT_ALINK_DIAG` offset 40 (u32) |
+| `counter_errors` | HDR mismatches and F corrections | `EXT_ALINK_DIAG` offset 44 (u32) |
+| `code_errors` | non-data symbols in heads and decoded banks | `EXT_ALINK_DIAG` offset 48 (u32) |
+| `idle_errors` | non-idle padding symbols | `EXT_ALINK_DIAG` offset 52 (u32) |
 | `frames` | frames delivered | |
 
-`EXT_LINK_DIAG` (`0x800A`, 64 bytes, `extension_channel_spec.md` 2.8.11) carries the four bench counters in its
+`EXT_ALINK_DIAG` (`0x800A`, 64 bytes, `extension_channel_spec.md` 2.8.11) carries the four bench counters in its
 second half, which replaces the sampling-phase histogram of SYS2 (the PIO emits only bits, so there is no
 histogram). Bytes 32-63, as adopted from review lk:
 
@@ -495,10 +495,10 @@ histogram). Bytes 32-63, as adopted from review lk:
 | 52 | u32 | `idle_errors` |
 | 56 | 8 | reserved, 0 |
 
-The trim scan is LK2's (`link_rx_N` delay trim, 3.26 ns per step); `EXT_LINK_STATS_RESET` clears the four counters
-with the `EXT_LINK_STATUS` ones. 2.8.11 is the normative byte layout; this table must match it.
+The trim scan is LK2's (`alink_rx_N` delay trim, 3.26 ns per step); `EXT_ALINK_STATS_RESET` clears the four counters
+with the `EXT_ALINK_STATUS` ones. 2.8.11 is the normative byte layout; this table must match it.
 
-The receiver's state maps to `EXT_LINK_STATUS.state` as SEARCH and ALIGNED = 1 (searching), LOCKED = 2; holdover
+The receiver's state maps to `EXT_ALINK_STATUS.state` as SEARCH and ALIGNED = 1 (searching), LOCKED = 2; holdover
 (3) is a firmware state on top of SEARCH.
 
 ## 9. Reference implementation and test vectors
@@ -507,21 +507,21 @@ The receiver's state maps to `EXT_LINK_STATUS.state` as SEARCH and ALIGNED = 1 (
 
 | File | What |
 |---|---|
-| `firmware/DSPi/link/link_codec.h`, `.c` | 8b/10b, CRCs, layout and `S_F`, superframe pack/unpack/repeat, PRBS-7, bit packing, the sender's frame encoder `link_tx_*` |
-| `firmware/DSPi/link/link_decoder.h`, `.c` | the receiver of section 8, `link_rx_*`, with an event callback |
-| `tools/link/link_codec.py` | the Python twin of both, written from this document's tables; `CAPACITY` (5.7); the test helpers of 9.2 |
-| `tools/link/gen_vectors.py` | writes `firmware/tests/link_vectors.json` |
-| `tools/link/tests/test_link_codec.py` | Python tests: anchors, stream properties, receiver behaviour, the vector file |
-| `firmware/tests/test_link_codec.c` | C tests: the same anchors and properties, every vector, sample round trips |
+| `firmware/DSPi/alink/alink_codec.h`, `.c` | 8b/10b, CRCs, layout and `S_F`, superframe pack/unpack/repeat, PRBS-7, bit packing, the sender's frame encoder `alink_tx_*` |
+| `firmware/DSPi/alink/alink_decoder.h`, `.c` | the receiver of section 8, `alink_rx_*`, with an event callback |
+| `tools/alink/alink_codec.py` | the Python twin of both, written from this document's tables; `CAPACITY` (5.7); the test helpers of 9.2 |
+| `tools/alink/gen_vectors.py` | writes `firmware/tests/alink_vectors.json` |
+| `tools/alink/tests/test_alink_codec.py` | Python tests: anchors, stream properties, receiver behaviour, the vector file |
+| `firmware/tests/test_alink_codec.c` | C tests: the same anchors and properties, every vector, sample round trips |
 
 The C code is portable C11 with no SDK, no heap, no floating point and no writable static data: every table is
-`const` (flash), and the receiver's state (under 1 KB, `link_rx_t`) and the encoder's (under 100 bytes) live in the caller's
+`const` (flash), and the receiver's state (under 1 KB, `alink_rx_t`) and the encoder's (under 100 bytes) live in the caller's
 memory. No firmware target compiles it yet; LK3-LK5 add it to the build (and SHOULD put the hot parts of the
 receiver in RAM and replace the reference symbol decoder with a table if the cycle budget of SYS2 5.1 asks for it).
 
 ### 9.2 Vector file
 
-`firmware/tests/link_vectors.json` holds one flat JSON object per line (strings and integers only, so the C test
+`firmware/tests/alink_vectors.json` holds one flat JSON object per line (strings and integers only, so the C test
 scans it without a JSON library). `type` selects the kind:
 
 | type | Fields | Check |
@@ -572,8 +572,8 @@ with a bad CRC, a wrong class byte, a wrong HDR with a good CRC-8, and a superfr
 
 ```sh
 # Python twin and vector file (podman, python:3.12-slim pinned by digest, no network)
-tools/link/run.sh -m unittest discover -s tests -v
-tools/link/run.sh gen_vectors.py > firmware/tests/link_vectors.json   # after a deliberate change
+tools/alink/run.sh -m unittest discover -s tests -v
+tools/alink/run.sh gen_vectors.py > firmware/tests/alink_vectors.json   # after a deliberate change
 
 # C (any C11 compiler; run.sh builds every firmware/tests/test_*.c)
 podman run --rm --network none -v "$PWD/firmware:/fw:ro" <gcc image> bash /fw/tests/run.sh

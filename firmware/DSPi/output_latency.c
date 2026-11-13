@@ -15,8 +15,8 @@
 #if defined(DSPI_ALINK_USB) && DSPI_ALINK_USB
 #include "alink_usb.h"
 #endif
-#if defined(DSPI_LINK) && DSPI_LINK
-#include "link_input.h"     // -- WP LK6 -- phase-locked prefill target
+#if defined(DSPI_ALINK) && DSPI_ALINK
+#include "alink_input.h"    // -- WP LK6 -- phase-locked prefill target
 #endif
 
 #define LOW_BATCH_US    333u    // 16 frames at 48 kHz
@@ -115,10 +115,10 @@ void output_latency_apply(uint32_t fs, uint8_t source) {
     input_batch_frames = BATCH_FRAMES(opt->batch_us, fs);
     output_ring_block_cap = BLOCK_CAP(opt->batch_us, fs);
     output_ring_target_frames = output_latency_target_frames(opt, fs);
-#if defined(DSPI_LINK) && DSPI_LINK
-    // -- WP LK6 -- A phase-locked link input prefills to its delay instead.
-    if (source == INPUT_SOURCE_LINK)
-        output_ring_target_frames = link_input_ring_target(output_ring_target_frames, output_ring_block_cap);
+#if defined(DSPI_ALINK) && DSPI_ALINK
+    // -- WP LK6 -- A phase-locked alink input prefills to its delay instead.
+    if (source == INPUT_SOURCE_ALINK)
+        output_ring_target_frames = alink_input_ring_target(output_ring_target_frames, output_ring_block_cap);
 #endif
 #if defined(DSPI_ALINK_USB) && DSPI_ALINK_USB
     // -- WP USB1 -- USB phase mode prefills to its delay (stock value otherwise).

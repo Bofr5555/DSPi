@@ -1,7 +1,7 @@
-; link_rx_5.pio; DSPi audio link NRZ receiver, class L3, 61.44 MBd (SYS2 2.6)
+; alink_rx_5.pio; DSPi audio link NRZ receiver, class L3, 61.44 MBd (SYS2 2.6)
 ;
 ; 5 sys cycles per line bit at clock divider 1.0. Same contract as
-; link_rx_20.pio (one emitted level per line bit, re-anchor on every edge,
+; alink_rx_20.pio (one emitted level per line bit, re-anchor on every edge,
 ; constant emits), but unrolled so the line is polled on every cycle except
 ; the emit: there is no room for a counter loop in 5 cycles.
 ;
@@ -14,9 +14,9 @@
 ; exit jump; both carry ENTRY_DELAY 1 and reach the next emit 3 cycles after
 ; the poll that saw the edge. The trim range is +-1.
 ;
-; Setup: as link_rx_20.pio. DMA drains one word per 160 cycles.
+; Setup: as alink_rx_20.pio. DMA drains one word per 160 cycles.
 
-.program link_rx_5
+.program alink_rx_5
 .define ENTRY_DELAY 1
 
 .wrap_target

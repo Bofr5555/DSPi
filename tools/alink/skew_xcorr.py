@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""skew_xcorr.py - skew between two link receivers from one stereo recording (WP LK6).
+"""skew_xcorr.py - skew between two alink receivers from one stereo recording (WP LK6).
 
-Bench test (e) of the SYS2 link spec (section 8): two receivers play the same
-link stream, their outputs are recorded on the left and right inputs of one
+Bench test (e) of the SYS2 alink spec (section 8): two receivers play the same
+alink stream, their outputs are recorded on the left and right inputs of one
 audio interface, and this script measures how far apart they are.
 
   noise  (default) programme material (pink noise or music from the PC through
@@ -10,7 +10,7 @@ audio interface, and this script measures how far apart they are.
          seconds of left and right, over lags of +-max-lag samples, with a
          parabolic fit through the peak for the sub-sample part.
   click  receivers fed the apply op CLICK through the sender's superframe
-         (both play a one-sample impulse at -20 dBFS on the same link frame;
+         (both play a one-sample impulse at -20 dBFS on the same alink frame;
          a muted unit, by user mute or the sender's system mute, plays none,
          so the programme is kept quiet instead): each impulse is located on
          both channels to a sub-sample position (detection at half of each
@@ -20,15 +20,15 @@ audio interface, and this script measures how far apart they are.
 Positive skew means the right channel lags the left one.  A --calib recording
 of ONE output split into both inputs measures the interface's own channel skew,
 which is subtracted.  Pass (SYS2 3.5 and 8e): |mean skew| below one sample of
-the link rate (20.8 us at 48 kHz), target below 10 us, and the per-window
+the alink rate (20.8 us at 48 kHz), target below 10 us, and the per-window
 values constant to within half a sample (no drift).
 
-Standard library only (wave + array), so it runs in the dspi-link-tools
+Standard library only (wave + array), so it runs in the dspi-alink-tools
 container; the recording must be integer PCM (16, 24 or 32 bit), any rate.
 
-  tools/link/run.sh skew_xcorr.py /work/rec.wav
-  tools/link/run.sh skew_xcorr.py /work/rec.wav --mode click --calib /work/calib.wav
-  tools/link/run.sh skew_xcorr.py --selftest
+  tools/alink/run.sh skew_xcorr.py /work/rec.wav
+  tools/alink/run.sh skew_xcorr.py /work/rec.wav --mode click --calib /work/calib.wav
+  tools/alink/run.sh skew_xcorr.py --selftest
 """
 
 import argparse
@@ -251,7 +251,7 @@ def main(argv=None):
     ap.add_argument("--thresh", type=float, default=0.0,
                     help="click: detection level, full scale 1 (default 0: half each channel's peak)")
     ap.add_argument("--calib", help="recording of one output split into both inputs: the interface's own skew")
-    ap.add_argument("--link-rate", type=float, default=48000.0, help="the link's sample rate for the pass limits")
+    ap.add_argument("--alink-rate", type=float, default=48000.0, help="the alink's sample rate for the pass limits")
     ap.add_argument("--selftest", action="store_true", help="check the estimators on synthetic data and exit")
     a = ap.parse_args(argv)
     if a.selftest:
@@ -277,14 +277,14 @@ def main(argv=None):
     lo -= calib
     hi -= calib
     us = 1e6 / rate
-    one = rate / a.link_rate          # one link sample in recording samples
+    one = rate / a.alink_rate          # one alink sample in recording samples
     span_s = rows[-1][0] - rows[0][0]
     drift_txt = f"{drift:+.3f} samples/h" if span_s >= 600.0 else "n/a (under 10 min)"
     print(f"windows {len(rows)}: mean {mean:+.3f} samples ({mean * us:+.2f} us), sd {sd:.3f}, "
           f"range {lo:+.3f}..{hi:+.3f} ({(hi - lo) * us:.2f} us), drift {drift_txt}")
     passed = abs(mean) < one and (hi - lo) < 0.5 * one
     target = abs(mean * us) < 10.0
-    print(f"pass (|mean| < 1 link sample = {1e6 / a.link_rate:.1f} us, constant to < half a sample): "
+    print(f"pass (|mean| < 1 alink sample = {1e6 / a.alink_rate:.1f} us, constant to < half a sample): "
           f"{'PASS' if passed else 'FAIL'}; target < 10 us: {'met' if target else 'not met'}")
     return 0 if passed else 1
 

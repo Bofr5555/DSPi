@@ -1,10 +1,10 @@
-// Host test for the link protocol reference codec (WP LK1):
-// firmware/DSPi/link/link_codec.c and link_decoder.c against the shared
-// vectors in link_vectors.json (made by tools/link/gen_vectors.py, which the
+// Host test for the alink protocol reference codec (WP LK1):
+// firmware/DSPi/alink/alink_codec.c and alink_decoder.c against the shared
+// vectors in alink_vectors.json (made by tools/alink/gen_vectors.py, which the
 // Python twin checks too), plus properties the vectors cannot show.
-// Built by run.sh: cc -std=c11 -Wall -Wextra -Werror -I ../DSPi test_link_codec.c
-#include "link/link_codec.c"
-#include "link/link_decoder.c"
+// Built by run.sh: cc -std=c11 -Wall -Wextra -Werror -I ../DSPi test_alink_codec.c
+#include "alink/alink_codec.c"
+#include "alink/alink_decoder.c"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -69,7 +69,7 @@ static size_t get_hex(const char *l, const char *key, uint8_t *out, size_t cap) 
 }
 
 // ---------------------------------------------------------------------------
-// Stream helpers shared with tools/link/link_codec.py (spec section 9.2)
+// Stream helpers shared with tools/alink/alink_codec.py (spec section 9.2)
 // ---------------------------------------------------------------------------
 
 static int32_t test_sample(uint64_t frame, unsigned ch, uint32_t seed) {
@@ -81,7 +81,7 @@ static int32_t test_sample(uint64_t frame, unsigned ch, uint32_t seed) {
     h ^= h >> 12;
     h *= 0x297A2D39u;
     h ^= h >> 15;
-    return link_get_s24((const uint8_t[]){ (uint8_t)(h >> 16), (uint8_t)(h >> 8), (uint8_t)h });
+    return alink_get_s24((const uint8_t[]){ (uint8_t)(h >> 16), (uint8_t)(h >> 8), (uint8_t)h });
 }
 
 static uint32_t fnv1a(uint32_t h, const uint8_t *p, size_t n) {
@@ -105,22 +105,22 @@ static void log_add(logbuf_t *lb, const char *s) {
     lb->len += n;
 }
 
-static void log_cb(void *ctx, const link_rx_event_t *ev) {
+static void log_cb(void *ctx, const alink_rx_event_t *ev) {
     logbuf_t *lb = ctx;
     char t[128];
     switch (ev->type) {
-    case LINK_RX_EV_ALIGN: snprintf(t, sizeof(t), "A%" PRIu64, ev->bitpos); break;
-    case LINK_RX_EV_LOCK: snprintf(t, sizeof(t), "L%" PRIu64, ev->frame); break;
-    case LINK_RX_EV_SUPERFRAME: snprintf(t, sizeof(t), "S"); break;
-    case LINK_RX_EV_SF_ERROR: snprintf(t, sizeof(t), "E%d", ev->sf_error); break;
-    case LINK_RX_EV_LOSS: snprintf(t, sizeof(t), "X"); break;
-    case LINK_RX_EV_FRAME: {
-        char fl[16] = "", banks[LINK_MAX_BANKS + 1];
-        if (ev->flags & LINK_RXF_COMMA_MISSING) strcat(fl, "c");
-        if (ev->flags & LINK_RXF_SLIP) snprintf(fl + strlen(fl), 8, "s%+d", ev->slip);
-        if (ev->flags & LINK_RXF_HEAD_BAD) strcat(fl, "h");
-        if (ev->flags & LINK_RXF_COUNTER) strcat(fl, "n");
-        unsigned nb = link_bank_count(ev->channels);
+    case ALINK_RX_EV_ALIGN: snprintf(t, sizeof(t), "A%" PRIu64, ev->bitpos); break;
+    case ALINK_RX_EV_LOCK: snprintf(t, sizeof(t), "L%" PRIu64, ev->frame); break;
+    case ALINK_RX_EV_SUPERFRAME: snprintf(t, sizeof(t), "S"); break;
+    case ALINK_RX_EV_SF_ERROR: snprintf(t, sizeof(t), "E%d", ev->sf_error); break;
+    case ALINK_RX_EV_LOSS: snprintf(t, sizeof(t), "X"); break;
+    case ALINK_RX_EV_FRAME: {
+        char fl[16] = "", banks[ALINK_MAX_BANKS + 1];
+        if (ev->flags & ALINK_RXF_COMMA_MISSING) strcat(fl, "c");
+        if (ev->flags & ALINK_RXF_SLIP) snprintf(fl + strlen(fl), 8, "s%+d", ev->slip);
+        if (ev->flags & ALINK_RXF_HEAD_BAD) strcat(fl, "h");
+        if (ev->flags & ALINK_RXF_COUNTER) strcat(fl, "n");
+        unsigned nb = alink_bank_count(ev->channels);
         for (unsigned b = 0; b < nb; b++) banks[b] = ".ohz"[ev->bank_status[b]];
         banks[nb] = 0;
         uint32_t h = 0x811C9DC5u;
@@ -136,7 +136,7 @@ static void log_cb(void *ctx, const link_rx_event_t *ev) {
     log_add(lb, t);
 }
 
-static void log_stats(logbuf_t *lb, const link_rx_stats_t *s) {
+static void log_stats(logbuf_t *lb, const alink_rx_stats_t *s) {
     char t[256];
     snprintf(t, sizeof(t), "#%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
              ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32,
@@ -147,20 +147,20 @@ static void log_stats(logbuf_t *lb, const link_rx_stats_t *s) {
 }
 
 // Decode a bit array (one bit per byte) fed in chunks of `chunk` bits.
-static link_rx_t rx;
+static alink_rx_t rx;
 static void decode_bits(const uint8_t *bits, size_t n, unsigned cls, uint8_t mask, size_t chunk,
                         logbuf_t *lb) {
     lb->len = 0;
     lb->log[0] = 0;
-    link_rx_init(&rx, cls, mask, log_cb, lb);
+    alink_rx_init(&rx, cls, mask, log_cb, lb);
     // Each chunk (at most 4096 bits) is re-packed to start at bit 31 of a
-    // word, as link_rx_push() takes it.
+    // word, as alink_rx_push() takes it.
     for (size_t at = 0; at < n; at += chunk) {
         size_t k = n - at < chunk ? n - at : chunk;
         uint32_t tmp[128] = { 0 };
         for (size_t i = 0; i < k; i++)
             if (bits[at + i]) tmp[i >> 5] |= 0x80000000u >> (i & 31);
-        link_rx_push(&rx, tmp, k);
+        alink_rx_push(&rx, tmp, k);
     }
     log_stats(lb, &rx.stats);
 }
@@ -225,7 +225,7 @@ static void check_code(const char *l) {
     unsigned rd = (unsigned)get_u64(l, "rd");
     uint8_t byte = (uint8_t)get_u64(l, "byte");
     bool k = get_u64(l, "k") != 0;
-    uint16_t sym = link_8b10b_encode(byte, k, &rd);
+    uint16_t sym = alink_8b10b_encode(byte, k, &rd);
     CHECK(sym == get_u64(l, "sym") && rd == get_u64(l, "rd_out"),
           "code %c%u.%u rd%" PRIu64 ": got %03x/%u", k ? 'K' : 'D', byte & 31u, byte >> 5,
           get_u64(l, "rd"), sym, rd);
@@ -239,7 +239,7 @@ static void check_dectab(const char *l) {
         for (int i = 0; i < 4; i++) want = want << 4 | hexval(s[4 * sym + (unsigned)i]);
         uint8_t byte = 0;
         bool k = false;
-        unsigned mask = link_8b10b_decode((uint16_t)sym, &byte, &k);
+        unsigned mask = alink_8b10b_decode((uint16_t)sym, &byte, &k);
         unsigned got = mask ? (mask << 9) | ((unsigned)k << 8) | byte : 0;
         CHECK(got == want, "decode %03x: got %04x want %04x", sym, got, want);
     }
@@ -252,28 +252,28 @@ static void check_layout(const char *l) {
     uint64_t sum = 0;
     for (unsigned f = 0; f < 147; f++) {
         unsigned want = hexval(s[2 * f]) << 4 | hexval(s[2 * f + 1]);
-        unsigned got = link_frame_symbols(cls, rate, f);
+        unsigned got = alink_frame_symbols(cls, rate, f);
         sum += got;
         CHECK(got == want, "L%u rate %u frame %u: %u symbols, want %u", cls, rate, f, got, want);
     }
     CHECK(sum == get_u64(l, "sum"), "L%u rate %u: sum", cls, rate);
-    CHECK(link_frame_symbols_min(cls, rate) == get_u64(l, "min"), "L%u rate %u: min", cls, rate);
-    CHECK(link_frame_symbols_max(cls, rate) == get_u64(l, "max"), "L%u rate %u: max", cls, rate);
-    CHECK(link_max_channels(cls, rate) == get_u64(l, "max_channels"), "L%u rate %u: capacity", cls, rate);
-    CHECK(link_frame_symbols(cls, rate, (1ull << 63) + 12345u) == get_u64(l, "at_big"),
+    CHECK(alink_frame_symbols_min(cls, rate) == get_u64(l, "min"), "L%u rate %u: min", cls, rate);
+    CHECK(alink_frame_symbols_max(cls, rate) == get_u64(l, "max"), "L%u rate %u: max", cls, rate);
+    CHECK(alink_max_channels(cls, rate) == get_u64(l, "max_channels"), "L%u rate %u: capacity", cls, rate);
+    CHECK(alink_frame_symbols(cls, rate, (1ull << 63) + 12345u) == get_u64(l, "at_big"),
           "L%u rate %u: frame 2^63+12345", cls, rate);
 }
 
 static void check_sf(const char *l) {
     get_str(l, "name", name, sizeof(name));
-    uint8_t b[LINK_SF_LEN];
-    CHECK(get_hex(l, "bytes", b, sizeof(b)) == LINK_SF_LEN, "sf %s: length", name);
-    link_sf_t sf;
+    uint8_t b[ALINK_SF_LEN];
+    CHECK(get_hex(l, "bytes", b, sizeof(b)) == ALINK_SF_LEN, "sf %s: length", name);
+    alink_sf_t sf;
     memset(&sf, 0, sizeof(sf));
-    int res = link_sf_unpack(b, &sf);
+    int res = alink_sf_unpack(b, &sf);
     CHECK(res == (int)get_i64(l, "result"), "sf %s: result %d", name, res);
     if (!get_u64(l, "pack")) return;
-    link_sf_t want = {
+    alink_sf_t want = {
         .flags = (uint8_t)get_u64(l, "flags"), .rate = (uint8_t)get_u64(l, "rate"),
         .channels = (uint8_t)get_u64(l, "channels"), .cls = (uint8_t)get_u64(l, "cls"),
         .hops = (uint8_t)get_u64(l, "hops"), .sender = (uint8_t)get_u64(l, "sender"),
@@ -281,9 +281,9 @@ static void check_sf(const char *l) {
         .apply_op = (uint8_t)get_u64(l, "apply_op"), .apply_arg = (uint8_t)get_u64(l, "apply_arg"),
         .apply_value = (int16_t)get_i64(l, "apply_value"),
     };
-    uint8_t packed[LINK_SF_LEN];
-    link_sf_pack(&want, packed);
-    CHECK(memcmp(packed, b, LINK_SF_LEN) == 0, "sf %s: pack", name);
+    uint8_t packed[ALINK_SF_LEN];
+    alink_sf_pack(&want, packed);
+    CHECK(memcmp(packed, b, ALINK_SF_LEN) == 0, "sf %s: pack", name);
     CHECK(sf.flags == want.flags && sf.rate == want.rate && sf.channels == want.channels &&
           sf.cls == want.cls && sf.hops == want.hops && sf.sender == want.sender &&
           sf.frame == want.frame && sf.apply_frame == want.apply_frame &&
@@ -292,40 +292,40 @@ static void check_sf(const char *l) {
 }
 
 static void check_sf_repeat(const char *l) {
-    uint8_t in[LINK_SF_LEN], want[LINK_SF_LEN], got[LINK_SF_LEN];
+    uint8_t in[ALINK_SF_LEN], want[ALINK_SF_LEN], got[ALINK_SF_LEN];
     get_hex(l, "bytes_in", in, sizeof(in));
     get_hex(l, "bytes_out", want, sizeof(want));
-    link_sf_t a, b;
-    CHECK(link_sf_unpack(in, &a) == LINK_SF_OK, "sf_repeat: input");
-    link_sf_repeat(&a, (uint8_t)get_u64(l, "cls"), &b);
-    link_sf_pack(&b, got);
-    CHECK(memcmp(got, want, LINK_SF_LEN) == 0, "sf_repeat %s", get_str(l, "name", name, sizeof(name)) ? name : "");
+    alink_sf_t a, b;
+    CHECK(alink_sf_unpack(in, &a) == ALINK_SF_OK, "sf_repeat: input");
+    alink_sf_repeat(&a, (uint8_t)get_u64(l, "cls"), &b);
+    alink_sf_pack(&b, got);
+    CHECK(memcmp(got, want, ALINK_SF_LEN) == 0, "sf_repeat %s", get_str(l, "name", name, sizeof(name)) ? name : "");
 }
 
-// Encode `frames` frames like tools/link/link_codec.py encode_stream().
+// Encode `frames` frames like tools/alink/alink_codec.py encode_stream().
 static size_t encode_stream(const char *l, uint8_t *bits) {
     static uint32_t words[MAX_BITS / 32];
-    link_tx_t tx;
+    alink_tx_t tx;
     unsigned cls = (unsigned)get_u64(l, "cls"), rate = (unsigned)get_u64(l, "rate");
     unsigned c = (unsigned)get_u64(l, "channels");
     uint64_t first = get_u64(l, "first"), frames = get_u64(l, "frames");
     uint32_t seed = (uint32_t)get_u64(l, "seed");
     int64_t sched = get_i64(l, "sched_index");
-    CHECK(link_tx_init(&tx, cls, rate, c, first, (uint8_t)get_u64(l, "sender")), "tx init");
+    CHECK(alink_tx_init(&tx, cls, rate, c, first, (uint8_t)get_u64(l, "sender")), "tx init");
     tx.flags = (uint8_t)get_u64(l, "flags");
     tx.hops = (uint8_t)get_u64(l, "hops");
-    link_bitw_t w;
-    link_bitw_init(&w, words, MAX_BITS / 32);
+    alink_bitw_t w;
+    alink_bitw_init(&w, words, MAX_BITS / 32);
     for (uint64_t i = 0; i < frames; i++) {
         if ((int64_t)i == sched)
-            CHECK(link_tx_schedule(&tx, get_u64(l, "sched_at"), (uint8_t)get_u64(l, "sched_op"),
+            CHECK(alink_tx_schedule(&tx, get_u64(l, "sched_at"), (uint8_t)get_u64(l, "sched_op"),
                                    (uint8_t)get_u64(l, "sched_arg"), (int16_t)get_i64(l, "sched_value")),
                   "schedule refused");
         // Exactly tx->channels samples on the heap, so ASan sees any read past them
         // (review lk F1: a RATE that grows C must not read the new C early).
         int32_t *s = malloc(tx.channels * sizeof(int32_t));
         for (unsigned ch = 0; ch < tx.channels; ch++) s[ch] = test_sample(tx.frame, ch, seed);
-        CHECK(link_tx_frame(&tx, s, &w), "bit buffer full");
+        CHECK(alink_tx_frame(&tx, s, &w), "bit buffer full");
         free(s);
     }
     for (size_t i = 0; i < w.nbits; i++) bits[i] = (uint8_t)((words[i >> 5] >> (31u - (i & 31u))) & 1u);
@@ -336,18 +336,18 @@ static void check_frame(const char *l) {
     get_str(l, "name", name, sizeof(name));
     static char want[2048];
     get_str(l, "symbols", want, sizeof(want));
-    link_tx_t tx;
+    alink_tx_t tx;
     unsigned c = (unsigned)get_u64(l, "channels");
     uint64_t f = get_u64(l, "frame");
-    CHECK(link_tx_init(&tx, (unsigned)get_u64(l, "cls"), (unsigned)get_u64(l, "rate"), c, f, 0),
+    CHECK(alink_tx_init(&tx, (unsigned)get_u64(l, "cls"), (unsigned)get_u64(l, "rate"), c, f, 0),
           "frame %s: init", name);
     tx.flags = (uint8_t)get_u64(l, "flags");
-    int32_t s[LINK_MAX_CHANNELS];
+    int32_t s[ALINK_MAX_CHANNELS];
     for (unsigned ch = 0; ch < c; ch++) s[ch] = test_sample(f, ch, (uint32_t)get_u64(l, "seed"));
-    uint32_t words[LINK_MAX_FRAME_SYMBOLS * 10 / 32 + 1];
-    link_bitw_t w;
-    link_bitw_init(&w, words, sizeof(words) / 4);
-    CHECK(link_tx_frame(&tx, s, &w), "frame %s: encode", name);
+    uint32_t words[ALINK_MAX_FRAME_SYMBOLS * 10 / 32 + 1];
+    alink_bitw_t w;
+    alink_bitw_init(&w, words, sizeof(words) / 4);
+    CHECK(alink_tx_frame(&tx, s, &w), "frame %s: encode", name);
     char got[2048];
     size_t n = w.nbits / 10;
     for (size_t i = 0; i < n; i++) {
@@ -389,8 +389,8 @@ static void test_vectors(void) {
     char path[1024];
     snprintf(path, sizeof(path), "%s", __FILE__);
     char *slash = strrchr(path, '/');
-    if (slash) strcpy(slash + 1, "link_vectors.json");
-    else strcpy(path, "link_vectors.json");
+    if (slash) strcpy(slash + 1, "alink_vectors.json");
+    else strcpy(path, "alink_vectors.json");
     FILE *f = fopen(path, "r");
     CHECK(f != NULL, "cannot open %s", path);
     if (!f) return;
@@ -410,23 +410,23 @@ static void test_vectors(void) {
         switch (t) {
         case 0:
             n = get_hex(line, "data", data, sizeof(data));
-            CHECK(link_crc8(data, n) == get_u64(line, "crc"), "crc8 %s", get_str(line, "name", name, sizeof(name)) ? name : "");
+            CHECK(alink_crc8(data, n) == get_u64(line, "crc"), "crc8 %s", get_str(line, "name", name, sizeof(name)) ? name : "");
             break;
         case 1:
             n = get_hex(line, "data", data, sizeof(data));
-            CHECK(link_crc16(data, n) == get_u64(line, "crc"), "crc16 %s", get_str(line, "name", name, sizeof(name)) ? name : "");
+            CHECK(alink_crc16(data, n) == get_u64(line, "crc"), "crc16 %s", get_str(line, "name", name, sizeof(name)) ? name : "");
             break;
         case 2: check_code(line); break;
         case 3: check_dectab(line); break;
         case 4: check_layout(line); break;
         case 5:
-            CHECK(link_layout_symbols((unsigned)get_u64(line, "channels")) == get_u64(line, "symbols"),
+            CHECK(alink_layout_symbols((unsigned)get_u64(line, "channels")) == get_u64(line, "symbols"),
                   "layout of %" PRIu64 " channels", get_u64(line, "channels"));
             break;
         case 6: {
             uint8_t want[64], got[64];
             n = get_hex(line, "bytes", want, sizeof(want));
-            link_prbs7_fill(got, n);
+            alink_prbs7_fill(got, n);
             CHECK(memcmp(got, want, n) == 0, "prbs7");
             break;
         }
@@ -450,73 +450,73 @@ static void test_vectors(void) {
 
 static void test_anchors(void) {
     const uint8_t chk[] = "123456789";
-    CHECK(link_crc8(chk, 9) == 0xF4, "CRC-8 check value");
-    CHECK(link_crc16(chk, 9) == 0x29B1, "CRC-16/CCITT-FALSE check value");
+    CHECK(alink_crc8(chk, 9) == 0xF4, "CRC-8 check value");
+    CHECK(alink_crc16(chk, 9) == 0x29B1, "CRC-16/CCITT-FALSE check value");
     unsigned rd = 0;
-    CHECK(link_8b10b_encode(LINK_BYTE_K28_5, true, &rd) == 0x0FA && rd == 1, "K28.5 RD-");
-    CHECK(link_8b10b_encode(LINK_BYTE_K28_5, true, &rd) == 0x305 && rd == 0, "K28.5 RD+");
+    CHECK(alink_8b10b_encode(ALINK_BYTE_K28_5, true, &rd) == 0x0FA && rd == 1, "K28.5 RD-");
+    CHECK(alink_8b10b_encode(ALINK_BYTE_K28_5, true, &rd) == 0x305 && rd == 0, "K28.5 RD+");
     rd = 0;
-    CHECK(link_8b10b_encode(LINK_BYTE_IDLE, false, &rd) == LINK_SYM_IDLE && rd == 0, "D21.5 RD-");
+    CHECK(alink_8b10b_encode(ALINK_BYTE_IDLE, false, &rd) == ALINK_SYM_IDLE && rd == 0, "D21.5 RD-");
     rd = 1;
-    CHECK(link_8b10b_encode(LINK_BYTE_IDLE, false, &rd) == LINK_SYM_IDLE && rd == 1, "D21.5 RD+");
+    CHECK(alink_8b10b_encode(ALINK_BYTE_IDLE, false, &rd) == ALINK_SYM_IDLE && rd == 1, "D21.5 RD+");
     rd = 0;
-    CHECK(link_8b10b_encode(0x00, false, &rd) == 0x274 && rd == 0, "D0.0 RD- = 100111 0100");
+    CHECK(alink_8b10b_encode(0x00, false, &rd) == 0x274 && rd == 0, "D0.0 RD- = 100111 0100");
     rd = 0;
-    CHECK(link_8b10b_encode(0xF1, false, &rd) == 0x237 && rd == 1, "D17.7 RD- uses A7: 100011 0111");
+    CHECK(alink_8b10b_encode(0xF1, false, &rd) == 0x237 && rd == 1, "D17.7 RD- uses A7: 100011 0111");
     rd = 0;
-    CHECK(link_8b10b_encode(0x1C, true, &rd) == 0x0F4, "K28.0 RD- = 001111 0100");
+    CHECK(alink_8b10b_encode(0x1C, true, &rd) == 0x0F4, "K28.0 RD- = 001111 0100");
     rd = 0;
-    CHECK(link_8b10b_encode(0x1D, true, &rd) == LINK_SYM_INVALID && rd == 0, "K29.0 does not exist");
-    CHECK(link_frame_symbols(1, 1, 0) == 32 && link_frame_symbols(2, 1, 0) == 64 &&
-          link_frame_symbols(3, 1, 0) == 128 && link_frame_symbols(1, 2, 0) == 16,
+    CHECK(alink_8b10b_encode(0x1D, true, &rd) == ALINK_SYM_INVALID && rd == 0, "K29.0 does not exist");
+    CHECK(alink_frame_symbols(1, 1, 0) == 32 && alink_frame_symbols(2, 1, 0) == 64 &&
+          alink_frame_symbols(3, 1, 0) == 128 && alink_frame_symbols(1, 2, 0) == 16,
           "symbols per frame at 48/96 kHz");
-    CHECK(link_max_channels(1, 1) == 8 && link_max_channels(2, 1) == 18 && link_max_channels(3, 1) == 38 &&
-          link_max_channels(1, 2) == 3 && link_max_channels(2, 2) == 8 && link_max_channels(3, 2) == 18,
+    CHECK(alink_max_channels(1, 1) == 8 && alink_max_channels(2, 1) == 18 && alink_max_channels(3, 1) == 38 &&
+          alink_max_channels(1, 2) == 3 && alink_max_channels(2, 2) == 8 && alink_max_channels(3, 2) == 18,
           "capacity table");
     unsigned sum = 0;
-    for (unsigned f = 0; f < 147; f++) sum += link_frame_symbols(1, 0, f);
+    for (unsigned f = 0; f < 147; f++) sum += alink_frame_symbols(1, 0, f);
     CHECK(sum == 5120, "44.1 kHz L1: 5120 symbols per 147 frames");
     // Every symbol the encoder makes decodes back, and nothing else decodes.
     unsigned valid = 0;
     for (unsigned s = 0; s < 1024; s++) {
         uint8_t b;
         bool k;
-        if (link_8b10b_decode((uint16_t)s, &b, &k)) valid++;
+        if (alink_8b10b_decode((uint16_t)s, &b, &k)) valid++;
     }
     unsigned images = 0;
     for (unsigned k = 0; k < 2; k++)
         for (unsigned v = 0; v < 256; v++)
             for (unsigned r = 0; r < 2; r++) {
                 unsigned rr = r;
-                uint16_t s = link_8b10b_encode((uint8_t)v, k, &rr);
-                if (s == LINK_SYM_INVALID) continue;
+                uint16_t s = alink_8b10b_encode((uint8_t)v, k, &rr);
+                if (s == ALINK_SYM_INVALID) continue;
                 images++;
                 uint8_t b;
                 bool kk;
-                unsigned m = link_8b10b_decode(s, &b, &kk);
+                unsigned m = alink_8b10b_decode(s, &b, &kk);
                 CHECK((m >> r) & 1u && b == v && kk == (k != 0), "roundtrip %u %02x rd%u", k, v, r);
-                CHECK(link_8b10b_rd_after(s, r) == rr, "rd_after %u %02x rd%u", k, v, r);
+                CHECK(alink_8b10b_rd_after(s, r) == rr, "rd_after %u %02x rd%u", k, v, r);
             }
     CHECK(images == 2 * (256 + 12), "encoder images");
-    printf("  8b/10b: %u valid code groups of 1024; sizeof(link_rx_t) %zu, sizeof(link_tx_t) %zu\n",
-           valid, sizeof(link_rx_t), sizeof(link_tx_t));
+    printf("  8b/10b: %u valid code groups of 1024; sizeof(alink_rx_t) %zu, sizeof(alink_tx_t) %zu\n",
+           valid, sizeof(alink_rx_t), sizeof(alink_tx_t));
 }
 
 // A long random stream: run length <= 5, running digital sum bounded, and the
 // comma pattern only where a K28.5 was sent.
 static void test_stream_properties(void) {
     static uint32_t words[1 << 14];
-    link_tx_t tx;
-    link_bitw_t w;
-    link_bitw_init(&w, words, sizeof(words) / 4);
-    CHECK(link_tx_init(&tx, 2, 0, 18, 123456789u, 1), "init");
+    alink_tx_t tx;
+    alink_bitw_t w;
+    alink_bitw_init(&w, words, sizeof(words) / 4);
+    CHECK(alink_tx_init(&tx, 2, 0, 18, 123456789u, 1), "init");
     uint32_t lcg = 1;
     unsigned frames = 0;
     for (;;) {
-        int32_t s[LINK_MAX_CHANNELS];
+        int32_t s[ALINK_MAX_CHANNELS];
         for (unsigned ch = 0; ch < 18; ch++) { lcg = lcg * 1103515245u + 12345u; s[ch] = (int32_t)(lcg >> 8) - 0x800000; }
         size_t before = w.nbits;
-        if (!link_tx_frame(&tx, s, &w)) { w.nbits = before; break; }
+        if (!alink_tx_frame(&tx, s, &w)) { w.nbits = before; break; }
         frames++;
     }
     unsigned run = 0, maxrun = 0, prev = 2, commas = 0, misplaced = 0;
@@ -533,12 +533,12 @@ static void test_stream_properties(void) {
         if (rds < rds_min) rds_min = rds;
         if (rds > rds_max) rds_max = rds;
         hist = (uint16_t)(((hist << 1) | b) & 0x3FFu);
-        if (i >= 9 && link_sym_is_comma(hist)) {
+        if (i >= 9 && alink_sym_is_comma(hist)) {
             commas++;
             if (i + 1 != frame_start + 10u) misplaced++;
         }
         if (i + 1 == frame_start + 10u) {
-            frame_start += 10u * link_frame_symbols(2, 0, 123456789u + fidx);
+            frame_start += 10u * alink_frame_symbols(2, 0, 123456789u + fidx);
             fidx++;
         }
     }
@@ -552,13 +552,13 @@ static void test_stream_properties(void) {
 // Clean streams decode to exactly the samples sent, at every class and rate.
 typedef struct { uint32_t seed; unsigned frames, bad; } rt_ctx_t;
 
-static void rt_cb(void *ctx, const link_rx_event_t *ev) {
+static void rt_cb(void *ctx, const alink_rx_event_t *ev) {
     rt_ctx_t *c = ctx;
-    if (ev->type != LINK_RX_EV_FRAME) return;
+    if (ev->type != ALINK_RX_EV_FRAME) return;
     c->frames++;
     if (ev->flags) c->bad++;
-    for (unsigned b = 0; b < link_bank_count(ev->channels); b++)
-        if (ev->bank_status[b] != LINK_BANK_OK) c->bad++;
+    for (unsigned b = 0; b < alink_bank_count(ev->channels); b++)
+        if (ev->bank_status[b] != ALINK_BANK_OK) c->bad++;
     for (unsigned ch = 0; ch < ev->channels; ch++)
         if (ev->samples[ch] != test_sample(ev->frame, ch, c->seed)) c->bad++;
 }
@@ -568,33 +568,33 @@ static void test_roundtrip(void) {
                                        { 3, 2, 18 }, { 1, 0, 8 }, { 3, 0, 41 } };
     static uint32_t words[1 << 14];
     for (size_t i = 0; i < sizeof(cfg) / sizeof(cfg[0]); i++) {
-        link_tx_t tx;
-        link_bitw_t w;
-        link_bitw_init(&w, words, sizeof(words) / 4);
-        CHECK(link_tx_init(&tx, cfg[i][0], cfg[i][1], cfg[i][2], 1000, 9), "init %zu", i);
+        alink_tx_t tx;
+        alink_bitw_t w;
+        alink_bitw_init(&w, words, sizeof(words) / 4);
+        CHECK(alink_tx_init(&tx, cfg[i][0], cfg[i][1], cfg[i][2], 1000, 9), "init %zu", i);
         for (unsigned f = 0; f < 120; f++) {
-            int32_t s[LINK_MAX_CHANNELS];
+            int32_t s[ALINK_MAX_CHANNELS];
             for (unsigned ch = 0; ch < cfg[i][2]; ch++) s[ch] = test_sample(tx.frame, ch, 3);
-            CHECK(link_tx_frame(&tx, s, &w), "encode %zu", i);
+            CHECK(alink_tx_frame(&tx, s, &w), "encode %zu", i);
         }
         rt_ctx_t c = { 3, 0, 0 };
-        link_rx_init(&rx, cfg[i][0], 0xFF, rt_cb, &c);
-        link_rx_push(&rx, words, w.nbits);
+        alink_rx_init(&rx, cfg[i][0], 0xFF, rt_cb, &c);
+        alink_rx_push(&rx, words, w.nbits);
         CHECK(c.frames > 50 && c.bad == 0 && rx.stats.lock_count == 1,
               "roundtrip L%u rate %u C %u: %u frames, %u bad", cfg[i][0], cfg[i][1], cfg[i][2], c.frames, c.bad);
     }
 }
 
 static void test_tx_rules(void) {
-    link_tx_t tx;
-    CHECK(!link_tx_init(&tx, 1, 1, 9, 0, 0), "9 channels on L1 refused");
-    CHECK(!link_tx_init(&tx, 4, 1, 8, 0, 0), "class 4 refused");
-    CHECK(link_tx_init(&tx, 2, 1, 16, 100, 0), "init");
-    CHECK(!link_tx_schedule(&tx, 140, LINK_OP_MUTE, 0, 0), "too close: no superframe completes before it");
-    CHECK(!link_tx_schedule(&tx, 168, LINK_OP_RATE, 2, 8), "RATE off a superframe boundary");
-    CHECK(!link_tx_schedule(&tx, 160, LINK_OP_RATE, 2, 9), "RATE to 9 channels at 96 kHz on L2");
-    CHECK(link_tx_schedule(&tx, 160, LINK_OP_RATE, 2, 8), "RATE at 160");
-    CHECK(!link_tx_schedule(&tx, 400, LINK_OP_MUTE, 0, 0), "one apply at a time");
+    alink_tx_t tx;
+    CHECK(!alink_tx_init(&tx, 1, 1, 9, 0, 0), "9 channels on L1 refused");
+    CHECK(!alink_tx_init(&tx, 4, 1, 8, 0, 0), "class 4 refused");
+    CHECK(alink_tx_init(&tx, 2, 1, 16, 100, 0), "init");
+    CHECK(!alink_tx_schedule(&tx, 140, ALINK_OP_MUTE, 0, 0), "too close: no superframe completes before it");
+    CHECK(!alink_tx_schedule(&tx, 168, ALINK_OP_RATE, 2, 8), "RATE off a superframe boundary");
+    CHECK(!alink_tx_schedule(&tx, 160, ALINK_OP_RATE, 2, 9), "RATE to 9 channels at 96 kHz on L2");
+    CHECK(alink_tx_schedule(&tx, 160, ALINK_OP_RATE, 2, 8), "RATE at 160");
+    CHECK(!alink_tx_schedule(&tx, 400, ALINK_OP_MUTE, 0, 0), "one apply at a time");
 }
 
 int main(void) {
@@ -604,9 +604,9 @@ int main(void) {
     test_stream_properties();
     test_vectors();
     if (failures) {
-        fprintf(stderr, "test_link_codec: %d failure(s)\n", failures);
+        fprintf(stderr, "test_alink_codec: %d failure(s)\n", failures);
         return 1;
     }
-    printf("test_link_codec: OK\n");
+    printf("test_alink_codec: OK\n");
     return 0;
 }

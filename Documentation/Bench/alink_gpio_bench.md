@@ -1,12 +1,12 @@
-# Link bench: spare Picos wired GPIO to GPIO
+# Alink bench: spare Picos wired GPIO to GPIO
 
 *WP LK3, 2026-11-13. Bench build for SYS2 bring-up steps 8(a) and 8(b) without any optical parts.*
 
-The audio link (`Documentation/Features/link_protocol_spec.md`) is meant for fibre, but its line code is plain 3.3 V NRZ. So
+The audio link (`Documentation/Features/alink_protocol_spec.md`) is meant for fibre, but its line code is plain 3.3 V NRZ. So
 the first real-world tests use bare Pico (RP2040) and Pico 2 (RP2350) boards with jumper wires between their GPIOs. They
-run a **bench image**, `link_bench`, which is not DSPi. It reuses LK1's codec and reference receiver and LK2's
-`link_tx_N` / `link_rx_N` PIO programs, both unchanged, and adds a line-rate bit checker, a trim scan and impairment
-injection. The host tool `tools/link/bench.py` runs the tests and prints PASS or FAIL.
+run a **bench image**, `alink_bench`, which is not DSPi. It reuses LK1's codec and reference receiver and LK2's
+`alink_tx_N` / `alink_rx_N` PIO programs, both unchanged, and adds a line-rate bit checker, a trim scan and impairment
+injection. The host tool `tools/alink/bench.py` runs the tests and prints PASS or FAIL.
 
 Contents: [1 What the image does](#1-what-the-image-does) · [2 Clocks and classes](#2-clocks-and-classes) ·
 [3 Pins](#3-pins) · [4 Electrical rules](#4-electrical-rules) · [5 Wire length](#5-wire-length-per-class) ·
@@ -16,13 +16,13 @@ Contents: [1 What the image does](#1-what-the-image-does) · [2 Clocks and class
 
 ## 1. What the image does
 
-One image per chip (`link_bench-rp2350.uf2`, `link_bench-rp2040.uf2`). You pick the role at run time over the board's USB
+One image per chip (`alink_bench-rp2350.uf2`, `alink_bench-rp2040.uf2`). You pick the role at run time over the board's USB
 serial console:
 
 | Role | Command | What runs |
 |---|---|---|
-| TX | `tx L1 48k pins=2,3` | A bench stream on 1 to 7 pins (RP2040: 5). Each pin has a `link_tx_N` state machine fed by its own DMA channel pair from one shared 16 KB word ring. All the state machines start on the same cycle, across PIO blocks on the RP2350. The payload is PRBS-7 (superframe flag b4) or a fixed test vector (`pay=vec`), and the frame counter runs from `f0`. |
-| RX | `rx pin=0` | `link_rx_N` writes into a 32 KB raw ring through two DMA channels: one moves data, the other reloads the address. This is the ring LK5 will use, so the bench exercises it on hardware first. LK1's reference receiver acquires the stream from a snapshot (lock, frame F, disparity, superframe). From then on a bit error checker regenerates the expected stream and compares **every received bit**. It follows slips of up to 3 bits and declares loss after 16 bad frames. The reference receiver also runs on the live ring as fast as the CPU allows, for the spec 8.9 counters, and counts a gap whenever it falls a ring behind. `scan` measures the sampling trim. |
+| TX | `tx L1 48k pins=2,3` | A bench stream on 1 to 7 pins (RP2040: 5). Each pin has an `alink_tx_N` state machine fed by its own DMA channel pair from one shared 16 KB word ring. All the state machines start on the same cycle, across PIO blocks on the RP2350. The payload is PRBS-7 (superframe flag b4) or a fixed test vector (`pay=vec`), and the frame counter runs from `f0`. |
+| RX | `rx pin=0` | `alink_rx_N` writes into a 32 KB raw ring through two DMA channels: one moves data, the other reloads the address. This is the ring LK5 will use, so the bench exercises it on hardware first. LK1's reference receiver acquires the stream from a snapshot (lock, frame F, disparity, superframe). From then on a bit error checker regenerates the expected stream and compares **every received bit**. It follows slips of up to 3 bits and declares loss after 16 bad frames. The reference receiver also runs on the live ring as fast as the CPU allows, for the spec 8.9 counters, and counts a gap whenever it falls a ring behind. `scan` measures the sampling trim. |
 | LOOP | `loop L1 48k` | TX and RX on one board, with a jumper from GP2 to GP0 (step 8(a)). |
 | IMPAIR | `impair in=0 out=2 div=1` | A PIO pass-through re-times a passing stream to this board's clock: one SM clock of quantisation, so `div=d` adds up to d sys cycles of edge jitter. It also corrupts the stream in timed bursts: `impair flip <cycles> <period_ms>` inverts the line, and `impair drop <us> <period_ms>` holds it low. |
 | TX impairments | `inject comma 3` | The transmitter damages exact frames, so you can predict the counters. `comma n` damages n commas (the flywheel; 3 in a row means loss). `flip n` flips one payload bit in n frames (CRC-16, HOLD). `slip d` adds or drops \|d\| bits before a comma (1 to 2 bits is a slip, 3 is loss). `idle n` sends n frames as idles. |
@@ -39,9 +39,9 @@ rate is `sys_clk / N`, so a lower clock carries the same classes on the faster p
 
 | `clock` | L1 15.36 MBd | L2 30.72 MBd | L3 61.44 MBd | Notes |
 |---|---|---|---|---|
-| 307 (default, both chips) | `link_*_20`, window ±29.2 ns, trim ±9 | `link_*_10`, ±13.0 ns, trim ±4 | `link_*_5`, ±6.5 ns, trim ±1 | the DSPi configuration; one trim step = 3.26 ns |
-| 153 (153.6 MHz) | `link_*_10`, ±26 ns, trim ±4 | `link_*_5`, ±13 ns, trim ±1 | not possible | a Pico 1 inside its 200 MHz SDK rating; trim step 6.5 ns |
-| 76 (76.8 MHz) | `link_*_5`, ±26 ns, trim ±1 | not possible | not possible | below the RP2040's stock clock; trim step 13 ns |
+| 307 (default, both chips) | `alink_*_20`, window ±29.2 ns, trim ±9 | `alink_*_10`, ±13.0 ns, trim ±4 | `alink_*_5`, ±6.5 ns, trim ±1 | the DSPi configuration; one trim step = 3.26 ns |
+| 153 (153.6 MHz) | `alink_*_10`, ±26 ns, trim ±4 | `alink_*_5`, ±13 ns, trim ±1 | not possible | a Pico 1 inside its 200 MHz SDK rating; trim step 6.5 ns |
+| 76 (76.8 MHz) | `alink_*_5`, ±26 ns, trim ±1 | not possible | not possible | below the RP2040's stock clock; trim step 13 ns |
 
 At its stock 125 or 133 MHz an RP2040 can do no class: 15.36 MBd needs a system clock of N × 15.36 MHz with N = 5, 10 or 20.
 A fractional PIO divider would add a sys cycle of jitter to every edge, so the bench never uses one. Both ends of a wire
@@ -60,10 +60,10 @@ Pico and Pico 2 have the same header, so these are the same physical pins on bot
 
 | Signal | GPIO | Header pin | Role |
 |---|---|---|---|
-| link RX data in | **GP0** | 1 | RX, LOOP (`rxpin=`), IMPAIR input (`in=`) |
-| link TX 1 out | **GP2** | 4 | TX, LOOP (`txpins=`), IMPAIR output (`out=`) |
-| link TX 2-4 | GP3, GP4, GP5 | 5, 6, 7 | extra TX links (`pins=2,3,4,5`) |
-| link TX 5-8 | GP6, GP7, GP8, GP9 | 9, 10, 11, 12 | more TX links (RP2350 up to 7 links, RP2040 up to 5) |
+| alink RX data in | **GP0** | 1 | RX, LOOP (`rxpin=`), IMPAIR input (`in=`) |
+| alink TX 1 out | **GP2** | 4 | TX, LOOP (`txpins=`), IMPAIR output (`out=`) |
+| alink TX 2-4 | GP3, GP4, GP5 | 5, 6, 7 | extra TX alinks (`pins=2,3,4,5`) |
+| alink TX 5-8 | GP6, GP7, GP8, GP9 | 9, 10, 11, 12 | more TX alinks (RP2350 up to 7 alinks, RP2040 up to 5) |
 | GND | - | 3, 8, 13, 18, 23, 28, 33, 38 | one GND next to each data pin: pin 3 next to GP0/GP2, pin 8 next to GP5/GP6 |
 | LED | GP25 | (on board) | slow 0.5 s blink: TX or IMPAIR running; fast blink: RX searching; steady: RX in sync; brief flash every 2 s: idle |
 
@@ -109,7 +109,7 @@ These are starting points, not guarantees. Be honest about L3 at 61 MBd on loose
 PWD plus jitter, and one breadboard row of ringing can use it up. The trim scan gives the verdict. A clean range of 3
 steps (−1..+1) at L3 is a healthy short wire. A range of 1 step, or a centre that is not 0, means the wiring is eating
 the margin. Shorten it, twist it, change the resistor, before you suspect the firmware. A Cat5 pair with 47-68 Ω at the
-driver carries L1 and L2 much further than these numbers. The link is meant for fibre, though, and these wires only
+driver carries L1 and L2 much further than these numbers. The alink is meant for fibre, though, and these wires only
 stand in for it on the bench.
 
 ## 6. Wiring diagrams
@@ -146,7 +146,7 @@ stand in for it on the bench.
   GND ─═══════════════════ GND         GND ─══════════════════════ GND
 ```
 
-**4 boards: one sender, three links, three receivers** (the star of SYS2, on wires). Start the TX with
+**4 boards: one sender, three alinks, three receivers** (the star of SYS2, on wires). Start the TX with
 `tx L1 48k pins=2,3,4` and run `bench.py pair --tx A --rx B`, then `--rx C`, then `--rx D` (one receiver at a time; the
 others keep running):
 
@@ -159,23 +159,23 @@ others keep running):
                        GND (pin 13) ─═══════════════ GND
 ```
 
-All four boards go on one powered hub. Because the three links start on the same cycle, a scope on GP2/GP3/GP4 shows
+All four boards go on one powered hub. Because the three alinks start on the same cycle, a scope on GP2/GP3/GP4 shows
 identical edges, which is the property the LK4 sender needs.
 
 ## 7. A Pico 2 running the LK5 DSPi receiver
 
-The LK5 receiver is part of every RP2350 DSPi build (`DSPI_LINK`, on by default): input source 7, `INPUT_SOURCE_LINK`.
-It reads the link on **GP0**, the default of `EXT_LINK_CONFIG.rx_pin`, which no other DSPi default uses, with the same
+The LK5 receiver is part of every RP2350 DSPi build (`DSPI_ALINK`, on by default): input source 7, `INPUT_SOURCE_ALINK`.
+It reads the alink on **GP0**, the default of `EXT_ALINK_CONFIG.rx_pin`, which no other DSPi default uses, with the same
 Schmitt input as the bench RX. So a DSPi Pico 2 (or a K340's Pico 2, at its GP0 pad) is wired **exactly like board B
 above**:
 
 ```
    bench TX board (Pico or Pico 2)            DSPi Pico 2 running the LK5 build
-   GP2 (pin 4) ─R(47 Ω)══════════════════════ GP0 (pin 1)    = LINK_RX
+   GP2 (pin 4) ─R(47 Ω)══════════════════════ GP0 (pin 1)    = ALINK_RX
    GND (pin 3) ─═════════════════════════════ GND (pin 3)
 ```
 
-The LK4 link sender (`link_sender_bench.md`) can stand in for the bench TX here: its link 0 is GP2 too. Without it, the bench TX stands in for the sender: `tx L1 48k ch=8 pay=vec` (or L2/L3, 44k1/96k). Its stream is a
+The LK4 alink sender (`alink_sender_bench.md`) can stand in for the bench TX here: its alink 0 is GP2 too. Without it, the bench TX stands in for the sender: `tx L1 48k ch=8 pay=vec` (or L2/L3, 44k1/96k). Its stream is a
 valid protocol-v1 stream: superframe, frame counter, CRCs. With `pay=prbs` the superframe carries the test-pattern
 flag, and the receiver then **plays silence** (the payload is not audio) while still locking and counting. With
 `pay=vec` it plays the fixed vector samples (`bench_vector_sample()`): steady DC levels on all 8 inputs, visible on
@@ -188,24 +188,24 @@ The receiver is configured over the extension channel (`extension_channel_spec.m
 ```sh
 M="./run.sh midi_ctrl.py"              # in tools/midi_ctrl, DSPI_MIDI_DEV=/dev/snd/midiCxD0 exported
 $M ext-list                             # lists 0x8000-0x8006 0x8008 0x8009 0x800a (0x8004-0x8006: LK6)
-$M set 0x00 --wvalue 0x8002 --payload 01ff00ffffff0300   # EXT_LINK_CONFIG: enable, GP0, class auto
-$M set 0x00 --wvalue 0x8003 --payload 0001020304050607   # EXT_LINK_SLOTS: link channels 0-7 -> inputs 0-7
-$M set 0xE0 --u8 7                      # REQ_SET_INPUT_SOURCE: LINK
-$M get 0x00 --wvalue 0x8001             # EXT_LINK_STATUS (52 bytes): state 2 = locked
-$M get 0x00 --wvalue 0x800A             # EXT_LINK_DIAG: trim scan at offsets 32-39, bench counters 40-55
-$M set 0x52                             # REQ_SAVE_OUTPUT_CONFIG: keep the link settings across reboots
+$M set 0x00 --wvalue 0x8002 --payload 01ff00ffffff0300   # EXT_ALINK_CONFIG: enable, GP0, class auto
+$M set 0x00 --wvalue 0x8003 --payload 0001020304050607   # EXT_ALINK_SLOTS: alink channels 0-7 -> inputs 0-7
+$M set 0xE0 --u8 7                      # REQ_SET_INPUT_SOURCE: ALINK
+$M get 0x00 --wvalue 0x8001             # EXT_ALINK_STATUS (52 bytes): state 2 = locked
+$M get 0x00 --wvalue 0x800A             # EXT_ALINK_DIAG: trim scan at offsets 32-39, bench counters 40-55
+$M set 0x52                             # REQ_SAVE_OUTPUT_CONFIG: keep the alink settings across reboots
 ```
 
 `dspi_poke.py` does the same over the vendor interface (`set 0x00 --wvalue 0x8002 --hex "01 ff 00 ff ff ff 03 00"`).
-On link-up the receiver detects the class (about 12 ms per class tried), runs the trim scan (a few hundred frames
+On alink-up the receiver detects the class (about 12 ms per class tried), runs the trim scan (a few hundred frames
 per trim step: L1 19 steps, L2 9, L3 3, about 0.1-0.4 s), locks, matches the pipeline to the stream's rate, prefills
 and plays. Its STATUS counters and its trim scan should match what a bench RX board reports on the same wire.
-With LK6, the default `EXT_LINK_PHASE` (phase lock, `d_local` 128) needs the 1 ms latency option
+With LK6, the default `EXT_ALINK_PHASE` (phase lock, `d_local` 128) needs the 1 ms latency option
 (`set 0x03 --u8 2`); under the default 4 ms option 128 is below `d_local_min` and the unit runs the fill servo
-(`D_BELOW_MIN`). Two phase-locked receivers: `link_phase_bench.md`.
+(`D_BELOW_MIN`). Two phase-locked receivers: `alink_phase_bench.md`.
 A save (`REQ_SAVE_OUTPUT_CONFIG`, a preset save) stalls the main loop longer than the receiver's ring holds (4 ms at
 L3, 16 ms at L1), so expect one loss and re-lock per flash write; other main-loop stalls up to those limits must not
-show as losses (`Documentation/Features/link_receiver.md` section 2).
+show as losses (`Documentation/Features/alink_receiver.md` section 2).
 
 ## 8. Flashing
 
@@ -213,8 +213,8 @@ The owner flashes; nothing here is done by an agent. Which file goes where:
 
 | Board | Marking | File | BOOTSEL drive name |
 |---|---|---|---|
-| Pico (RP2040) | "Raspberry Pi Pico", chip RP2-B2 | `link_bench-rp2040.uf2` | `RPI-RP2` |
-| Pico 2 (RP2350) | "Raspberry Pi Pico 2", chip RP2350 | `link_bench-rp2350.uf2` | `RP2350` |
+| Pico (RP2040) | "Raspberry Pi Pico", chip RP2-B2 | `alink_bench-rp2040.uf2` | `RPI-RP2` |
+| Pico 2 (RP2350) | "Raspberry Pi Pico 2", chip RP2350 | `alink_bench-rp2350.uf2` | `RP2350` |
 
 A wrong-chip file does no harm: the bootrom ignores blocks for the other family, and the board stays in BOOTSEL.
 
@@ -228,11 +228,11 @@ A wrong-chip file does no harm: the bootrom ignores blocks for the other family,
    `picotool save -a check.bin && cmp backup-<serial>.bin check.bin && echo backup verified`.
    If the comparison fails, do not flash; make a new backup.
 
-**Flash**: with the board in BOOTSEL, copy the `.uf2` onto the drive (`cp link_bench-rp2350.uf2 /run/media/$USER/RP2350/`).
+**Flash**: with the board in BOOTSEL, copy the `.uf2` onto the drive (`cp alink_bench-rp2350.uf2 /run/media/$USER/RP2350/`).
 The board reboots into the bench image. The image only overwrites the first ~64 KB of flash. Everything above that (a
 DSPi's saved presets, for example) is left as it was, but you need the backup to get the program back.
 
-**Find the console**: `ls /dev/serial/by-id/` shows `usb-Raspberry_Pi_DSPi_link_bench_<serial>-if00`, the board's unique
+**Find the console**: `ls /dev/serial/by-id/` shows `usb-Raspberry_Pi_DSPi_alink_bench_<serial>-if00`, the board's unique
 ID, the same as `serial=` in the `id` reply. Label the boards with it.
 
 **Back to normal**: BOOTSEL and copy the board's usual `.uf2`, or restore the backup with
@@ -242,24 +242,24 @@ rate.
 
 ## 9. Running the tests
 
-`tools/link/bench.sh` runs `bench.py` in its container venv (rootless podman, no network). It passes only the tty
+`tools/alink/bench.sh` runs `bench.py` in its container venv (rootless podman, no network). It passes only the tty
 devices named on the command line, so the container sees nothing else. Typical session:
 
 ```sh
-B=tools/link/bench.sh
-$B id /dev/serial/by-id/usb-Raspberry_Pi_DSPi_link_bench_*                # who is who
+B=tools/alink/bench.sh
+$B id /dev/serial/by-id/usb-Raspberry_Pi_DSPi_alink_bench_*                # who is who
 $B loop /dev/serial/by-id/...A --cls L1 --rate 48k                        # step 8(a), 11 min = 1e10 bits
 $B loop /dev/serial/by-id/...A --cls L3 --minutes 3                       # L3: 1e10 bits in 3 min
 $B matrix /dev/serial/by-id/...A --minutes 1 --no-impair                  # every class and rate, 1 min each
 $B pair --tx /dev/serial/by-id/...A --rx /dev/serial/by-id/...B --cls L2  # two boards
 $B impair --tx ...A --imp ...I --rx ...B --cls L1                         # IMPAIR in the middle
-$B cmd /dev/serial/by-id/...B 'diag'                                      # EXT_LINK_DIAG layout
+$B cmd /dev/serial/by-id/...B 'diag'                                      # EXT_ALINK_DIAG layout
 ```
 
 Options: `--minutes`, `--ch`, `--txpin`, `--rxpin`, `--drive`, `--no-scan`, `--no-impair`, `--strict-scan` (on two boards
 an off-centre scan is a WARN by default, because it describes the wire), `--unplug` (asks you to pull and replug the
 jumper: loss and re-lock on real hardware), `-v` (shows the console traffic). Without the container:
-`python3 tools/link/bench.py ...` works on any Linux host with Python 3.8 or later.
+`python3 tools/alink/bench.py ...` works on any Linux host with Python 3.8 or later.
 
 ## 10. Console reference
 
@@ -268,7 +268,7 @@ in a terminal program; the image does not echo.
 
 | Command | Reply |
 |---|---|
-| `id` | `ID fw=link_bench ver=<git> chip=rp2350 clock=307200000 serial=<id> max_links=7 classes=L1,L2,L3` |
+| `id` | `ID fw=alink_bench ver=<git> chip=rp2350 clock=307200000 serial=<id> max_alinks=7 classes=L1,L2,L3` |
 | `help` | `OK` lines listing the commands |
 | `clock 307\|153\|76` | stops every role, sets the clock, prints `ID` |
 | `tx <L1\|L2\|L3> <44k1\|48k\|96k> [ch=C] [pay=prbs\|vec] [pins=2,3] [f0=N] [sender=N] [drive=4]` | `OK` / `ERR <why>` |
@@ -279,15 +279,15 @@ in a terminal program; the image does not echo.
 | `scan [dwell_ms]` | one `SCANSTEP trim= sync= clean= errors= bits=` per trim, then `SCAN state= lo= hi= used= mask= cls=`; the trim in use afterwards is `used` |
 | `impair [in=0] [out=2] [div=1..255] [drive=]`, `impair flip <cycles> <period_ms>`, `impair drop <us> <period_ms>`, `impair off` | `OK` |
 | `stat` | `STAT ...`, below |
-| `diag` | `DIAG <128 hex digits>`, the 64-byte `EXT_LINK_DIAG` layout v1 (extension_channel_spec.md 2.8.11), then `DIAGF` with its fields decoded |
-| `xstatus` | `XSTATUS <104 hex digits>`, the 52-byte `EXT_LINK_STATUS` layout (2.8.2) |
+| `diag` | `DIAG <128 hex digits>`, the 64-byte `EXT_ALINK_DIAG` layout v1 (extension_channel_spec.md 2.8.11), then `DIAGF` with its fields decoded |
+| `xstatus` | `XSTATUS <104 hex digits>`, the 52-byte `EXT_ALINK_STATUS` layout (2.8.2) |
 | `reset` | `OK`: clears the checker, TX-impairment and reference counters (the reference receiver restarts, so its `lock` becomes 1 again) |
 | `stop` | `OK`: every role off, every pin an input |
 | (asynchronous) | `EVT sync cls= rate= ch= frame=`, `EVT loss frame=` |
 
 `STAT` fields (present for the roles that are running):
 
-- **TX:** `tx_cls tx_rate tx_ch tx_pay tx_links`; `tx_frame` is the frame now on the wire; `tx_words` is the words
+- **TX:** `tx_cls tx_rate tx_ch tx_pay tx_alinks`; `tx_frame` is the frame now on the wire; `tx_words` is the words
   sent. `tx_late` counts times the DMA caught up with the refill (stale words sent). `tx_stall` counts times a TX FIFO
   ran dry (a stretched bit). `imp_comma imp_flip imp_slip imp_slip_bits imp_idle` count the impairments applied.
 - **RX:** `rx_pin rx_cls trim`. `sync`, `frame`, `rate`, `ch`, `sf_flags` and `sender` come from the acquired stream.
@@ -304,7 +304,7 @@ in a terminal program; the image does not echo.
 
 ## 11. Expected results and what each test proves
 
-| Test (bench.py step) | Expected | What it proves for the link |
+| Test (bench.py step) | Expected | What it proves for the alink |
 |---|---|---|
 | lock | `sync=1` within about 0.1-0.5 s; the superframe reports the class, rate, C and PRBS flag that were sent | LK2's RX program samples real GPIO edges; LK1's receiver finds commas, heads and a valid superframe on a real stream; the 32 KB two-channel DMA ring works |
 | trim scan (LOOP) | L1 `lo=-9..-8 hi=8..9 used=0`, L2 `-4..-3 / 3..4 / 0`, L3 `-1 / 1 / 0`, the same as the LK2 model for a clean line | the trim patch and reload work on hardware; the sampling window is centred, i.e. the GPIO path has no pulse-width distortion worth a step; this is the step 8(a) trim criterion |
@@ -337,8 +337,8 @@ tests, covers ±1000 ppm.
 - Bench payloads only (PRBS-7 or the fixed vector). The checker regenerates the bench stream, so another sender's stream,
   with applies or live audio, is decoded by the reference receiver but not bit-checked.
 - No LOS or TX_DISABLE pins (STATUS `los` reads 0xFF).
-- The RP2040 starts links on pio0 and pio1 a few cycles apart, a constant skew; the RP2350 starts all blocks on one cycle.
+- The RP2040 starts alinks on pio0 and pio1 a few cycles apart, a constant skew; the RP2350 starts all blocks on one cycle.
 - `scan` and `trim` reload the RX program, which leaves a seam in the raw stream. The checker re-acquires after it, but
   the reference receiver counts what it saw. Run `reset` before a measurement.
-- Host tests: `firmware/link_bench/tests/run.sh` (the bench logic alone, then driven through LK2's cycle-accurate PIO
-  model) and `tools/link/tests/test_bench_tool.py` (the tool against simulated boards and a pty).
+- Host tests: `firmware/alink_bench/tests/run.sh` (the bench logic alone, then driven through LK2's cycle-accurate PIO
+  model) and `tools/alink/tests/test_bench_tool.py` (the tool against simulated boards and a pty).

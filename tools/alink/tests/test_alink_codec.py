@@ -1,4 +1,4 @@
-"""WP LK1: tests for the link protocol Python twin (tools/link/link_codec.py).
+"""WP LK1: tests for the alink protocol Python twin (tools/alink/alink_codec.py).
 
     ./run.sh -m unittest discover -s tests -v
 """
@@ -13,10 +13,10 @@ from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-import link_codec as lc  # noqa: E402
+import alink_codec as lc # noqa: E402
 import gen_vectors  # noqa: E402
 
-VECTORS = os.path.join(HERE, "..", "..", "..", "firmware", "tests", "link_vectors.json")
+VECTORS = os.path.join(HERE, "..", "..", "..", "firmware", "tests", "alink_vectors.json")
 
 
 def load_vectors():

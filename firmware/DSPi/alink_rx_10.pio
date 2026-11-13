@@ -1,6 +1,6 @@
-; link_rx_10.pio; DSPi audio link NRZ receiver, class L2, 30.72 MBd (SYS2 2.6)
+; alink_rx_10.pio; DSPi audio link NRZ receiver, class L2, 30.72 MBd (SYS2 2.6)
 ;
-; Same structure as link_rx_20.pio (read that header first), scaled to 10
+; Same structure as alink_rx_20.pio (read that header first), scaled to 10
 ; sys cycles per line bit: the counter loop runs 3 polls instead of 8 and
 ; the entry delay is 4 (first emit 6 cycles after the poll that saw an edge).
 ;
@@ -11,9 +11,9 @@
 ; between the polls at 2 and 4, so the re-phase quantisation is 2 cycles
 ; (6.5 ns, i.e. +-3.3 ns) and the edge window is +-4 cycles (+-13 ns).
 ;
-; Setup: as link_rx_20.pio. DMA drains one word per 320 cycles.
+; Setup: as alink_rx_20.pio. DMA drains one word per 320 cycles.
 
-.program link_rx_10
+.program alink_rx_10
 .define ENTRY_DELAY 4
 
 .wrap_target

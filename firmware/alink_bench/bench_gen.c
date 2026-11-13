@@ -1,10 +1,10 @@
 /*
- * bench_gen.c - link bench: real-time frame generator and bit sink
+ * bench_gen.c - alink bench: real-time frame generator and bit sink
  *
- * See bench_gen.h.  Every symbol comes from LK1's link_8b10b_encode(), every
- * CRC from link_crc8()/link_crc16(), the superframe from link_sf_pack() and
- * the PRBS from link_prbs7_fill(), so the only thing this file adds is the
- * order of the work, which the host tests check against link_tx_frame().
+ * See bench_gen.h.  Every symbol comes from LK1's alink_8b10b_encode(), every
+ * CRC from alink_crc8()/alink_crc16(), the superframe from alink_sf_pack() and
+ * the PRBS from alink_prbs7_fill(), so the only thing this file adds is the
+ * order of the work, which the host tests check against alink_tx_frame().
  */
 
 #include "bench_gen.h"
@@ -76,23 +76,23 @@ int32_t bench_vector_sample(unsigned ch) {
 // starting disparity.
 static void cache_payload(bench_gen_t *g) {
     unsigned c = g->channels;
-    uint8_t payload[3u * LINK_MAX_CHANNELS];
+    uint8_t payload[3u * ALINK_MAX_CHANNELS];
     if (g->pay == BENCH_PAY_PRBS) {
-        link_prbs7_fill(payload, 3u * c);
+        alink_prbs7_fill(payload, 3u * c);
     } else {
-        for (unsigned ch = 0; ch < c; ch++) link_put_s24(payload + 3u * ch, bench_vector_sample(ch));
+        for (unsigned ch = 0; ch < c; ch++) alink_put_s24(payload + 3u * ch, bench_vector_sample(ch));
     }
     for (unsigned r = 0; r < 2; r++) {
-        link_bitw_t w;
-        link_bitw_init(&w, g->pay_bits[r], BENCH_PAY_WORDS);
+        alink_bitw_t w;
+        alink_bitw_init(&w, g->pay_bits[r], BENCH_PAY_WORDS);
         unsigned rd = r;
-        for (unsigned b = 0; b < link_bank_count(c); b++) {
-            const uint8_t *p = payload + 3u * LINK_BANK_CHANNELS * b;
-            unsigned n = 3u * link_bank_channels(c, b);
-            uint16_t crc = link_crc16(p, n);
-            for (unsigned i = 0; i < n; i++) link_bitw_put(&w, link_8b10b_encode(p[i], false, &rd), 10);
-            link_bitw_put(&w, link_8b10b_encode((uint8_t)crc, false, &rd), 10);
-            link_bitw_put(&w, link_8b10b_encode((uint8_t)(crc >> 8), false, &rd), 10);
+        for (unsigned b = 0; b < alink_bank_count(c); b++) {
+            const uint8_t *p = payload + 3u * ALINK_BANK_CHANNELS * b;
+            unsigned n = 3u * alink_bank_channels(c, b);
+            uint16_t crc = alink_crc16(p, n);
+            for (unsigned i = 0; i < n; i++) alink_bitw_put(&w, alink_8b10b_encode(p[i], false, &rd), 10);
+            alink_bitw_put(&w, alink_8b10b_encode((uint8_t)crc, false, &rd), 10);
+            alink_bitw_put(&w, alink_8b10b_encode((uint8_t)(crc >> 8), false, &rd), 10);
         }
         g->pay_nbits = (unsigned)w.nbits;
         g->pay_rd_end[r] = (uint8_t)rd;
@@ -102,17 +102,17 @@ static void cache_payload(bench_gen_t *g) {
 bool bench_gen_init(bench_gen_t *g, unsigned cls, unsigned rate, unsigned channels,
                     unsigned pay, uint64_t first, uint8_t sender) {
     memset(g, 0, sizeof(*g));
-    if (!link_class_baud(cls) || !link_rate_hz(rate) || channels < 1 ||
-        channels > link_max_channels(cls, rate) || pay > BENCH_PAY_VECTOR)
+    if (!alink_class_baud(cls) || !alink_rate_hz(rate) || channels < 1 ||
+        channels > alink_max_channels(cls, rate) || pay > BENCH_PAY_VECTOR)
         return false;
     g->cls = (uint8_t)cls;
     g->rate = (uint8_t)rate;
     g->channels = (uint8_t)channels;
     g->pay = (uint8_t)pay;
     g->sender = sender;
-    g->flags = pay == BENCH_PAY_PRBS ? LINK_SF_FLAG_PRBS : 0;
-    g->layout = link_layout_symbols(channels);
-    unsigned lo = link_frame_symbols_min(cls, rate), hi = link_frame_symbols_max(cls, rate);
+    g->flags = pay == BENCH_PAY_PRBS ? ALINK_SF_FLAG_PRBS : 0;
+    g->layout = alink_layout_symbols(channels);
+    unsigned lo = alink_frame_symbols_min(cls, rate), hi = alink_frame_symbols_max(cls, rate);
     g->sym_const = lo == hi ? lo : 0;
     cache_payload(g);
     bench_gen_seek(g, first, 0);
@@ -126,22 +126,22 @@ void bench_gen_seek(bench_gen_t *g, uint64_t first, unsigned rd) {
 }
 
 static unsigned frame_symbols(const bench_gen_t *g, uint64_t f) {
-    return g->sym_const ? g->sym_const : link_frame_symbols(g->cls, g->rate, f);
+    return g->sym_const ? g->sym_const : alink_frame_symbols(g->cls, g->rate, f);
 }
 
 unsigned bench_gen_frame_bits(const bench_gen_t *g) {
     return 10u * frame_symbols(g, g->frame);
 }
 
-// The superframe as link_tx_frame() packs it: no apply, so no pending flags.
+// The superframe as alink_tx_frame() packs it: no apply, so no pending flags.
 static void pack_sf(bench_gen_t *g, uint64_t first) {
-    link_sf_t sf = {
-        .flags = (uint8_t)(g->flags & (LINK_SF_FLAGS_DEFINED & ~(LINK_SF_FLAG_RATE_PEND |
-                                                                  LINK_SF_FLAG_APPLY_PEND))),
+    alink_sf_t sf = {
+        .flags = (uint8_t)(g->flags & (ALINK_SF_FLAGS_DEFINED & ~(ALINK_SF_FLAG_RATE_PEND |
+                                                                  ALINK_SF_FLAG_APPLY_PEND))),
         .rate = g->rate, .channels = g->channels, .cls = g->cls,
         .hops = g->hops, .sender = g->sender, .frame = first,
     };
-    link_sf_pack(&sf, g->sf);
+    alink_sf_pack(&sf, g->sf);
 }
 
 // D21.5 is 1010101010 in both columns: a run of idles is alternating bits
@@ -153,20 +153,20 @@ static void put_alternating(bench_sink_t *s, unsigned nbits) {
 
 unsigned bench_gen_parts(bench_gen_t *g, bench_parts_t *p) {
     uint64_t f = g->frame;
-    if (f % LINK_SF_LEN == 0 || !g->started) {
-        pack_sf(g, f & ~(uint64_t)(LINK_SF_LEN - 1u));
+    if (f % ALINK_SF_LEN == 0 || !g->started) {
+        pack_sf(g, f & ~(uint64_t)(ALINK_SF_LEN - 1u));
         g->started = true;
     }
     unsigned total_bits = 10u * frame_symbols(g, f);
     uint8_t head[3];
     head[0] = (uint8_t)f;
-    head[1] = g->sf[f % LINK_SF_LEN];
-    head[2] = link_crc8(head, 2);
+    head[1] = g->sf[f % ALINK_SF_LEN];
+    head[2] = alink_crc8(head, 2);
     unsigned rd = g->rd;
-    uint32_t c = link_8b10b_encode(LINK_BYTE_K28_5, true, &rd);
-    uint32_t h1 = link_8b10b_encode(head[0], false, &rd);
-    uint32_t h2 = link_8b10b_encode(head[1], false, &rd);
-    uint32_t h3 = link_8b10b_encode(head[2], false, &rd);
+    uint32_t c = alink_8b10b_encode(ALINK_BYTE_K28_5, true, &rd);
+    uint32_t h1 = alink_8b10b_encode(head[0], false, &rd);
+    uint32_t h2 = alink_8b10b_encode(head[1], false, &rd);
+    uint32_t h3 = alink_8b10b_encode(head[2], false, &rd);
     p->head[0] = (c << 22) | (h1 << 12) | (h2 << 2) | (h3 >> 8);
     p->head[1] = h3 << 24;
     p->comma_rd = g->rd;
@@ -180,20 +180,20 @@ unsigned bench_gen_parts(bench_gen_t *g, bench_parts_t *p) {
 
 unsigned bench_gen_frame(bench_gen_t *g, bench_sink_t *s) {
     uint64_t f = g->frame;
-    if (f % LINK_SF_LEN == 0 || !g->started) {
-        pack_sf(g, f & ~(uint64_t)(LINK_SF_LEN - 1u));
+    if (f % ALINK_SF_LEN == 0 || !g->started) {
+        pack_sf(g, f & ~(uint64_t)(ALINK_SF_LEN - 1u));
         g->started = true;
     }
     unsigned total_bits = 10u * frame_symbols(g, f);
 
     uint8_t head[3];
     head[0] = (uint8_t)f;
-    head[1] = g->sf[f % LINK_SF_LEN];
-    head[2] = link_crc8(head, 2);
+    head[1] = g->sf[f % ALINK_SF_LEN];
+    head[2] = alink_crc8(head, 2);
     unsigned rd = g->rd;
     uint16_t sym[4];
-    sym[0] = link_8b10b_encode(LINK_BYTE_K28_5, true, &rd);
-    for (unsigned i = 0; i < 3; i++) sym[i + 1] = link_8b10b_encode(head[i], false, &rd);
+    sym[0] = alink_8b10b_encode(ALINK_BYTE_K28_5, true, &rd);
+    for (unsigned i = 0; i < 3; i++) sym[i + 1] = alink_8b10b_encode(head[i], false, &rd);
     unsigned pay_rd = rd;
     rd = g->pay_rd_end[pay_rd];
 

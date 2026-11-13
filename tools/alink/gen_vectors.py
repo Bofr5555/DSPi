@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Regenerate firmware/tests/link_vectors.json (shared C / Python link vectors).
+"""Regenerate firmware/tests/alink_vectors.json (shared C / Python alink vectors).
 
 One flat JSON object per line (strings and integers only) so the C test
-(firmware/tests/test_link_codec.c) scans it without a JSON library.  The
-format is in Documentation/Features/link_protocol_spec.md section 9.
+(firmware/tests/test_alink_codec.c) scans it without a JSON library. The
+format is in Documentation/Features/alink_protocol_spec.md section 9.
 
-    python3 -I gen_vectors.py > ../../firmware/tests/link_vectors.json
+    python3 -I gen_vectors.py > ../../firmware/tests/alink_vectors.json
 """
 
 import json
@@ -14,7 +14,7 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import link_codec as lc  # noqa: E402
+import alink_codec as lc # noqa: E402
 
 
 def sym_hex(symbols):

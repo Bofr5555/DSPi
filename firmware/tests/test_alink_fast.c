@@ -1,7 +1,7 @@
-// Host test for the production link receiver (WP LK5): firmware/DSPi/link/
-// link_fast.c must give exactly the reference receiver's log (link_decoder.c,
+// Host test for the production alink receiver (WP LK5): firmware/DSPi/alink/
+// alink_fast.c must give exactly the reference receiver's log (alink_decoder.c,
 // spec 9.2: events, frames, flags, bank status, sample hashes, counters) on
-//  - every stream vector of link_vectors.json, with the line written into a
+//  - every stream vector of alink_vectors.json, with the line written into a
 //    DMA-style ring in steps of 1, 7, 32, 320, 4096 and random bits, into the
 //    production 32 KB ring and a 1 KB ring that wraps every few frames, and
 //    with absolute bit positions that cross 2^32;
@@ -13,11 +13,11 @@
 //    fuzz1.jsonl, for instance).
 // It also checks what only the production receiver has: overrun recovery and
 // the search budget.
-// Built by run.sh: cc -std=c11 -Wall -Wextra -Werror -I ../DSPi test_link_fast.c
-#define main test_link_codec_main
-#include "test_link_codec.c"
+// Built by run.sh: cc -std=c11 -Wall -Wextra -Werror -I ../DSPi test_alink_fast.c
+#define main test_alink_codec_main
+#include "test_alink_codec.c"
 #undef main
-#include "link/link_fast.c"
+#include "alink/alink_fast.c"
 
 // ---------------------------------------------------------------------------
 // The production receiver over a ring
@@ -28,10 +28,10 @@ typedef struct {
     uint64_t origin;    // absolute bit of stream bit 0
 } fast_log_t;
 
-static void fast_log_cb(void *ctx, const link_rx_event_t *ev) {
+static void fast_log_cb(void *ctx, const alink_rx_event_t *ev) {
     fast_log_t *fl = ctx;
-    if (ev->type == LINK_RX_EV_ALIGN) {
-        link_rx_event_t e = *ev;
+    if (ev->type == ALINK_RX_EV_ALIGN) {
+        alink_rx_event_t e = *ev;
         e.bitpos -= fl->origin;
         log_cb(fl->lb, &e);
     } else {
@@ -39,18 +39,18 @@ static void fast_log_cb(void *ctx, const link_rx_event_t *ev) {
     }
 }
 
-static link_fast_t fx;
+static alink_fast_t fx;
 static uint32_t fring[8192];
 static uint32_t lcg_state = 12345;
 static uint32_t rand_chunk_max = 3000;  // random chunks: 1..this many bits
-static bool use_restart;                // decode_fast: link_fast_restart() after a wrong-class init
+static bool use_restart;                // decode_fast: alink_fast_restart() after a wrong-class init
 static uint32_t lcg(void) {
     lcg_state = lcg_state * 1664525u + 1013904223u;
     return lcg_state >> 8;
 }
 
 // Write bits[0..n) into a ring of ring_words words at absolute bits
-// origin.., calling link_fast_run() after every chunk (0 = random chunks).
+// origin.., calling alink_fast_run() after every chunk (0 = random chunks).
 static void decode_fast(const uint8_t *bits, size_t n, unsigned cls, uint8_t mask, size_t chunk,
                         uint32_t ring_words, uint64_t origin, logbuf_t *lb) {
     lb->len = 0;
@@ -59,13 +59,13 @@ static void decode_fast(const uint8_t *bits, size_t n, unsigned cls, uint8_t mas
     memset(fring, 0xA5, sizeof(fring));     // stale ring contents must never matter
     if (use_restart) {
         // A decoder of another class that has seen other bits, then restarted:
-        // must be the fresh decoder exactly (link_input.c's link-up steps).
-        link_fast_init(&fx, fring, ring_words, cls % 3u + 1u, mask, fast_log_cb, &fl, 0);
-        link_fast_run(&fx, 4096, 0);
+        // must be the fresh decoder exactly (alink_input.c's alink-up steps).
+        alink_fast_init(&fx, fring, ring_words, cls % 3u + 1u, mask, fast_log_cb, &fl, 0);
+        alink_fast_run(&fx, 4096, 0);
         fx.stats.crc8_errors = 99;
-        link_fast_restart(&fx, cls, origin);
+        alink_fast_restart(&fx, cls, origin);
     } else {
-        link_fast_init(&fx, fring, ring_words, cls, mask, fast_log_cb, &fl, origin);
+        alink_fast_init(&fx, fring, ring_words, cls, mask, fast_log_cb, &fl, origin);
     }
     fx.frame_events = true;
     uint32_t wmask = ring_words - 1u;
@@ -80,7 +80,7 @@ static void decode_fast(const uint8_t *bits, size_t n, unsigned cls, uint8_t mas
             else *w &= ~bit;
         }
         at += k;
-        link_fast_run(&fx, origin + at, 0);
+        alink_fast_run(&fx, origin + at, 0);
     }
     log_stats(lb, &fx.stats);
 }
@@ -108,7 +108,7 @@ static void check_fast_stream(const char *l, const char *file) {
         { 0, 8192, (1ull << 32) - 32u * 777u },     // random chunks, positions cross 2^32
         { 0, 256, 0 },                              // 1 KB ring: wraps every few frames
         { 640, 256, (1ull << 32) - 32u * 3001u },
-        { 320, 8192, 32u * 4096u },                 // after link_fast_restart() (below)
+        { 320, 8192, 32u * 4096u },                 // after alink_fast_restart() (below)
     };
     for (size_t i = 0; i < sizeof(runs) / sizeof(runs[0]); i++) {
         logbuf_t lb = { got_log, 0, sizeof(got_log) };
@@ -152,17 +152,17 @@ static size_t fuzz_encode(unsigned cls, unsigned rate, unsigned c, uint64_t firs
                           uint32_t seed, uint8_t flags, int sched_index, uint64_t sched_at, uint8_t op,
                           uint8_t arg, int16_t value) {
     static uint32_t words[MAX_BITS / 32];
-    link_tx_t tx;
-    if (!link_tx_init(&tx, cls, rate, c, first, (uint8_t)seed)) return 0;
+    alink_tx_t tx;
+    if (!alink_tx_init(&tx, cls, rate, c, first, (uint8_t)seed)) return 0;
     tx.flags = flags;
     tx.hops = (uint8_t)rndn(3);
-    link_bitw_t w;
-    link_bitw_init(&w, words, MAX_BITS / 32);
+    alink_bitw_t w;
+    alink_bitw_init(&w, words, MAX_BITS / 32);
     for (unsigned i = 0; i < frames; i++) {
-        if ((int)i == sched_index) (void)link_tx_schedule(&tx, sched_at, op, arg, value);
-        int32_t s[LINK_MAX_CHANNELS];
+        if ((int)i == sched_index) (void)alink_tx_schedule(&tx, sched_at, op, arg, value);
+        int32_t s[ALINK_MAX_CHANNELS];
         for (unsigned ch = 0; ch < tx.channels; ch++) s[ch] = test_sample(tx.frame, ch, seed);
-        if (!link_tx_frame(&tx, s, &w)) break;
+        if (!alink_tx_frame(&tx, s, &w)) break;
     }
     for (size_t i = 0; i < w.nbits; i++) bits_a[i] = (uint8_t)((words[i >> 5] >> (31u - (i & 31u))) & 1u);
     return w.nbits;
@@ -224,17 +224,17 @@ static void fuzz(unsigned rounds) {
             if (rndn(2))
                 for (unsigned k = 0; k < 40; k++) {
                     size_t at = rndn((unsigned)(n - 10));
-                    uint16_t s = rndn(2) ? LINK_SYM_K28_5_RDN : LINK_SYM_K28_5_RDP;
+                    uint16_t s = rndn(2) ? ALINK_SYM_K28_5_RDN : ALINK_SYM_K28_5_RDP;
                     for (unsigned b = 0; b < 10; b++) bits_a[at + b] = (uint8_t)((s >> (9 - b)) & 1u);
                 }
             noise++;
         } else {
-            unsigned mx = link_max_channels(cls, rate);
+            unsigned mx = alink_max_channels(cls, rate);
             unsigned choice[] = { 1, 2, mx, 1 + rndn(mx), mx < 8 ? mx : 8, mx < 9 ? mx : 9, mx < 16 ? mx : 16 };
             unsigned c = choice[rndn(7)];
             uint64_t first = rndn(4) ? firsts[rndn(sizeof(firsts) / sizeof(firsts[0]))] : rnd() >> 20;
             unsigned frames = 40 + rndn(cls == 3 ? 90 : 160);
-            static const uint8_t fls[] = { 0, 0, LINK_SF_FLAG_USB_LIVE, LINK_SF_FLAG_PRBS, 0x09, 0x3F };
+            static const uint8_t fls[] = { 0, 0, ALINK_SF_FLAG_USB_LIVE, ALINK_SF_FLAG_PRBS, 0x09, 0x3F };
             int sched = -1;
             uint64_t at = 0;
             uint8_t op = 0, arg = 0;
@@ -244,9 +244,9 @@ static void fuzz(unsigned rounds) {
                 op = (uint8_t)(1 + rndn(8));
                 uint64_t base = first + (uint64_t)sched;
                 at = ((base + 64u + rndn(96)) & ~31ull);
-                if (op == LINK_OP_RATE) {
+                if (op == ALINK_OP_RATE) {
                     arg = (uint8_t)rndn(3);
-                    unsigned m2 = link_max_channels(cls, arg);
+                    unsigned m2 = alink_max_channels(cls, arg);
                     value = (int16_t)(rndn(3) == 0 ? 0 : 1 + rndn(m2));
                 } else {
                     arg = (uint8_t)rndn(4);
@@ -289,63 +289,63 @@ static void fuzz(unsigned rounds) {
 // ---------------------------------------------------------------------------
 
 typedef struct { unsigned frames, locks, losses; } count_ctx_t;
-static void count_cb(void *ctx, const link_rx_event_t *ev) {
+static void count_cb(void *ctx, const alink_rx_event_t *ev) {
     count_ctx_t *c = ctx;
-    if (ev->type == LINK_RX_EV_FRAME) c->frames++;
-    if (ev->type == LINK_RX_EV_LOCK) c->locks++;
-    if (ev->type == LINK_RX_EV_LOSS) c->losses++;
+    if (ev->type == ALINK_RX_EV_FRAME) c->frames++;
+    if (ev->type == ALINK_RX_EV_LOCK) c->locks++;
+    if (ev->type == ALINK_RX_EV_LOSS) c->losses++;
 }
 
 // Write words of a clean L1 stream into the ring as a DMA would.
 static void test_overrun_and_budget(void) {
     static uint32_t words[1 << 15];
-    link_tx_t tx;
-    link_bitw_t w;
-    link_bitw_init(&w, words, sizeof(words) / 4);
-    CHECK(link_tx_init(&tx, 1, 1, 8, 5000, 1), "init");
+    alink_tx_t tx;
+    alink_bitw_t w;
+    alink_bitw_init(&w, words, sizeof(words) / 4);
+    CHECK(alink_tx_init(&tx, 1, 1, 8, 5000, 1), "init");
     int32_t s[8] = { 0 };
-    while (link_tx_frame(&tx, s, &w)) {}
+    while (alink_tx_frame(&tx, s, &w)) {}
     size_t nw = w.nbits / 32u;
 
     // Locked receiver that is not called for longer than the ring holds:
     // one overrun, one loss, then it locks again on newer bits.
     count_ctx_t c = { 0, 0, 0 };
-    link_fast_init(&fx, fring, 256, 1, 0xFF, count_cb, &c, 0);
+    alink_fast_init(&fx, fring, 256, 1, 0xFF, count_cb, &c, 0);
     fx.frame_events = true;
     size_t wr = 0;
     for (; wr < 3000; wr++) {
         fring[wr & 255u] = words[wr];
-        if ((wr & 63u) == 63u) link_fast_run(&fx, (uint64_t)(wr + 1u) * 32u, 0);
+        if ((wr & 63u) == 63u) alink_fast_run(&fx, (uint64_t)(wr + 1u) * 32u, 0);
     }
-    CHECK(fx.state == LINK_RX_LOCKED && c.locks == 1, "locked before the gap");
+    CHECK(fx.state == ALINK_RX_LOCKED && c.locks == 1, "locked before the gap");
     for (; wr < 3000 + 600; wr++) fring[wr & 255u] = words[wr];     // > 256 words unread
-    link_fast_run(&fx, (uint64_t)wr * 32u, 0);
+    alink_fast_run(&fx, (uint64_t)wr * 32u, 0);
     CHECK(fx.overruns == 1 && c.losses == 1 && fx.stats.loss_count == 1, "overrun: %u, losses %u", fx.overruns,
           c.losses);
     for (; wr < nw; wr += 64) {
         size_t end = wr + 64 < nw ? wr + 64 : nw;
         for (size_t i = wr; i < end; i++) fring[i & 255u] = words[i];
-        link_fast_run(&fx, (uint64_t)end * 32u, 0);
+        alink_fast_run(&fx, (uint64_t)end * 32u, 0);
     }
-    CHECK(fx.state == LINK_RX_LOCKED && c.locks == 2 && fx.overruns == 1, "re-locked after the overrun (locks %u)",
+    CHECK(fx.state == ALINK_RX_LOCKED && c.locks == 2 && fx.overruns == 1, "re-locked after the overrun (locks %u)",
           c.locks);
 
     // Fixup LK45F (review lk45 finding 5): a service gap at the stall rule's
-    // limit (link_ring_clock.h, 15/16 of the production ring unread) is no
+    // limit (alink_ring_clock.h, 15/16 of the production ring unread) is no
     // overrun: no loss, no frame missed.
     count_ctx_t c3 = { 0, 0, 0 };
-    link_fast_init(&fx, fring, 8192, 1, 0xFF, count_cb, &c3, 0);
+    alink_fast_init(&fx, fring, 8192, 1, 0xFF, count_cb, &c3, 0);
     fx.frame_events = true;
     for (wr = 0; wr < 3000; wr++) {
         fring[wr & 8191u] = words[wr];
-        if ((wr & 63u) == 63u) link_fast_run(&fx, (uint64_t)(wr + 1u) * 32u, 0);
+        if ((wr & 63u) == 63u) alink_fast_run(&fx, (uint64_t)(wr + 1u) * 32u, 0);
     }
-    CHECK(fx.state == LINK_RX_LOCKED && c3.locks == 1, "locked before the stall");
+    CHECK(fx.state == ALINK_RX_LOCKED && c3.locks == 1, "locked before the stall");
     unsigned frames_before = c3.frames;
     size_t stall_words = 8192u - 8192u / 16u + 31u;     // 15/16 of a pass, plus words since the last call
     for (; wr < 3000 + stall_words; wr++) fring[wr & 8191u] = words[wr];
-    link_fast_run(&fx, (uint64_t)wr * 32u, 0);
-    CHECK(fx.overruns == 0 && c3.losses == 0 && fx.state == LINK_RX_LOCKED, "stall: overruns %u, losses %u",
+    alink_fast_run(&fx, (uint64_t)wr * 32u, 0);
+    CHECK(fx.overruns == 0 && c3.losses == 0 && fx.state == ALINK_RX_LOCKED, "stall: overruns %u, losses %u",
           fx.overruns, c3.losses);
     CHECK(c3.frames - frames_before >= stall_words * 32u / 320u - 1u, "stall: %u frames decoded after it",
           c3.frames - frames_before);
@@ -353,13 +353,13 @@ static void test_overrun_and_budget(void) {
     // Search budget: a receiver started 20000 bits late skips to the newest
     // bits and still locks; it decodes no frame older than the skip.
     count_ctx_t c2 = { 0, 0, 0 };
-    link_fast_init(&fx, fring, 8192, 1, 0xFF, count_cb, &c2, 0);
+    alink_fast_init(&fx, fring, 8192, 1, 0xFF, count_cb, &c2, 0);
     fx.frame_events = true;
     for (size_t i = 0; i < nw && i < 8192; i++) fring[i] = words[i];
-    link_fast_run(&fx, 1000u * 32u, 4096);
-    CHECK(fx.state != LINK_RX_SEARCH || fx.q >= 1000u * 32u - 4096u, "budget skip");
-    link_fast_run(&fx, 4000u * 32u, 4096);
-    CHECK(fx.state == LINK_RX_LOCKED && fx.overruns == 0, "locks with a search budget");
+    alink_fast_run(&fx, 1000u * 32u, 4096);
+    CHECK(fx.state != ALINK_RX_SEARCH || fx.q >= 1000u * 32u - 4096u, "budget skip");
+    alink_fast_run(&fx, 4000u * 32u, 4096);
+    CHECK(fx.state == ALINK_RX_LOCKED && fx.overruns == 0, "locks with a search budget");
     printf("  overrun recovery and search budget: OK\n");
 }
 
@@ -367,9 +367,9 @@ int main(int argc, char **argv) {
     char path[1024];
     snprintf(path, sizeof(path), "%s", __FILE__);
     char *slash = strrchr(path, '/');
-    if (slash) strcpy(slash + 1, "link_vectors.json");
-    else strcpy(path, "link_vectors.json");
-    printf("  sizeof(link_fast_t) %zu\n", sizeof(link_fast_t));
+    if (slash) strcpy(slash + 1, "alink_vectors.json");
+    else strcpy(path, "alink_vectors.json");
+    printf("  sizeof(alink_fast_t) %zu\n", sizeof(alink_fast_t));
     fast_vectors(path);
     unsigned rounds = 3000;
     for (int i = 1; i < argc; i++) {
@@ -380,9 +380,9 @@ int main(int argc, char **argv) {
     test_overrun_and_budget();
     printf("  %u streams x %u runs\n", streams_checked, streams_checked ? runs_checked / streams_checked : 0);
     if (failures) {
-        fprintf(stderr, "test_link_fast: %d failure(s)\n", failures);
+        fprintf(stderr, "test_alink_fast: %d failure(s)\n", failures);
         return 1;
     }
-    printf("test_link_fast: OK\n");
+    printf("test_alink_fast: OK\n");
     return 0;
 }

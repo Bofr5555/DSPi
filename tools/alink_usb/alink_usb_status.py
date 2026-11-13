@@ -46,7 +46,7 @@ def config(b):
 
 def frame_counter(b):
     f, t, o, tb, _r, bus = struct.unpack("<QIIBBH", b[:20])
-    base = {0: "link F", 1: "USB S", 0xFF: "none"}.get(tb, f"? {tb}")
+    base = {0: "alink F", 1: "USB S", 0xFF: "none"}.get(tb, f"? {tb}")
     print(f"time base {base}: frame {f}, time_us {t}, output samples {o}, frame - output {f - o}, bus frame {bus}")
 
 

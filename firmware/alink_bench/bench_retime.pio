@@ -1,6 +1,6 @@
-; bench_retime.pio; link bench IMPAIR role: a re-timing pass-through (WP LK3)
+; bench_retime.pio; alink bench IMPAIR role: a re-timing pass-through (WP LK3)
 ;
-; Not a link program: it copies the input pin to the output pin once per SM
+; Not an alink program: it copies the input pin to the output pin once per SM
 ; clock, so a stream passing through is re-timed to this board's clock with
 ; a quantisation of one SM clock (clkdiv sys cycles) plus the 2-cycle input
 ; synchroniser. A clock divider of d adds up to d sys cycles of edge jitter

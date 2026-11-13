@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host tests for the link sender core (WP LK4).  No Pico SDK needed.
+# Host tests for the alink sender core (WP LK4). No Pico SDK needed.
 #
 #   firmware/DSPi-Sender/tests/run.sh            (from the repository root)
 #
@@ -15,12 +15,12 @@ root=$(cd "$here/../../.." && pwd)
 out=${SENDER_TEST_OUT:-$root/build/sender_test}
 mkdir -p "$out"
 CC=${CC:-cc}
-CFLAGS="-std=c11 -O2 -Wall -Wextra -Werror -I$root/firmware/DSPi/link -I$root/firmware/DSPi-Sender"
-CODEC="$root/firmware/DSPi/link/link_codec.c $root/firmware/DSPi/link/link_decoder.c"
+CFLAGS="-std=c11 -O2 -Wall -Wextra -Werror -I$root/firmware/DSPi/alink -I$root/firmware/DSPi-Sender"
+CODEC="$root/firmware/DSPi/alink/alink_codec.c $root/firmware/DSPi/alink/alink_decoder.c"
 for t in test_sender test_fanout; do
     [ -f "$here/$t.c" ] || continue
     # shellcheck disable=SC2086
-    $CC $CFLAGS -o "$out/$t" "$here/$t.c" $root/firmware/DSPi-Sender/sender_link.c \
+    $CC $CFLAGS -o "$out/$t" "$here/$t.c" $root/firmware/DSPi-Sender/sender_alink.c \
         $( [ "$t" = test_fanout ] && echo "$root/firmware/DSPi-Sender/sender_fanout.c" ) $CODEC -lm
     "$out/$t"
 done

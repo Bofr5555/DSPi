@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""bench.py - drive link bench Picos over their USB consoles and judge the link.
+"""bench.py - drive alink bench Picos over their USB consoles and judge the alink.
 
-The link bench image (firmware/link_bench, WP LK3) runs on spare Pico and
+The alink bench image (firmware/alink_bench, WP LK3) runs on spare Pico and
 Pico 2 boards wired GPIO to GPIO.  This tool talks to each board's console
 (USB CDC, /dev/ttyACM* or /dev/serial/by-id/...), runs a scripted test and
 prints a PASS/FAIL summary.  Wiring, flashing and the expected numbers are in
-Documentation/Bench/link_gpio_bench.md.
+Documentation/Bench/alink_gpio_bench.md.
 
   bench.py id PORT [PORT...]                       who is who
   bench.py cmd PORT 'stat'                         one console command
@@ -16,17 +16,17 @@ Documentation/Bench/link_gpio_bench.md.
   bench.py impair --tx PORT --imp PORT --rx PORT   three boards, IMPAIR in the middle
   bench.py matrix PORT|--tx P --rx P [--minutes 1] every class and rate in turn
   bench.py sender --rx PORT [--usb /dev/bus/usb/BBB/DDD] [...]
-                                                   a link sender (firmware/DSPi-Sender, WP LK4)
+                                                   an alink sender (firmware/DSPi-Sender, WP LK4)
                                                    to a bench RX board
   bench.py sender-diag --usb /dev/bus/usb/BBB/DDD [--pattern audio|prbs|idle|tone]
                                                    the sender's TX settings, superframe and DIAG
 
 The sender is driven over its USB vendor interface (sender_usb.py, usbfs)
 when --usb names its device node; without it the sender must run the bench
-image (dspi_sender_bench: link 0 PRBS-7, L1 48 kHz 8 channels from boot).
+image (dspi_sender_bench: alink 0 PRBS-7, L1 48 kHz 8 channels from boot).
 
 Standard library only (termios), so it runs in the python:3.12-slim
-container (tools/link/bench.sh) with the board's tty passed in, or on any
+container (tools/alink/bench.sh) with the board's tty passed in, or on any
 Linux host.  Never sets 1200 baud: that reboots a Pico into BOOTSEL.
 """
 
@@ -219,7 +219,7 @@ def delta(a, b, key):
 # TX impairment -> what the receiver must report.  BERT expectations are
 # exact (it checks every bit); reference-receiver expectations apply only
 # when the reference covered the window without a gap.  The same table is
-# proven on the host in firmware/link_bench/tests (test_bench_logic.c).
+# proven on the host in firmware/alink_bench/tests (test_bench_logic.c).
 IMPAIRMENTS = [
     # name, inject args, BERT expectations, reference expectations
     ("comma x1 (flywheel)", "comma 1", dict(errors=(1, 1), slips=0, losses=0), dict(comma=1, loss=0)),
@@ -406,7 +406,7 @@ def step_unplug(rep, rx, label, prompt=input):
 def check_ids(rep, boards):
     for b in boards:
         i = b.id()
-        rep.check(f"{b.name}: bench firmware", i.get("fw") == "link_bench",
+        rep.check(f"{b.name}: bench firmware", i.get("fw") == "alink_bench",
                   f"{i.get('chip')} at {i.get('clock')} Hz, {i.get('ver')}, serial {i.get('serial')}, "
                   f"classes {i.get('classes')}")
 
@@ -509,7 +509,7 @@ def scenario_impair(rep, tx, imp, rx, args, out):
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# A link sender (WP LK4) as the transmitter
+# An alink sender (WP LK4) as the transmitter
 # ---------------------------------------------------------------------------
 
 def _sender_usb():
@@ -552,12 +552,12 @@ def step_sender_changes(rep, dev, rx, cls, rate, ch, out):
     """RATE scheduling, one apply at a time, a CTRL_MSG apply, a class change."""
     su = _sender_usb()
     SenderRefused, RATE_CODE = su.SenderRefused, su.RATE_CODE
-    base = dev.link_tx()
-    # 1. A rate change while the link runs: RATE at a multiple of 32, >= 2400 frames ahead, value = new C.
+    base = dev.alink_tx()
+    # 1. A rate change while the alink runs: RATE at a multiple of 32, >= 2400 frames ahead, value = new C.
     new_rate = "96k" if rate != "96k" else "48k"
     new_ch = min(ch, default_ch(cls, new_rate))
     f0 = dev.frame()
-    dev.set_link_tx(dict(base, rate=RATE_CODE[new_rate], channels=new_ch))
+    dev.set_alink_tx(dict(base, rate=RATE_CODE[new_rate], channels=new_ch))
     c = dev.ctrl_in()
     ok = (c["op"] == 6 and c["arg"] == RATE_CODE[new_rate] and c["apply_frame"] % 32 == 0
           and c["apply_frame"] >= f0 + 2400 and c["value"] == (new_ch if new_ch != ch else 0))
@@ -566,7 +566,7 @@ def step_sender_changes(rep, dev, rx, cls, rate, ch, out):
               f"lead {c['apply_frame'] - f0} frames, {c['apply_frame'] % 32 == 0 and 'on' or 'off'} a superframe boundary)")
     third = next(r for r in ("44k1", "48k", "96k") if r not in (rate, new_rate))
     try:
-        dev.set_link_tx(dict(base, rate=RATE_CODE[third], channels=min(ch, default_ch(cls, third))))
+        dev.set_alink_tx(dict(base, rate=RATE_CODE[third], channels=min(ch, default_ch(cls, third))))
         refused = False
     except SenderRefused:
         refused = True
@@ -581,7 +581,7 @@ def step_sender_changes(rep, dev, rx, cls, rate, ch, out):
              f"announcement; ref gaps {s.get('ref_gaps')})")
     # Back (also a scheduled RATE).
     time.sleep(0.2)
-    dev.set_link_tx(dict(base, rate=RATE_CODE[rate], channels=ch))
+    dev.set_alink_tx(dict(base, rate=RATE_CODE[rate], channels=ch))
     wait_for(rx, lambda s: s.get("sync") == 1 and s.get("rate") == rate and s.get("ch") == ch, 5.0)
 
     # 2. A CTRL_MSG apply (SYNC_PULSE), one at a time, gone after its frame.
@@ -605,27 +605,27 @@ def step_sender_changes(rep, dev, rx, cls, rate, ch, out):
     t, s = wait_for(rx, lambda s: s.get("sync") == 1, 5.0)
     rep.check(f"{cls} {rate}: receiver back in sync after the apply", t is not None, f"sync={s.get('sync')}")
 
-    # 3. A class change restarts the links; the receiver re-detects the class.
+    # 3. A class change restarts the alinks; the receiver re-detects the class.
     other = {"L1": "L2", "L2": "L1", "L3": "L2"}[cls]
     och = min(ch, default_ch(other, rate))
-    dev.set_link_tx(dict(base, cls=CLASSES[other], channels=och))
+    dev.set_alink_tx(dict(base, cls=CLASSES[other], channels=och))
     t, s = wait_for(rx, lambda s: s.get("sync") == 1 and s.get("rx_cls") == other, 10.0)
-    rep.check(f"{cls} {rate}: class change {cls} -> {other} restarts the links, receiver re-detects", t is not None,
+    rep.check(f"{cls} {rate}: class change {cls} -> {other} restarts the alinks, receiver re-detects", t is not None,
               f"locked at {s.get('rx_cls')} in {t:.2f} s" if t is not None else
               f"rx at {s.get('rx_cls')} sync={s.get('sync')} (is the RX board in cls=auto?)")
-    dev.set_link_tx(base)
+    dev.set_alink_tx(base)
     wait_for(rx, lambda s: s.get("sync") == 1 and s.get("rx_cls") == cls, 10.0)
 
 
 def step_sender_budget(rep, dev, cls, rate):
     d = dev.diag()
     if not d:
-        rep.na(f"{cls} {rate}: encoder cycles", "EXT_LINK_DIAG is not the sender layout")
+        rep.na(f"{cls} {rate}: encoder cycles", "EXT_ALINK_DIAG is not the sender layout")
         return
     budget = d["cycles_per_frame"] or 1
     rep.check(f"{cls} {rate}: encoder within budget", d["enc_cycles_max"] < budget // 2,
               f"{d['enc_cycles_avg']} cycles per frame on average, worst {d['enc_cycles_max']}, of {budget} "
-              f"({100.0 * d['enc_cycles_avg'] / budget:.1f} % of core 1; once for all links); ring lead "
+              f"({100.0 * d['enc_cycles_avg'] / budget:.1f} % of core 1; once for all alinks); ring lead "
               f"{d['lead_words']} words, tx_late {d['tx_late']}, tx_stall {d['tx_stall']}, core-1 pass worst "
               f"{d['loop_us_max']} us")
 
@@ -638,17 +638,17 @@ def scenario_sender(rep, dev, rx, args, out):
     if dev is not None:
         info = dev.info()
         ids = dev.ext_list()
-        rep.check("sender: link sender firmware", info[0] in (2, 4) and 0x8007 in ids,
-                  f"role {info[0]}, protocol v{info[1]}, max_links {info[3]}, ids "
+        rep.check("sender: alink sender firmware", info[0] in (2, 4) and 0x8007 in ids,
+                  f"role {info[0]}, protocol v{info[1]}, max_alinks {info[3]}, ids "
                   + " ".join(f"{i:04X}" for i in ids))
-        tx = dev.link_tx()
-        want = dict(tx, link_enable=1 << args.link, cls=CLASSES[cls], channels=ch, rate=RATE_CODE[rate],
+        tx = dev.alink_tx()
+        want = dict(tx, alink_enable=1 << args.alink, cls=CLASSES[cls], channels=ch, rate=RATE_CODE[rate],
                     test_pattern=1, sync_pin=args.sync, flags=0)
-        dev.set_link_tx(want)
-        got = dev.link_tx()
-        rep.check("sender: EXT_LINK_TX written", all(got[k] == want[k] for k in ("link_enable", "cls", "channels",
+        dev.set_alink_tx(want)
+        got = dev.alink_tx()
+        rep.check("sender: EXT_ALINK_TX written", all(got[k] == want[k] for k in ("alink_enable", "cls", "channels",
                                                                                   "rate", "test_pattern", "sync_pin")),
-                  f"link_enable {got['link_enable']:#06x} class {got['cls']} C {got['channels']} rate {got['rate']} "
+                  f"alink_enable {got['alink_enable']:#06x} class {got['cls']} C {got['channels']} rate {got['rate']} "
                   f"PRBS {got['test_pattern'] == 1} sync GP{got['sync_pin']}")
         txi = SenderTx(dev)
     else:
@@ -764,7 +764,7 @@ def main(argv=None, opener=open_bench, out=print, usb_opener=open_sender_usb):
     p = sub.add_parser("sender-diag")
     p.add_argument("--usb", required=True)
     p.add_argument("--pattern", choices=("audio", "prbs", "idle", "tone"),
-                   help="first set EXT_LINK_TX.test_pattern")
+                   help="first set EXT_ALINK_TX.test_pattern")
     p = sub.add_parser("clicks", help="test (e): a CLICK train through the sender's superframe (WP LK6)")
     p.add_argument("--usb", required=True, help="the sender's /dev/bus/usb/BBB/DDD node")
     p.add_argument("--count", type=int, default=60)
@@ -774,7 +774,7 @@ def main(argv=None, opener=open_bench, out=print, usb_opener=open_sender_usb):
     p = sub.add_parser("sender")
     p.add_argument("--rx", required=True)
     p.add_argument("--usb", help="the sender's /dev/bus/usb/BBB/DDD node (else: the bench image's defaults)")
-    p.add_argument("--link", type=int, default=0, help="sender link output wired to the RX board (0 = GP2)")
+    p.add_argument("--alink", type=int, default=0, help="sender alink output wired to the RX board (0 = GP2)")
     p.add_argument("--sync", type=int, default=21, help="sender SYNC pin (scope trigger)")
     p.add_argument("--no-changes", action="store_true", help="skip the RATE / apply / class-change steps")
     common(p)
@@ -804,8 +804,8 @@ def main(argv=None, opener=open_bench, out=print, usb_opener=open_sender_usb):
         dev = usb_opener(args.usb)
         if args.pattern:
             pat = ("audio", "prbs", "idle", "tone").index(args.pattern)
-            dev.set_link_tx(dict(dev.link_tx(), test_pattern=pat))
-        out(f"tx:    {dev.link_tx()}")
+            dev.set_alink_tx(dict(dev.alink_tx(), test_pattern=pat))
+        out(f"tx:    {dev.alink_tx()}")
         out(f"sf:    {dev.ctrl_in()}")
         out(f"frame: {dev.frame()}")
         out(f"diag:  {dev.diag()}")
