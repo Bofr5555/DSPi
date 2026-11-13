@@ -12,6 +12,9 @@
 
 #include <stddef.h>
 
+#if defined(DSPI_ALINK_USB) && DSPI_ALINK_USB
+#include "alink_usb.h"
+#endif
 #if defined(DSPI_LINK) && DSPI_LINK
 #include "link_input.h"     // -- WP LK6 -- phase-locked prefill target
 #endif
@@ -116,5 +119,10 @@ void output_latency_apply(uint32_t fs, uint8_t source) {
     // -- WP LK6 -- A phase-locked link input prefills to its delay instead.
     if (source == INPUT_SOURCE_LINK)
         output_ring_target_frames = link_input_ring_target(output_ring_target_frames, output_ring_block_cap);
+#endif
+#if defined(DSPI_ALINK_USB) && DSPI_ALINK_USB
+    // -- WP USB1 -- USB phase mode prefills to its delay (stock value otherwise).
+    if (source == INPUT_SOURCE_USB)
+        output_ring_target_frames = alink_usb_fw_ring_target(fs, output_ring_target_frames, output_ring_block_cap);
 #endif
 }

@@ -279,6 +279,10 @@ void usb_notify_tick(void);
 
 // USB audio ring buffer — main-loop entry points for decoupled DSP processing
 void usb_audio_drain_ring(void);   // Process all pending USB audio packets
+// WP USB1 (alink_usb): decode one packet into the input buffers (-1 refused
+// format), and the samples a packet of `len` bytes holds.
+int32_t usb_audio_decode_packet(const uint8_t *data, uint16_t data_len);
+uint32_t usb_audio_packet_samples(uint16_t len);
 void usb_audio_flush_ring(void);   // Discard stale ring data + reset gap timestamp
 bool usb_audio_stream_active(void); // Packets arriving within the gap threshold
 

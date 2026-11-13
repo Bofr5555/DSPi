@@ -41,6 +41,9 @@
 #include "adat_output.h"
 #include "adat_input.h"
 #include "link_input.h"
+#if DSPI_ALINK_USB
+#include "alink_usb.h"
+#endif
 #include "input_servo.h"
 #include "pdm_generator.h"
 #include "siggen.h"
@@ -376,6 +379,10 @@ static void stop_foreign_input_receivers(uint8_t keep) {
         link_input_stop();
         link_prefilling = false;
     }
+#endif
+#if DSPI_ALINK_USB
+    // WP USB1: the SOF lock belongs to the USB source (VCXO parked, ops cancelled).
+    if (keep != INPUT_SOURCE_USB && alink_usb.state != ALINK_USB_ST_OFF) alink_usb_fw_stop();
 #endif
 }
 
@@ -1407,6 +1414,10 @@ static void complete_pipeline_reset(void) {
     uint32_t flags = save_and_disable_interrupts();
     start_output_slots_in_sync(spdif_sync, spdif_count, i2s_sync, i2s_count);
     restore_interrupts(flags);
+#if DSPI_ALINK_USB
+    // The rings restarted under a USB phase timeline: it re-anchors (WP USB1).
+    alink_usb_outputs_reset(&alink_usb);
+#endif
 
     // Phase 3: USB feedback reset.  See B1 note in block comment above
     // for the (bounded) race with the SOF ISR.
@@ -1775,6 +1786,9 @@ void core0_init() {
 #if DSPI_LINK
     link_input_init();
 #endif
+#if DSPI_ALINK_USB
+    alink_usb_fw_init();         // WP USB1; EXT_ALINK_USB is loaded with the link block below
+#endif
 
     // Initialize feedback controller and nominal rate
     fb_ctrl_init(&fb_ctrl);
@@ -2124,6 +2138,30 @@ static void input_service_handshakes(void) {
     }
 #endif
 
+#if DSPI_ALINK_USB
+    // WP USB1, USB phase mode: the anchor.  Mute, then drain the outputs and
+    // prefill the timeline with silence (alink_usb_service), start them when the
+    // arrival reaches D (the last millisecond waited in place), verify while
+    // muted.  Once anchored the timeline runs on silence between streams, so
+    // stream restarts do not come here again.
+    else if (active_input_source == INPUT_SOURCE_USB && alink_usb.mode == ALINK_USB_MODE_PHASE) {
+        if (alink_usb_anchor_wanted(&alink_usb)) {
+            if (!preset_loading) prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+            if (preset_loading && dac_hw_mute_hold_elapsed()) {
+                drain_and_disable_outputs();
+                preset_loading = false;
+                preset_mute_counter = 0;
+                alink_usb_on_drain(&alink_usb);
+            }
+        }
+        if (alink_usb.prefilling && alink_usb_fw_anchor_ready()) {
+            enable_outputs_in_sync();
+            alink_usb_on_enabled(&alink_usb);
+            dac_hw_mute_release();
+        }
+    }
+#endif
+
     else if (active_input_source == INPUT_SOURCE_I2S &&
              i2s_clock_mode == I2S_CLOCK_MODE_SLAVE) {
         // Clock-slave mode: SPDIF-style lock-gated flow. Outputs stay muted
@@ -2224,6 +2262,11 @@ static void input_service_servos(void) {
              i2s_clock_mode == I2S_CLOCK_MODE_SLAVE) {
         i2s_slave_update_clock_servo();
     }
+#if DSPI_ALINK_USB
+    else if (active_input_source == INPUT_SOURCE_USB) {
+        alink_usb_fw_service();      // WP USB1: SOF lock, phase lock (mode 0: nothing)
+    }
+#endif
 }
 
 int main(void) {

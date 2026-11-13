@@ -45,6 +45,9 @@
 #include "adat_output.h"
 #include "adat_input.h"
 #include "link_input.h"
+#if DSPI_ALINK_USB
+#include "alink_usb.h"
+#endif
 #include "input_source_names.h"
 #include "loopback.h"   // DSPI_LOOPBACK glitch counters (self-guarded; empty otherwise)
 #include "core_vreg.h"
@@ -583,11 +586,19 @@ static const uint16_t ext_ids[] = {
     EXT_LINK_CONFIG,
     EXT_LINK_SLOTS,
     EXT_LINK_PHASE,
+#endif
+#if DSPI_LINK || DSPI_ALINK_USB
     EXT_FRAME_COUNTER,
     EXT_APPLY_AT_FRAME,
+#endif
+#if DSPI_LINK
     EXT_LINK_CTRL_MSG,
     EXT_LINK_STATS_RESET,
     EXT_LINK_DIAG,
+#endif
+#if DSPI_ALINK_USB
+    EXT_ALINK_USB,
+    EXT_ALINK_USB_STATUS,
 #endif
 };
 
@@ -601,8 +612,13 @@ static uint16_t ext_set_len(uint16_t id) {
         case EXT_LINK_CONFIG:        return LINK_CFG_LEN;
         case EXT_LINK_SLOTS:         return LINK_SLOTS_LEN;
         case EXT_LINK_PHASE:         return LINK_PHASE_LEN;
-        case EXT_APPLY_AT_FRAME:     return LINK_APPLY_LEN;
         case EXT_LINK_STATS_RESET:   return 1;
+#endif
+#if DSPI_LINK || DSPI_ALINK_USB
+        case EXT_APPLY_AT_FRAME:     return LINK_APPLY_LEN;
+#endif
+#if DSPI_ALINK_USB
+        case EXT_ALINK_USB:           return ALINK_USB_CFG_LEN;
 #endif
         default:                     return 0;
     }
@@ -667,10 +683,25 @@ static bool ext_handle_set(uint16_t id, const uint8_t *p, uint16_t len) {
             return link_input_set_slots(p);
         case EXT_LINK_PHASE:
             return link_input_set_phase(p);
-        case EXT_APPLY_AT_FRAME:
-            return link_input_apply(p);
         case EXT_LINK_STATS_RESET:
             return link_input_stats_reset(p[0]);
+#endif
+#if DSPI_LINK || DSPI_ALINK_USB
+        case EXT_APPLY_AT_FRAME:
+            // Byte 12 (reserved on the link) selects the time base: 0 the
+            // link frame F, 1 the USB sample index S, 2 a USB bus frame (2.9.6).
+#if DSPI_ALINK_USB
+            if (p[12] != 0) return alink_usb_fw_apply(p);
+#endif
+#if DSPI_LINK
+            return link_input_apply(p);
+#else
+            return false;
+#endif
+#endif
+#if DSPI_ALINK_USB
+        case EXT_ALINK_USB:
+            return alink_usb_fw_set_config(p);
 #endif
     }
     return false;
@@ -727,10 +758,44 @@ static bool ext_handle_get(uint16_t id, uint16_t wLength, uint8_t *resp) {
         case EXT_LINK_CONFIG:   memcpy(resp, link_config, LINK_CFG_LEN);  n = LINK_CFG_LEN;   break;
         case EXT_LINK_SLOTS:    memcpy(resp, link_slots, LINK_SLOTS_LEN); n = LINK_SLOTS_LEN; break;
         case EXT_LINK_PHASE:    link_input_get_phase(resp);    n = LINK_PHASE_LEN;    break;
-        case EXT_FRAME_COUNTER: link_input_get_frame_counter(resp); n = LINK_FRAME_COUNTER_LEN; break;
-        case EXT_APPLY_AT_FRAME: link_input_get_apply(resp);   n = LINK_APPLY_LEN;    break;
         case EXT_LINK_CTRL_MSG: link_input_get_ctrl_msg(resp); n = LINK_CTRL_MSG_LEN; break;
         case EXT_LINK_DIAG:     link_input_get_diag(resp);     n = LINK_DIAG_LEN;     break;
+#endif
+#if DSPI_LINK || DSPI_ALINK_USB
+        case EXT_FRAME_COUNTER:
+            // 20 bytes since WP USB1: the link layout (16) plus time_base
+            // (byte 16: 0 link F, 1 USB S, 0xFF none), reserved, bus frame.
+            memset(resp, 0, 20);
+#if DSPI_ALINK_USB
+            if (alink_usb_fw_time_base_active()) {
+                alink_usb_fw_get_frame_counter(resp);
+            } else
+#endif
+            {
+#if DSPI_LINK
+                link_input_get_frame_counter(resp);
+#else
+                resp[16] = 0xFF;
+#endif
+            }
+            n = 20;
+            break;
+        case EXT_APPLY_AT_FRAME:
+#if DSPI_ALINK_USB
+            if (alink_usb_fw_time_base_active()) alink_usb_fw_get_apply(resp);
+            else
+#endif
+#if DSPI_LINK
+                link_input_get_apply(resp);
+#else
+                memset(resp, 0, LINK_APPLY_LEN);
+#endif
+            n = LINK_APPLY_LEN;
+            break;
+#endif
+#if DSPI_ALINK_USB
+        case EXT_ALINK_USB:        alink_usb_fw_get_config(resp); n = ALINK_USB_CFG_LEN;    break;
+        case EXT_ALINK_USB_STATUS: alink_usb_fw_get_status(resp); n = ALINK_USB_STATUS_LEN; break;
 #endif
         case EXT_RESET_INFO: {
             ResetInfo ri;
