@@ -52,6 +52,7 @@
 #include "limiter.h"
 #include "upmix.h"
 #include "usb_audio.h"
+#include "channel_name_default.h"
 #include "notify.h"
 #include "uart_control.h"
 #include "i2c_control.h"
@@ -762,7 +763,7 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
             get_default_channel_name(ch, active_input_source, current_types, old_default);
             get_default_channel_name(ch, active_input_source, target_types, new_default);
             if (strcmp(old_default, new_default) == 0) continue;
-            if (strcmp(channel_names[ch], old_default) != 0) continue;
+            if (!channel_name_is_default(channel_names[ch], old_default)) continue;
             memcpy(channel_names[ch], new_default, PRESET_NAME_LEN);
             notify_param_write(
                 (uint16_t)(offsetof(WireBulkParams, channel_names.names) + ch * WIRE_NAME_LEN),
@@ -3741,7 +3742,7 @@ int main(void) {
                         get_default_channel_name(ch, old_source, output_types, old_default);
                         get_default_channel_name(ch, new_source, output_types, new_default);
                         if (strcmp(old_default, new_default) == 0) continue;
-                        if (strcmp(channel_names[ch], old_default) != 0) continue;
+                        if (!channel_name_is_default(channel_names[ch], old_default)) continue;
                         memcpy(channel_names[ch], new_default, PRESET_NAME_LEN);
                         notify_param_write(
                             (uint16_t)(offsetof(WireBulkParams, channel_names.names) + ch * WIRE_NAME_LEN),

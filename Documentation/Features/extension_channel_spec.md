@@ -598,7 +598,7 @@ IN only, 64 bytes.
 
 #### 2.9.4 `EXT_FRAME_COUNTER` (0x8005) and `EXT_APPLY_AT_FRAME` (0x8006) on the USB time base
 
-The alink IDs are reused where the meaning is the same; a field selects the time base. A alink-only host sees no change.
+The alink IDs are reused where the meaning is the same; a field selects the time base. An alink-only host sees no change.
 
 **`EXT_FRAME_COUNTER` IN** is 20 bytes on every build that lists it (16 before WP USB1; a host reads at least 16):
 
