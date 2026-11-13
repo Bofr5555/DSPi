@@ -24,7 +24,11 @@ char usb_descriptor_str_serial[17] = "0123456789ABCDEF";
 static const char *const string_table[] = {
     "",                    // 0 — placeholder; langid returned separately
     "GitHub.com/WeebLabs", // 1 — manufacturer
+#ifdef DSPI_ROLE_SENDER
+    "DSPi Link Sender",    // 2 — product (sender build, WP LK4)
+#else
     "Weeb Labs DSPi",      // 2 — product
+#endif
     usb_descriptor_str_serial, // 3 — serial (populated at boot)
 #ifdef DSPI_USB_MIDI
     "DSPi Control",        // 4 — USB MIDI control function / port name
@@ -144,7 +148,13 @@ static const tusb_desc_device_t device_descriptor = {
 // Multichannel alt block (4/6/8 ch): format-type-I carries a single rate so it
 // is 11 bytes (N + 1×3).  Block = std(9)+general(7)+fmt(11)+OUT(9)+CS(7)+FB(9).
 #define AS_MULTICH_ALT_LEN  (9 + 7 + 11 + 9 + 7 + 9)
+#ifdef DSPI_ROLE_SENDER
+// The link sender (WP LK4, SYS2 4.1) adds alt 7 = 6ch 24-bit 48 kHz and
+// alt 8 = 4ch 16-bit 96 kHz, the largest Full Speed allows.
+#define NUM_MULTICH_ALTS    6
+#else
 #define NUM_MULTICH_ALTS    4   // alts 3/4/5 = 4/6/8ch 16-bit, alt 6 = 4ch 24-bit
+#endif
 #else
 #define AS_MULTICH_ALT_LEN  0
 #define NUM_MULTICH_ALTS    0
@@ -206,6 +216,14 @@ static const tusb_desc_device_t device_descriptor = {
 #define OFFSET_AS_ALT6      (OFFSET_AS_ALT5 + AS_MULTICH_ALT_LEN)
 #define OFFSET_ALT6_DATA_EP (OFFSET_AS_ALT6 + 9 + 7 + 11)
 #define OFFSET_ALT6_FB_EP   (OFFSET_ALT6_DATA_EP + 9 + 7)
+#ifdef DSPI_ROLE_SENDER
+#define OFFSET_AS_ALT7      (OFFSET_AS_ALT6 + AS_MULTICH_ALT_LEN)
+#define OFFSET_ALT7_DATA_EP (OFFSET_AS_ALT7 + 9 + 7 + 11)
+#define OFFSET_ALT7_FB_EP   (OFFSET_ALT7_DATA_EP + 9 + 7)
+#define OFFSET_AS_ALT8      (OFFSET_AS_ALT7 + AS_MULTICH_ALT_LEN)
+#define OFFSET_ALT8_DATA_EP (OFFSET_AS_ALT8 + 9 + 7 + 11)
+#define OFFSET_ALT8_FB_EP   (OFFSET_ALT8_DATA_EP + 9 + 7)
+#endif
 #endif
 
 // Sample rate little-endian expansion
@@ -214,13 +232,14 @@ static const tusb_desc_device_t device_descriptor = {
 // One multichannel AS alt block (RP2350): N channels, 16- or 24-bit, single
 // rate 48 kHz.  Alts 3..6 share one definition and the same OUT/feedback EP
 // addresses as stereo (the EP buffer is allocated once at AUDIO_EP_MAX_PKT).
-#define AS_MULTICH_ALT(alt_num, nch, bits) \
+#define AS_MULTICH_ALT(alt_num, nch, bits) AS_MULTICH_ALT_RATE(alt_num, nch, bits, 48000)
+#define AS_MULTICH_ALT_RATE(alt_num, nch, bits, rate) \
     9, TUSB_DESC_INTERFACE, ITF_NUM_AUDIO_STREAMING, (alt_num), 0x02, \
         TUSB_CLASS_AUDIO, AUDIO_SUBCLASS_STREAMING, 0x00, 0x00, \
     7, TUSB_DESC_CS_INTERFACE, AUDIO_CS_AS_INTERFACE_AS_GENERAL, \
         UAC1_INPUT_TERMINAL_ID, 0x01, U16_TO_U8S_LE(0x0001), \
     11, TUSB_DESC_CS_INTERFACE, AUDIO_CS_AS_INTERFACE_FORMAT_TYPE, 0x01, \
-        (nch), (bits) / 8, (bits), 0x01, RATE_LE(48000), \
+        (nch), (bits) / 8, (bits), 0x01, RATE_LE(rate), \
     9, TUSB_DESC_ENDPOINT, AUDIO_OUT_ENDPOINT, 0x05, \
         U16_TO_U8S_LE(AUDIO_EP_MAX_PKT), 0x01, 0x00, AUDIO_IN_ENDPOINT, \
     7, TUSB_DESC_CS_ENDPOINT, AUDIO_CS_EP_SUBTYPE_GENERAL, 0x01, 0x00, U16_TO_U8S_LE(0x0000), \
@@ -450,6 +469,10 @@ const uint8_t usb_config_descriptor[] = {
     AS_MULTICH_ALT(4, 6, 16),   // alt 4: 6-channel
     AS_MULTICH_ALT(5, 8, 16),   // alt 5: 8-channel
     AS_MULTICH_ALT(6, 4, 24),   // alt 6: 4-channel, packed 24-bit
+#ifdef DSPI_ROLE_SENDER
+    AS_MULTICH_ALT(7, 6, 24),   // alt 7: 6-channel, packed 24-bit (sender)
+    AS_MULTICH_ALT_RATE(8, 4, 16, 96000),   // alt 8: 4-channel 16-bit 96 kHz (sender)
+#endif
 #endif // PICO_RP2350
 
     // --- 191: Vendor std itf 2 (class 0xFF, 1 EP) -----------------------
@@ -650,6 +673,10 @@ const uint8_t *const usb_audio_data_ep_desc[] = {
     &usb_config_descriptor[OFFSET_ALT4_DATA_EP],   // 6ch
     &usb_config_descriptor[OFFSET_ALT5_DATA_EP],   // 8ch
     &usb_config_descriptor[OFFSET_ALT6_DATA_EP],   // 4ch 24-bit
+#ifdef DSPI_ROLE_SENDER
+    &usb_config_descriptor[OFFSET_ALT7_DATA_EP],     // 6ch 24-bit
+    &usb_config_descriptor[OFFSET_ALT8_DATA_EP],     // 4ch 16-bit 96 kHz
+#endif
 #endif
 };
 const uint8_t *const usb_audio_fb_ep_desc[] = {
@@ -660,6 +687,10 @@ const uint8_t *const usb_audio_fb_ep_desc[] = {
     &usb_config_descriptor[OFFSET_ALT4_FB_EP],     // 6ch
     &usb_config_descriptor[OFFSET_ALT5_FB_EP],     // 8ch
     &usb_config_descriptor[OFFSET_ALT6_FB_EP],     // 4ch 24-bit
+#ifdef DSPI_ROLE_SENDER
+    &usb_config_descriptor[OFFSET_ALT7_FB_EP],     // 6ch 24-bit
+    &usb_config_descriptor[OFFSET_ALT8_FB_EP],     // 4ch 16-bit 96 kHz
+#endif
 #endif
 };
 

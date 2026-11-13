@@ -174,7 +174,7 @@ Pico 2 (or a K340's Pico 2, at its GP0 pad) is wired **exactly like board B abov
    GND (pin 3) ─═════════════════════════════ GND (pin 3)
 ```
 
-Until LK4 exists, the bench TX stands in for the sender. Its stream is a valid protocol-v1 stream: superframe, frame
+The LK4 link sender (`link_sender_bench.md`) can stand in for the bench TX here: its link 0 is GP2 too. Without it, the bench TX stands in for the sender. Its stream is a valid protocol-v1 stream: superframe, frame
 counter, CRCs, the test-pattern flag set for PRBS. Use `pay=vec` for a payload that decodes to fixed, non-zero samples
 (`bench_vector_sample()`). The DSPi end is then read with `midi_ctrl.py link` / `EXT_LINK_STATUS` / `EXT_LINK_DIAG`
 instead of `bench.py`. Its counters and its trim scan should match what a bench RX board reports on the same wire.
