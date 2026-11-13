@@ -126,12 +126,20 @@ bool link_phase_loss(link_phase_t *ph, uint32_t fill) {
     return true;
 }
 
-void link_phase_relock(link_phase_t *ph) {
+bool link_phase_relock(link_phase_t *ph, uint64_t f, uint64_t f_expect, uint32_t span) {
     ph->hold = false;
+    if (!link_phase_gap_ok((int64_t)(f - f_expect), span)) {
+        ph->resync = false;
+        ph->started = false;
+        ph->e_valid = false;
+        ph->state = LINK_PHASE_ANCHORING;
+        return false;
+    }
     ph->resync = true;
     ph->corrections = 0;
     ph->e_valid = false;
     ph->state = LINK_PHASE_ANCHORING;
+    return true;
 }
 
 void link_phase_pi_reset(link_phase_pi_t *pi) {

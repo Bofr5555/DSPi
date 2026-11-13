@@ -165,6 +165,7 @@ static bool pub_locked;
 static uint32_t drop_rows;                  // whole frames still to drop (anchor correction)
 static bool pull_in;                        // the drain waits for the VCXO: rows are dropped meanwhile
 static uint64_t hold_f, hold_us;            // holdover: F extrapolated from here
+static bool relocked;                       // back from a holdover, the long rate window not yet valid again
 static const link_apply_limits_t apply_lim = { PRESET_SLOTS, NUM_OUTPUT_CHANNELS, MAX_DELAY_SAMPLES };
 extern volatile bool preset_loading;        // main.c: the prefill handshake's flag
 
@@ -463,11 +464,22 @@ static void enter_locked(void) {
         // Back from a holdover: at the same rate the new frames go onto the
         // held timeline by F and the phase decides (link_phase_relock()); a
         // new rate needs the full reset.
-        if (detected_rate == was && detected_rate == audio_state.freq) {
-            link_phase_relock(&ph);
+        // The frame now arriving against the holdover's extrapolation: a sender
+        // that restarted its counter (or another stream) is far off, and its
+        // rows would never meet the timeline (review lk6 F1).
+        uint64_t f_expect = hold_f + (time_us_64() - hold_us) * (uint64_t)detected_rate / 1000000u;
+        bool same_rate = detected_rate == was && detected_rate == audio_state.freq;
+        // The VCXO held its trim through the holdover: at the same rate it stays
+        // there until the long rate window is back, and a re-anchor need not
+        // wait for a pull-in (review lk6 F4).
+        relocked = same_rate;
+        if (same_rate && link_phase_relock(&ph, lf.frame, f_expect, output_latency_ring_span())) {
+            // placed by F on the held timeline, then verified
         } else {
             ph.hold = false;
+            ph.started = false;
             loss_latch = true;
+            event(LINK_INPUT_LOCKED, LINK_REASON_REANCHOR);
         }
     }
     event(LINK_INPUT_LOCKED, LINK_REASON_LOCKED);
@@ -475,6 +487,7 @@ static void enter_locked(void) {
 
 static void enter_relock(uint64_t now, uint8_t reason) {
     pull_in = false;
+    relocked = false;
     phase = PH_RELOCK;
     deadline_us = now + RELOCK_US;
     loss_latch = true;
@@ -782,8 +795,10 @@ static uint8_t apply_exec(const link_apply_op_t *op) {
         return LINK_APPLY_APPLIED;
     }
     case LINK_OP_CLICK:
-        // The PDM sub (the last output) is not finalized as PCM: refused.
-        if (op->arg >= NUM_SPDIF_INSTANCES * 2) return LINK_APPLY_REFUSED;
+        // The PDM sub (the last output) is not finalized as PCM: refused.  A
+        // muted unit clicks neither (user mute, or a system-muted stream):
+        // refused at apply time (coordinator 2026-11-13, review lk6 F5).
+        if (op->arg >= NUM_SPDIF_INSTANCES * 2 || user_mute || stream_mute) return LINK_APPLY_REFUSED;
         pipeline_click_output = (int8_t)op->arg;
         return LINK_APPLY_APPLIED;
     default:
@@ -843,6 +858,7 @@ static void reanchor(void) {
     drop_rows = 0;
     ph.resync = false;
     ph.hold = false;
+    ph.started = false;     // no verification or servo on the dead timeline (review lk6 F3)
     loss_latch = true;      // the main loop mutes, drains, prefills, starts in sync
     event(LINK_INPUT_LOCKED, LINK_REASON_REANCHOR);
 }
@@ -864,6 +880,10 @@ static bool deliver_place(uint32_t *tail, uint32_t *avail, uint64_t *f) {
     }
     if (!ph.resync) return true;
     int64_t gap = link_phase_gap(&ph, *f);
+    if (!link_phase_gap_ok(gap, output_latency_ring_span())) {
+        reanchor();             // another stream, a restarted counter, or a long gap: start over
+        return false;
+    }
     if (gap < 0) {
         k = (uint64_t)-gap < *avail ? (uint32_t)-gap : *avail;
         fifo_tail = *tail + k;
@@ -872,10 +892,6 @@ static bool deliver_place(uint32_t *tail, uint32_t *avail, uint64_t *f) {
         *f += k;
         if ((int64_t)k < -gap) return false;
     } else if (gap > 0) {
-        if (gap > (int64_t)output_latency_ring_span()) {
-            reanchor();         // another stream, or a long gap: start over
-            return false;
-        }
         uint32_t min_frames, max_frames = producer_block_bounds(&min_frames);
         k = (uint64_t)gap < max_frames ? (uint32_t)gap : max_frames;
         if (k) deliver_span(false, 0, ph.next_w, k);
@@ -919,10 +935,14 @@ static void phase_act(int act, int32_t frames) {
         if (frames > 0) {
             drop_rows += (uint32_t)frames;      // the next deliveries skip them
         } else {
+            // Silence that delays the stream: not frames of it, so next_w stays
+            // and e reads the corrected value at once (review lk6 F2); no apply
+            // op runs on it.
             uint32_t k = (uint32_t)-frames, cap = output_ring_block_cap;
             while (k) {
                 uint32_t n = k < cap ? k : cap;
-                deliver_span(false, 0, ph.next_w, n);
+                silence_block(n);
+                ph.next_w -= n;
                 k -= n;
             }
         }
@@ -1117,6 +1137,7 @@ void link_input_stop(void) {
     link_phase_drain(&ph);
     ph.state = LINK_PHASE_FREE;
     drop_rows = 0;
+    relocked = false;
     input_arena_release(INPUT_ARENA_LINK);
     input_servo_reset();
     detected_rate = 0;
@@ -1149,6 +1170,10 @@ void link_input_update_clock_servo(void) {
     float hz = link_meas_hz(&meas);
     if (hz == 0.0f) return;
     if (!input_servo_tick_due(&servo_last_us)) return;
+    // Back from a holdover: the VCXO stays where it was until the long window
+    // is valid again; the 32 ms windows would drag it by several ppm (review lk6 F4).
+    if (relocked && !meas.long_valid) return;
+    relocked = false;
     if (phase_servo_tick(hz)) return;
     input_servo_apply(hz, 0);
 }
@@ -1273,10 +1298,13 @@ void link_input_get_phase(uint8_t o[LINK_PHASE_LEN]) {
 bool link_input_rate_ready(void) {
     pull_in = false;
     if (!link_phase_active(&ph)) return true;
+    if (relocked && !meas.long_valid) return true;   // the VCXO is held where it was (F4)
     float d = soft_vcxo_current_ppm() - input_servo_feedforward_ppm();
     // Not yet: the decoder keeps up (deliver() drops the rows), so the
     // prefill starts from current frames once the VCXO is there.
-    pull_in = link_meas_hz(&meas) == 0.0f || input_servo_feedforward_ppm() == 0.0f ||
+    // The long window first (a 2 s span, about 1 ppm): an anchor on the 32 ms
+    // windows would be pushed off by the feed-forward's step when it arrives.
+    pull_in = !meas.long_valid || input_servo_feedforward_ppm() == 0.0f ||
               d <= -LINK_RATE_READY_PPM || d >= LINK_RATE_READY_PPM;
     return !pull_in;
 }
@@ -1409,7 +1437,7 @@ void link_input_get_status(uint8_t o[LINK_STATUS_LEN]) {
     put32(o + 32, s.bit_slips);
     put32(o + 36, s.superframe_errors);
     putf(o + 40, soft_vcxo_current_ppm());
-    putf(o + 44, ph.state == LINK_PHASE_LOCKED && ph.e_valid ? ph.e : 0.0f);
+    putf(o + 44, (ph.state == LINK_PHASE_LOCKED || ph.state == LINK_PHASE_PENDING) && ph.e_valid ? ph.e : 0.0f);
     put16(o + 48, slot_ring_fill_frames(0));
 }
 

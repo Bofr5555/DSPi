@@ -143,10 +143,44 @@ static void test_holdover(void) {
     CHECK(link_phase_hold_frames(&ph, 115, 17) == 0, "LK6 hold frames none above the fill");
     link_phase_written(&ph, ph.next_w, 50);
     CHECK(ph.next_w == 262, "LK6 silence advances the timeline");
-    link_phase_relock(&ph);
+    CHECK(link_phase_relock(&ph, 1000, 1010, 448), "LK6 relock near the held F");
     CHECK(!ph.hold && ph.resync && ph.state == LINK_PHASE_ANCHORING, "LK6 relock resyncs");
     CHECK(link_phase_gap(&ph, 250) == -12 && link_phase_gap(&ph, 270) == 8 && link_phase_gap(&ph, 262) == 0,
           "LK6 gap");
+    CHECK(link_phase_gap_ok(-448, 448) && link_phase_gap_ok(448, 448) && !link_phase_gap_ok(-449, 448) &&
+          !link_phase_gap_ok(449, 448), "LK6 gap within the ring span");
+}
+
+// Review lk6 F1: a sender power cycle restarts F at 0.  The relock compares
+// the stream's F with the holdover's extrapolation and refuses to place rows
+// on the held timeline when they are further apart than the rings hold, in
+// either direction; the glue then takes the full reset.
+static void test_relock_far(void) {
+    const uint64_t held = 172800000ull;             // an hour at 48 kHz
+    const struct { uint64_t f; bool ok; } cases[] = {
+        { held, true }, { held - 448, true }, { held + 448, true },
+        { 0, false }, { 68, false }, { held - 449, false }, { held + 449, false }, { held + 10000000ull, false },
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        link_phase_t ph;
+        link_phase_init(&ph);
+        limits_1ms(&ph);
+        link_phase_drain(&ph);
+        link_phase_written(&ph, held - 300, 112);
+        link_phase_started(&ph);
+        int32_t k;
+        link_phase_check(&ph, 0.0f, true, &k);
+        CHECK(link_phase_loss(&ph, 100), "LK6 F1 holdover %u", i);
+        bool ok = link_phase_relock(&ph, cases[i].f, held, 448);
+        CHECK(ok == cases[i].ok, "LK6 F1 relock at F %llu: %d", (unsigned long long)cases[i].f, ok);
+        CHECK(!ph.hold, "LK6 F1 holdover ends either way (%u)", i);
+        if (!ok) {
+            CHECK(!ph.resync && !ph.started, "LK6 F1 refused relock: no placement, no verification (%u)", i);
+            CHECK(!link_phase_loss(&ph, 100), "LK6 F1 refused relock: no timeline to hold (%u)", i);
+        } else {
+            CHECK(ph.resync && ph.started, "LK6 F1 accepted relock places and verifies (%u)", i);
+        }
+    }
 }
 
 // Phase error arithmetic: F_arr from a reference 7 frames and 160 bits past
@@ -274,6 +308,7 @@ int main(void) {
     test_phase_config();
     test_check();
     test_holdover();
+    test_relock_far();
     test_error();
     test_servo();
     test_apply();

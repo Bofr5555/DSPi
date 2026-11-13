@@ -196,13 +196,25 @@ static inline uint32_t link_phase_hold_frames(const link_phase_t *ph, uint32_t f
     return n < cap ? n : cap;
 }
 
-// Relocked after a holdover: the next rows are placed by F, then verified.
-void link_phase_relock(link_phase_t *ph);
+// Relocked after a holdover with the stream at frame f, where the held
+// timeline expected f_expect (the holdover's extrapolation): within `span`
+// frames (the rings' writable span) the next rows are placed by F, then
+// verified, and it returns true.  Further off (a sender restarted its counter,
+// another stream) the timeline is useless: the holdover ends, false, and the
+// glue takes the full reset (review lk6 F1).
+bool link_phase_relock(link_phase_t *ph, uint64_t f, uint64_t f_expect, uint32_t span);
 
 // Where a row of frame f lands against the timeline: < 0 it is that many
 // frames behind (drop), > 0 that much silence comes first.
 static inline int64_t link_phase_gap(const link_phase_t *ph, uint64_t f) {
     return (int64_t)(f - ph->next_w);
+}
+
+// A placement gap the rings can take: within +-span frames.  Beyond it (either
+// way) the glue re-anchors rather than dropping rows or writing silence for
+// that long.
+static inline bool link_phase_gap_ok(int64_t gap, uint32_t span) {
+    return gap <= (int64_t)span && gap >= -(int64_t)span;
 }
 
 // The servo's trim for one tick (ppm, added to the rate feed-forward).
