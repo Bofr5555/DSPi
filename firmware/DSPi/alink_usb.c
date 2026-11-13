@@ -233,6 +233,9 @@ bool alink_usb_port_pulse(uint32_t frame) {
 }
 
 void alink_usb_port_ring_target(void) {
+    // Only for the USB source: a stop on a source switch leaves the target to
+    // the new source's own output_latency_apply().
+    if (active_input_source != INPUT_SOURCE_USB) return;
     output_latency_apply(audio_state.freq ? audio_state.freq : 48000u, INPUT_SOURCE_USB);
 }
 

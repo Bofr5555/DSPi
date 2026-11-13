@@ -31,13 +31,18 @@ RP2350-only: CLICK (the RP2040's fixed-point pipeline has no click injection) an
 - **Mode 1 (rate lock)**: the host's SOF rate against the unit's crystal (two clean SOF anchors 8-16 s apart, used from
   a 2 s span) is the VCXO's feed-forward. During pull-in (slew 0.5 ppm per 75 ms tick, as every input servo) the
   asynchronous feedback still keeps the ring fill; once the VCXO is within 2 ppm of the feed-forward the unit reports
-  exactly nominal feedback and the fill servo (the S/PDIF slave's) holds the fill. All units of a host then run at the
-  host's rate.
+  exactly nominal feedback and, while a stream plays, the fill servo (the S/PDIF slave's) holds the fill. With no
+  stream (alt 0: the ring is empty) the VCXO stays on the feed-forward alone: the fill term would pull it off by the
+  empty ring's error (hardware finding H1, round 3: -16 ppm under the default 4 ms option, 2 ppm per buffer plus the
+  second slope beyond 2 buffers). All units of a host then run at the host's rate.
 - **Mode 2 (phase lock)**: mode 1, then the anchor (section 3) and the timeline. Needs 48 or 96 kHz and
   `d_min <= D <= d_max` (170..399 at 48 kHz, 324..351 at 96 kHz for every latency option USB offers); otherwise it
-  runs as mode 1 and says why (`status_flags`, event reason `CONFIG`).
+  runs as mode 1 and says why (`status_flags`, event reason `CONFIG`). The anchor needs no stream: it prefills with
+  silence, so a unit locks on the SOF alone and a later stream is placed on its timeline (round 3: before, the fill
+  servo's pull on an empty ring kept `rate_ready()` false and the unit stayed `anchoring` until a stream came, H2).
 - **Host range**: a host more than 295 ppm off the unit's crystal is rejected (state 6, event `HOST_RANGE`): VCXO parked,
-  stock asynchronous behaviour, until it is back under 285 ppm.
+  stock asynchronous behaviour and the stock ring target, until it is back under 285 ppm. Without a time base (no SOF)
+  the stock ring target applies too (review R5).
 
 ## 2. The time base
 
@@ -61,6 +66,10 @@ interrupt runs more than 100 us after the *next* SOF (interrupts held off that l
 is stamped one frame late, on the RP2350 as on the RP2040. The packet is then placed a frame late: it is late against
 the timeline (dropped) and its frame reads as lost (faded hole, section 3). Hold-offs that long come with operations that
 re-anchor anyway; the simulation's probe P8c (400 us hold-offs every 100 ms) mis-stamps a few packets in 400.
+
+**RP2040 note (review R6):** after interrupts were off for more than 16 frames (a flash write) the RP2040's SOF time
+is the late interrupt entry, with no clean-pair prediction, and can read as a discontinuity: a spurious `SOF_LOST`. Such
+periods reset the pipeline and re-anchor anyway.
 
 **SOF discontinuities** (review usb1 F2): a SOF whose frame count and clock disagree by more than 100 us (RP2350) or
 0.5 ms (RP2040) — a stall with the frame number frozen, a small frame jump — sets the long-gap flag: the timeline ends,
@@ -88,7 +97,16 @@ From then on the outputs play the **timeline**. Every packet is placed by its S,
 F1). So a lost packet is never a hard hole: the held packet before the gap fades out over its own 1 ms, the gap is
 silence, and the packet after it fades in over its 1 ms (linear ramps on the input samples, before the DSP; a packet
 between two gaps fades in over its first half and out over its second). Each gap counts once (`gap_count`, event `GAP`).
-Late samples are dropped; a placement more than the rings' span off re-anchors. While no packet comes the service first
+Late samples are dropped; a placement more than the rings' span off re-anchors. A packet that is late rather than lost
+(more than `D - block_cap - 16 - spf` samples after its SOF: 1.65 frames at D 192) also reads as a gap: the held packet
+fades out, the late one fades in, a 2 ms dip and one `gap_count` (review R2). A stream stop is not a gap: hosts send the
+last packet a few frames before SET_INTERFACE 0, and a gap counted within 16 frames before the alt 0 is taken back (R3).
+A new stream or a format change drops a packet still held from the old one (R4).
+
+**Stall budget (review R1):** holding a frame costs a frame of ring fill. At D 192 the fill runs 91-134 samples after
+a flush and dips to 43-86 just before the hold fires, so a main-loop stall of about **1-2 ms** underruns the rings
+(which re-anchors, about 0.25 s muted). The default D 192 stays; the bench's worst main-loop pass (step 4.6) decides
+whether an installation needs more; do not treat `d_min` 170 as a practical setting. While no packet comes the service first
 writes the held packet (faded out), then silence, so the rings never run more than `D - block_cap - 16` behind the
 arrival; a loss that long (about three frames at D 192) also mutes the stream for 20 ms, after which it fades back in
 through the pipeline's 8 ms envelope. The held frame is why `d_min` is `2.2 spf + block_cap + 16` (a frame held, 1.2
