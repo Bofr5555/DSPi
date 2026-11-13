@@ -1000,7 +1000,8 @@ bool pipeline_producer_is_streaming(void) {
 #endif
 #if DSPI_LINK
     if (active_input_source == INPUT_SOURCE_LINK &&
-        link_input_get_state() == LINK_INPUT_LOCKED) return true;
+        (link_input_get_state() == LINK_INPUT_LOCKED ||
+         link_input_get_state() == LINK_INPUT_HOLDOVER)) return true;   // holdover delivers silence
 #endif
     // The generator's idle pump counts only when it would actually run:
     // siggen_pump() refuses while a source change or type switch is in
@@ -1786,6 +1787,9 @@ void core0_init() {
     // Link receiver configuration: device-global, outside the presets (V26
     // directory block, saved by REQ_SAVE_OUTPUT_CONFIG).
     preset_load_link_config();
+#if DSPI_LINK
+    link_input_load_phase();    // WP LK6: EXT_LINK_PHASE from the same block
+#endif
     output_latency_request(preset_get_output_latency());
     output_latency_apply(48000u, active_input_source);
 
@@ -2098,16 +2102,22 @@ static void input_service_handshakes(void) {
         }
         if (ln_state == LINK_INPUT_LOCKED && preset_loading && !link_prefilling
                 && dac_hw_mute_hold_elapsed()) {
-            if (!link_input_check_rate_change()) {
+            // WP LK6: phase-locked, the drain waits for the VCXO pull-in.
+            if (!link_input_check_rate_change() && link_input_rate_ready()) {
                 drain_and_disable_outputs();
                 preset_loading = false;
                 preset_mute_counter = 0;
                 link_prefilling = true;
                 link_input_discard_queued();   // prefill starts from live input
+                link_input_on_drain();         // WP LK6: phase-locked prefill target
             }
         }
-        if (link_prefilling && ln_state == LINK_INPUT_LOCKED && slot_fill_at_target(0)) {
+        // WP LK6: phase-locked, the outputs start when the delay is reached
+        // (link_input_anchor_ready() waits in place for the last few frames).
+        if (link_prefilling && ln_state == LINK_INPUT_LOCKED && slot_fill_at_target(0) &&
+                link_input_anchor_ready()) {
             enable_outputs_in_sync();
+            link_input_on_enabled();
             link_prefilling = false;
             dac_hw_mute_release();
         }

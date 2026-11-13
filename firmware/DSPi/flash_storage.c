@@ -688,8 +688,13 @@ typedef struct __attribute__((packed)) {
     uint8_t version;                         // FLASH_LINK_CONFIG_VERSION; 0 = never saved
     uint8_t config[LINK_CFG_LEN];            // EXT_LINK_CONFIG
     uint8_t slots[LINK_SLOTS_LEN];           // EXT_LINK_SLOTS
-    uint8_t reserved[7];
+    uint8_t phase_version;                   // FLASH_LINK_PHASE_VERSION; 0 = never saved (WP LK6)
+    uint8_t phase[LINK_PHASE_STORE_LEN];     // EXT_LINK_PHASE: mode, d_local, hops_offset
+    uint8_t reserved[1];
 } FlashLinkConfig;                           // 24 bytes
+// WP LK6 took 6 of the V26 block's 7 reserved bytes (zero in every earlier
+// save, so those read as "never saved": factory phase settings), no V27.
+#define FLASH_LINK_PHASE_VERSION 1
 #define FLASH_OUTPUT_LATENCY_CONFIG_VERSION 1
 
 typedef struct __attribute__((packed)) {
@@ -4985,6 +4990,8 @@ uint8_t preset_save_output_config(void) {
     dir_cache.link.version = FLASH_LINK_CONFIG_VERSION;
     memcpy(dir_cache.link.config, link_config, LINK_CFG_LEN);
     memcpy(dir_cache.link.slots, link_slots, LINK_SLOTS_LEN);
+    dir_cache.link.phase_version = FLASH_LINK_PHASE_VERSION;
+    memcpy(dir_cache.link.phase, link_phase_store, LINK_PHASE_STORE_LEN);
     memset(dir_cache.link.reserved, 0, sizeof(dir_cache.link.reserved));
     dir_cache.spdif_rx_pin = dir_cache.output_config.spdif_rx_pin;
     limiter_to_dir();
@@ -5303,7 +5310,12 @@ void preset_load_link_config(void) {
     dir_ensure();
     const FlashLinkConfig *c = &dir_cache.link;
     link_config_defaults(link_config, link_slots);
+    link_phase_store_defaults(link_phase_store);
     if (!dir_cache_valid || c->version != FLASH_LINK_CONFIG_VERSION) return;
+    // EXT_LINK_PHASE (WP LK6): ranges here, the d_local limits when it is used.
+    int16_t hops = (int16_t)(c->phase[3] | c->phase[4] << 8);
+    if (c->phase_version == FLASH_LINK_PHASE_VERSION && c->phase[0] <= 1u && hops >= -64 && hops <= 64)
+        memcpy(link_phase_store, c->phase, LINK_PHASE_STORE_LEN);
     bool ok = c->config[LINK_CFG_ENABLE] <= 1u && c->config[LINK_CFG_CLASS] <= 3u &&
               !(c->config[LINK_CFG_FLAGS] & ~0x03u) && c->config[7] == 0;
     for (int i = 0; i < LINK_SLOTS_LEN; i++)

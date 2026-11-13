@@ -112,6 +112,13 @@ volatile bool adat_input_restart_pending = false;
 uint8_t link_config[LINK_CFG_LEN] = { 0, 0xFF, 0, 0xFF, 0xFF, 0xFF, 0x03, 0 };
 uint8_t link_slots[LINK_SLOTS_LEN] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
+uint8_t link_phase_store[LINK_PHASE_STORE_LEN] = { 1, 128, 0, 0, 0 };
+
+void link_phase_store_defaults(uint8_t p[LINK_PHASE_STORE_LEN]) {
+    static const uint8_t d[LINK_PHASE_STORE_LEN] = { 1, 128, 0, 0, 0 };
+    memcpy(p, d, LINK_PHASE_STORE_LEN);
+}
+
 void link_config_defaults(uint8_t cfg[LINK_CFG_LEN], uint8_t slots[LINK_SLOTS_LEN]) {
     static const uint8_t c[LINK_CFG_LEN] = { 0, 0xFF, 0, 0xFF, 0xFF, 0xFF, 0x03, 0 };
     memcpy(cfg, c, LINK_CFG_LEN);

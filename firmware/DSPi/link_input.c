@@ -18,10 +18,13 @@ volatile bool link_input_restart_pending = false;
 #if DSPI_LINK
 
 #include "audio_pipeline.h"
+#include "bulk_params.h"
 #include "config.h"
+#include "dsp_pipeline.h"
 #include "input_capture_arena.h"
 #include "input_servo.h"
 #include "notify.h"
+#include "output_latency.h"
 #include "soft_vcxo.h"
 #include "usb_audio.h"
 
@@ -44,6 +47,7 @@ volatile bool link_input_restart_pending = false;
 #include "pdm_generator.h"      // core1_mode
 #endif
 
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -74,6 +78,9 @@ _Static_assert(LINK_RING_BITS / 16u > LINK_FAST_GUARD_BITS + 12u + 400u, "stall 
 #define RELOCK_US           300000u     // a loss longer than this re-detects the class
 #define SEARCH_BUDGET       (LINK_RING_BITS / 4u)
 #define EVENT_MIN_MS        250u        // NOTIFY_EVT_LINK_STATE rate limit
+#define ANCHOR_SPIN_US      1100u       // the anchor waits in place for the last ms or so
+#define MUTE_HOLD_MS        5u          // soft-mute refresh while anchoring or holding
+#define LINK_RATE_READY_PPM 1.0f        // VCXO this close to the feed-forward: pulled in
 
 // Link-up phases.
 enum { PH_DETECT, PH_SCAN, PH_SETTLE, PH_LOCKED, PH_RELOCK };
@@ -146,6 +153,22 @@ static bool ev_pending, ev_once;
 static uint8_t ev_state, ev_cls, ev_reason, pub_state;
 static uint32_t ev_f, ev_last_ms;
 
+// Phase lock and apply at frame (WP LK6, link/link_phase.h).  The decoder's
+// reference (frame pub_f, comma ending at bit pub_p) and the FIFO's frame
+// numbering (rows below pub_head end at frame pub_head_f) are published with
+// the ring position, under ring_seq.
+static link_phase_t ph;
+static link_apply_q_t aq;
+static uint64_t pub_f, pub_head_f;
+static uint32_t pub_p, pub_head;
+static bool pub_locked;
+static uint32_t drop_rows;                  // whole frames still to drop (anchor correction)
+static bool pull_in;                        // the drain waits for the VCXO: rows are dropped meanwhile
+static uint64_t hold_f, hold_us;            // holdover: F extrapolated from here
+static bool relocked;                       // back from a holdover, the long rate window not yet valid again
+static const link_apply_limits_t apply_lim = { PRESET_SLOTS, NUM_OUTPUT_CHANNELS, MAX_DELAY_SAMPLES };
+extern volatile bool preset_loading;        // main.c: the prefill handshake's flag
+
 #if DSPI_LINK_DECODE_CORE1
 static volatile bool c1_active;             // Core 1 owns the decode service (LOCKED only)
 static volatile bool c1_busy;               // Core 1 is inside it
@@ -206,6 +229,37 @@ static void stats_add(link_rx_stats_t *a, const link_rx_stats_t *s) {
 static uint32_t error_sum(const link_rx_stats_t *s) {
     return s->loss_count + s->crc8_errors + s->crc16_errors + s->bit_slips + s->superframe_errors +
            s->comma_errors + s->counter_errors + s->code_errors + s->idle_errors;
+}
+
+// The FIFO's frame numbering as last published: rows below *head end at
+// frame *head_f.
+static inline __attribute__((always_inline)) void pub_rows(uint32_t *head, uint64_t *head_f) {
+    uint32_t s0, s1;
+    do {
+        s0 = ring_seq;
+        __dmb();
+        *head = pub_head;
+        *head_f = pub_head_f;
+        __dmb();
+        s1 = ring_seq;
+    } while (s0 != s1 || (s0 & 1u));
+}
+
+// The decoder's reference as last published with its ring position.
+static bool pub_ref(uint64_t *bits, uint64_t *f, uint32_t *p) {
+    uint32_t s0, s1;
+    bool ok;
+    do {
+        s0 = ring_seq;
+        __dmb();
+        *bits = ring_bits_pub;
+        *f = pub_f;
+        *p = pub_p;
+        ok = pub_locked;
+        __dmb();
+        s1 = ring_seq;
+    } while (s0 != s1 || (s0 & 1u));
+    return ok;
 }
 
 // The last published position and, in *us, the time it was read.
@@ -287,11 +341,31 @@ static uint64_t ring_writer_bits(void) {
 }
 
 // us: when the DMA position behind bits was read (the rate measurement's clock).
-static void ring_publish(uint64_t bits, uint64_t us) {
+// After a decoder restart: the position alone, no reference.
+static inline __attribute__((always_inline)) void ring_publish_lost(uint64_t bits, uint64_t us) {
     ring_seq++;
     __dmb();
     ring_bits_pub = bits;
     ring_us_pub = us;
+    pub_locked = false;
+    __dmb();
+    ring_seq++;
+}
+
+// The decoder's reference and the FIFO numbering go with it (WP LK6): the
+// next row written is frame lf.frame, or lf.frame + 1 once its body is done.
+static inline __attribute__((always_inline)) void ring_publish(uint64_t bits, uint64_t us) {
+    ring_seq++;
+    __dmb();
+    ring_bits_pub = bits;
+    ring_us_pub = us;
+    pub_locked = lf.state == LINK_RX_LOCKED;
+    if (pub_locked) {
+        pub_f = lf.frame;
+        pub_p = lf.p;
+        pub_head = fifo_head;
+        pub_head_f = lf.frame + (lf.body_done ? 1u : 0u);
+    }
     __dmb();
     ring_seq++;
 }
@@ -346,7 +420,7 @@ static void decoder_restart(unsigned c, bool count) {
     link_fast_set_bank_mask(&lf, (phase == PH_SCAN && !m) ? 1u : m);
     link_fast_set_output(&lf, NULL, 0);
     service_last_us = time_us_64();
-    ring_publish(at, service_last_us);
+    ring_publish_lost(at, service_last_us);
 }
 
 static void enter_detect(uint64_t now) {
@@ -380,21 +454,75 @@ static void enter_scan(uint64_t now) {
 
 static void enter_locked(void) {
     phase = PH_LOCKED;
+    uint32_t was = detected_rate;
     detected_rate = rate_hz(lf.rate);
     fifo_tail = fifo_head;
     link_meas_reset(&meas);
     lock_comma0 = lf.stats.comma_errors;
     lock_crc80 = lf.stats.crc8_errors;
+    if (ph.hold) {
+        // Back from a holdover: at the same rate the new frames go onto the
+        // held timeline by F and the phase decides (link_phase_relock()); a
+        // new rate needs the full reset.
+        // The frame now arriving against the holdover's extrapolation: a sender
+        // that restarted its counter (or another stream) is far off, and its
+        // rows would never meet the timeline (review lk6 F1).
+        uint64_t f_expect = hold_f + (time_us_64() - hold_us) * (uint64_t)detected_rate / 1000000u;
+        bool same_rate = detected_rate == was && detected_rate == audio_state.freq;
+        // The VCXO held its trim through the holdover: at the same rate it stays
+        // there until the long rate window is back, and a re-anchor need not
+        // wait for a pull-in (review lk6 F4).
+        relocked = same_rate;
+        if (same_rate && link_phase_relock(&ph, lf.frame, f_expect, output_latency_ring_span())) {
+            // placed by F on the held timeline, then verified
+        } else {
+            ph.hold = false;
+            ph.started = false;
+            loss_latch = true;
+            event(LINK_INPUT_LOCKED, LINK_REASON_REANCHOR);
+        }
+    }
     event(LINK_INPUT_LOCKED, LINK_REASON_LOCKED);
-
 }
 
 static void enter_relock(uint64_t now, uint8_t reason) {
+    pull_in = false;
+    relocked = false;
     phase = PH_RELOCK;
     deadline_us = now + RELOCK_US;
     loss_latch = true;
     detected_rate = 0;
     event(LINK_INPUT_SEARCHING, reason);
+}
+
+// Frames arriving now from the decoder's published reference and the live
+// RX DMA position (bits per frame: the class's baud over the stream's rate),
+// relative to frame fx.  False without a locked reference.
+static bool arrival_since(uint64_t fx, float *since) {
+    uint64_t bits, f;
+    uint32_t p;
+    if (!pub_ref(&bits, &f, &p) || !detected_rate) return false;
+    uint32_t idx = (dma_hw->ch[LINK_DMA_DATA].write_addr - (uint32_t)(uintptr_t)LINK_RING) >> 2;
+    if (idx >= LINK_RING_WORDS) idx = 0;
+    uint32_t words = (idx - (uint32_t)(bits >> 5)) & (LINK_RING_WORDS - 1u);
+    uint32_t now32 = (uint32_t)bits + words * 32u;
+    *since = link_phase_since(f, fx, (int32_t)(now32 - p),
+                              (float)link_class_baud(cls) / (float)detected_rate);
+    return true;
+}
+
+// A phase-locked loss: keep the timeline on silence (holdover), F
+// extrapolated from the last arrival; false when there is no timeline.
+static bool enter_holdover(uint64_t now, uint8_t reason) {
+    uint32_t fill = slot_ring_fill_frames(0);
+    if (!link_phase_active(&ph) || !link_phase_loss(&ph, fill)) return false;
+    // Phase-locked, the frame arriving now is the one playing plus the delay.
+    hold_f = ph.next_w - fill + (uint64_t)(int64_t)link_phase_delay(&ph);
+    hold_us = now;
+    phase = PH_RELOCK;
+    deadline_us = now + RELOCK_US;
+    event(LINK_INPUT_HOLDOVER, reason);
+    return true;
 }
 
 // One link-up step (core 0, flash).
@@ -455,7 +583,8 @@ static void link_up_step(uint64_t now) {
         if (st != LINK_RX_LOCKED) {
             // All three failed frames were flywheel frames: the comma is gone.
             uint32_t commas = lf.stats.comma_errors - lock_comma0, crc8s = lf.stats.crc8_errors - lock_crc80;
-            enter_relock(now, commas >= 3u && !crc8s ? LINK_REASON_COMMA_LOST : LINK_REASON_FRAME_ERRORS);
+            uint8_t reason = commas >= 3u && !crc8s ? LINK_REASON_COMMA_LOST : LINK_REASON_FRAME_ERRORS;
+            if (!enter_holdover(now, reason)) enter_relock(now, reason);
         } else if (rate_hz(lf.rate) != detected_rate) {
             // A RATE switch in the stream: the pipeline follows (mute, rate change, prefill).
             detected_rate = rate_hz(lf.rate);
@@ -519,7 +648,7 @@ void link_input_decode_service(void) {
     // writer (a loss if locked).
     if (!link_ring_gap_ok(now - service_last_us, pass_us)) {
         link_fast_restart(&lf, lf.cls, bits & ~31ull);
-        ring_publish(bits & ~31ull, now);
+        ring_publish_lost(bits & ~31ull, now);
         service_last_us = now;
         return;
     }
@@ -567,22 +696,10 @@ static void c1_release(void) {
 }
 #endif
 
-DSP_TIME_CRITICAL
-static uint32_t deliver(void) {
-    if (fifo_drop) {
-        fifo_tail = fifo_head;
-        fifo_drop = false;
-    }
-    uint32_t head = fifo_head;
-    __dmb();
-    uint32_t tail = fifo_tail, avail = head - tail;
-    if (phase != PH_LOCKED || detected_rate != audio_state.freq) {
-        fifo_tail = head;       // keep decoding (and the lock); nothing plays
-        return 0;
-    }
-    uint32_t min_frames, max_frames = producer_block_bounds(&min_frames);
-    if (max_frames == 0 || avail < min_frames || avail == 0) return 0;
-    uint32_t n = avail < max_frames ? avail : max_frames;
+// FIFO rows [tail, tail + n), frames f.., into the pipeline.  Inlined into
+// each caller: deliver() itself is inlined into link_input_poll(), as it was
+// before LK6, so the steady-state copy costs no RAM.
+static inline __attribute__((always_inline)) void deliver_rows(uint32_t tail, uint32_t n, uint64_t f) {
     float *dst[8] = { buf_l, buf_r, buf_in_ext[0], buf_in_ext[1], buf_in_ext[2],
                       buf_in_ext[3], buf_in_ext[4], buf_in_ext[5] };
     // A test-pattern (PRBS-7) or system-muted stream plays silence: its
@@ -597,13 +714,191 @@ static uint32_t deliver(void) {
     __dmb();
     fifo_tail = tail + n;
     process_input_block(n);
-    link_input_on_delivered(n, avail - n);
+    pipeline_click_output = -1;
+    link_phase_written(&ph, f, n);
+}
+
+static uint32_t deliver_slow(uint32_t tail, uint32_t avail, uint64_t f, uint32_t n);
+static uint32_t deliver_hold(uint32_t head);
+static bool deliver_place(uint32_t *tail, uint32_t *avail, uint64_t *f);
+
+DSP_TIME_CRITICAL
+static uint32_t deliver(void) {
+    uint32_t head;
+    uint64_t head_f;
+    pub_rows(&head, &head_f);
+    if (fifo_drop) {
+        fifo_tail = head;
+        fifo_drop = false;
+    }
+    if (ph.hold) return deliver_hold(head);
+    uint32_t tail = fifo_tail, avail = head - tail;
+    if (phase != PH_LOCKED || detected_rate != audio_state.freq || (pull_in && preset_loading)) {
+        fifo_tail = head;       // keep decoding (and the lock); nothing plays
+        return 0;
+    }
+    uint64_t f = head_f - avail;    // frame of row `tail`
+    // Rows placed by F after a holdover, or an anchor correction (cold).
+    if ((ph.resync || drop_rows) && !deliver_place(&tail, &avail, &f)) return 0;
+    uint32_t min_frames, max_frames = producer_block_bounds(&min_frames);
+    if (max_frames == 0 || avail < min_frames || avail == 0) return 0;
+    uint32_t n = avail < max_frames ? avail : max_frames;
+    // An apply op due inside this block splits it (cold).
+    if (link_apply_next(&aq) < f + n) return deliver_slow(tail, avail, f, n);
+    deliver_rows(tail, n, f);
     return n;
 }
 
-__attribute__((weak)) void link_input_on_delivered(uint32_t frames, uint32_t queued) {
-    (void)frames;
-    (void)queued;
+// ----------------------------------------------------------------------------
+// Off the steady state (flash): apply ops, silence, holdover, placement
+// ----------------------------------------------------------------------------
+
+// n frames of silence onto the timeline (holdover, a gap before placed rows,
+// an anchor correction).
+static void silence_block(uint32_t n) {
+    float *dst[8] = { buf_l, buf_r, buf_in_ext[0], buf_in_ext[1], buf_in_ext[2],
+                      buf_in_ext[3], buf_in_ext[4], buf_in_ext[5] };
+    for (int ch = 0; ch < 8; ch++) memset(dst[ch], 0, n * sizeof(float));
+    process_input_block(n);
+    pipeline_click_output = -1;
+    link_phase_written(&ph, ph.next_w, n);
+}
+
+// What an op does (extension_channel_spec.md 2.8.7).  Mute, volume and click
+// act on the next sample the pipeline processes, which the caller has made
+// the op's frame; a preset load and a delay change start there.
+static uint8_t apply_exec(const link_apply_op_t *op) {
+    switch (op->op) {
+    case LINK_OP_MUTE:
+    case LINK_OP_UNMUTE: {
+        user_mute = op->op == LINK_OP_MUTE;
+        uint8_t v = user_mute ? 1 : 0;
+        notify_param_write(offsetof(WireBulkParams, user_volume.user_mute), sizeof(uint8_t), &v);
+        return LINK_APPLY_APPLIED;
+    }
+    case LINK_OP_PRESET_LOAD:
+        pending_preset_load_slot = op->arg;
+        __dmb();
+        preset_load_pending = true;
+        return LINK_APPLY_APPLIED;
+    case LINK_OP_MASTER_VOLUME:
+        update_master_volume((float)op->value * 0.01f);
+        return LINK_APPLY_APPLIED;
+    case LINK_OP_OUT_DELAY: {
+        float fs = (float)(audio_state.freq ? audio_state.freq : 48000u);
+        // + 0.5: dsp_update_delay_samples() truncates the product back to samples.
+        float ms = ((float)op->value + 0.5f) * 1000.0f / fs;
+        channel_delays_ms[CH_OUT_1 + op->arg] = ms;
+        dsp_update_delay_samples(fs);
+        notify_param_write((uint16_t)(offsetof(WireBulkParams, delays.delay_ms) +
+                                      (CH_OUT_1 + op->arg) * sizeof(float)), sizeof(float), &ms);
+        return LINK_APPLY_APPLIED;
+    }
+    case LINK_OP_CLICK:
+        // The PDM sub (the last output) is not finalized as PCM: refused.  A
+        // muted unit clicks neither (user mute, or a system-muted stream):
+        // refused at apply time (coordinator 2026-11-13, review lk6 F5).
+        if (op->arg >= NUM_SPDIF_INSTANCES * 2 || user_mute || stream_mute) return LINK_APPLY_REFUSED;
+        pipeline_click_output = (int8_t)op->arg;
+        return LINK_APPLY_APPLIED;
+    default:
+        // SYNC_PULSE: a receiver has no sync GPIO (EXT_LINK_CONFIG has none).
+        return LINK_APPLY_REFUSED;
+    }
+}
+
+static void apply_report(uint8_t op, uint8_t result, uint64_t frame) {
+    link_apply_done(&aq, op, result, frame);
+    notify_push_apply_result(op, result, (uint32_t)frame);
+}
+
+static void apply_run(bool late) {
+    link_apply_op_t op;
+    link_apply_pop(&aq, &op);
+    uint8_t r = apply_exec(&op);
+    if (late && r == LINK_APPLY_APPLIED) r = LINK_APPLY_LATE;
+    apply_report(op.op, r, op.frame);
+}
+
+// n frames from frame f (FIFO rows from tail, or silence), split where an
+// apply op is due so that it acts on exactly its frame; an op whose frame has
+// passed runs at once and reports late.
+static uint32_t deliver_span(bool rows, uint32_t tail, uint64_t f, uint32_t n) {
+    uint32_t done = 0;
+    while (done < n) {
+        uint64_t at = link_apply_next(&aq), here = f + done;
+        if (at <= here) {
+            apply_run(at < here);
+            continue;
+        }
+        uint32_t k = n - done;
+        if (at - here < k) k = (uint32_t)(at - here);
+        if (rows) deliver_rows(tail + done, k, here);
+        else silence_block(k);
+        done += k;
+    }
+    return done;
+}
+
+static uint32_t deliver_slow(uint32_t tail, uint32_t avail, uint64_t f, uint32_t n) {
+    (void)avail;
+    return deliver_span(true, tail, f, n);
+}
+
+// Holdover: rows from the search are dropped; silence keeps the rings at
+// their fill, so the timeline runs on at the held VCXO rate.
+static uint32_t deliver_hold(uint32_t head) {
+    fifo_tail = head;
+    uint32_t min_frames, max_frames = producer_block_bounds(&min_frames);
+    uint32_t n = link_phase_hold_frames(&ph, slot_ring_fill_frames(0), max_frames);
+    return n ? deliver_span(false, 0, ph.next_w, n) : 0;
+}
+
+static void reanchor(void) {
+    drop_rows = 0;
+    ph.resync = false;
+    ph.hold = false;
+    ph.started = false;     // no verification or servo on the dead timeline (review lk6 F3)
+    loss_latch = true;      // the main loop mutes, drains, prefills, starts in sync
+    event(LINK_INPUT_LOCKED, LINK_REASON_REANCHOR);
+}
+
+// Rows against the timeline before they play: an anchor correction drops
+// whole frames; after a holdover the first rows are placed by F (late rows
+// dropped, a gap filled with silence).  False: nothing to deliver this pass.
+static bool deliver_place(uint32_t *tail, uint32_t *avail, uint64_t *f) {
+    uint32_t k;
+    if (drop_rows) {
+        k = drop_rows < *avail ? drop_rows : *avail;
+        fifo_tail = *tail + k;
+        link_phase_written(&ph, *f, k);     // skipped: the timeline moves on
+        *tail += k;
+        *avail -= k;
+        *f += k;
+        drop_rows -= k;
+        if (drop_rows) return false;
+    }
+    if (!ph.resync) return true;
+    int64_t gap = link_phase_gap(&ph, *f);
+    if (!link_phase_gap_ok(gap, output_latency_ring_span())) {
+        reanchor();             // another stream, a restarted counter, or a long gap: start over
+        return false;
+    }
+    if (gap < 0) {
+        k = (uint64_t)-gap < *avail ? (uint32_t)-gap : *avail;
+        fifo_tail = *tail + k;
+        *tail += k;
+        *avail -= k;
+        *f += k;
+        if ((int64_t)k < -gap) return false;
+    } else if (gap > 0) {
+        uint32_t min_frames, max_frames = producer_block_bounds(&min_frames);
+        k = (uint64_t)gap < max_frames ? (uint32_t)gap : max_frames;
+        if (k) deliver_span(false, 0, ph.next_w, k);
+        return false;
+    }
+    ph.resync = false;          // in place: the next check verifies the phase
+    return true;
 }
 
 // Wire rate from the RX DMA position (flash; once per poll, cheap).  The
@@ -613,6 +908,75 @@ static void measure(void) {
     if (phase != PH_LOCKED || !detected_rate) return;
     uint64_t us, bits = ring_bits_read(&us);
     link_meas_sample(&meas, us, bits, 1e6f * (float)detected_rate / (float)link_class_baud(cls));
+}
+
+// ----------------------------------------------------------------------------
+// Phase measurement, verification and servo (flash)
+// ----------------------------------------------------------------------------
+
+// The phase error now (frames): the arrival against the timeline and the live
+// ring fill, read together.  False without a timeline or a locked reference.
+static bool phase_error(float *e) {
+    if (!ph.timeline || ph.hold || ph.resync) return false;
+    float fill, since;
+    uint32_t played;
+    uint32_t save = save_and_disable_interrupts();
+    bool ok = slot_ring_play_position(0, &fill, &played) && arrival_since(ph.next_w, &since);
+    restore_interrupts(save);
+    if (!ok) return false;
+    *e = link_phase_error(&ph, since, fill);
+    return true;
+}
+
+static void phase_act(int act, int32_t frames) {
+    if (act == LINK_PHASE_ACT_REANCHOR) {
+        reanchor();
+    } else if (act == LINK_PHASE_ACT_CORRECT) {
+        if (frames > 0) {
+            drop_rows += (uint32_t)frames;      // the next deliveries skip them
+        } else {
+            // Silence that delays the stream: not frames of it, so next_w stays
+            // and e reads the corrected value at once (review lk6 F2); no apply
+            // op runs on it.
+            uint32_t k = (uint32_t)-frames, cap = output_ring_block_cap;
+            while (k) {
+                uint32_t n = k < cap ? k : cap;
+                silence_block(n);
+                ph.next_w -= n;
+                k -= n;
+            }
+        }
+    }
+    // ACT_RESUME: the soft mute is no longer refreshed and fades out.
+}
+
+// Anchor or resync verification, every poll until it passes (muted).
+static void phase_verify(void) {
+    float e;
+    if (!phase_error(&e)) return;
+    int32_t k = 0;
+    int act = link_phase_check(&ph, e, (link_config[LINK_CFG_FLAGS] & 0x02u) != 0, &k);    // sets k: not in the same call's arguments
+    phase_act(act, k);
+}
+
+// One servo tick in phase lock: the rate feed-forward plus the phase trim.
+// False when the fill servo runs instead (mode 0, delay out of range).
+static __attribute__((noinline)) bool phase_servo_tick(float hz) {
+    if (!link_phase_active(&ph)) return false;
+    float e, trim = 0.0f;
+    if (ph.started && phase_error(&e)) {
+        int32_t k = 0;
+        int act = LINK_PHASE_ACT_NONE;
+        if (ph.state != LINK_PHASE_ANCHORING) {
+            act = link_phase_check(&ph, e, (link_config[LINK_CFG_FLAGS] & 0x02u) != 0, &k);
+            phase_act(act, k);
+        }
+        // A re-anchor's error is not the phase's: feed-forward only, fresh PI.
+        if (act == LINK_PHASE_ACT_REANCHOR) link_phase_pi_reset(&ph.pi);
+        else if (ph.state == LINK_PHASE_LOCKED || ph.state == LINK_PHASE_PENDING) trim = link_phase_servo(&ph, e);
+    }
+    input_servo_apply_trim(hz, trim);
+    return true;
 }
 
 uint32_t link_input_poll(void) {
@@ -639,10 +1003,23 @@ uint32_t link_input_poll(void) {
         if (phase == PH_LOCKED) {
             lock_comma0 = lf.stats.comma_errors;
             lock_crc80 = lf.stats.crc8_errors;
+            // The superframe's apply (the broadcast path): same queue.
+            if (link_apply_take_sf(&aq, &apply_lim, &sf_last) == 2)
+                apply_report(sf_last.apply_op, LINK_APPLY_REFUSED, sf_last.apply_frame);
         }
     }
     measure();
-    return deliver();
+    uint32_t n = deliver();
+    if (link_phase_active(&ph)) {
+        if (ph.started && ph.state == LINK_PHASE_ANCHORING && !ph.hold && !ph.resync && !drop_rows &&
+            phase == PH_LOCKED)
+            phase_verify();
+        if (ph.hold || ph.state == LINK_PHASE_ANCHORING) {
+            uint32_t fs = audio_state.freq ? audio_state.freq : 48000u;
+            pipeline_request_soft_mute(fs / 1000u * MUTE_HOLD_MS);
+        }
+    }
+    return n;
 }
 
 // ============================================================================
@@ -652,6 +1029,8 @@ uint32_t link_input_poll(void) {
 void link_input_init(void) {
     running = false;
     pub_state = LINK_INPUT_OFF;
+    link_phase_init(&ph);
+    link_apply_init(&aq);
 }
 
 void link_input_start(void) {
@@ -682,7 +1061,7 @@ void link_input_start(void) {
     ring_addr = LINK_RING;
     ring_last_idx = 0;
     ring_passes = 0;
-    ring_publish(0, time_us_64());
+    ring_publish_lost(0, time_us_64());
 
     // DMA 5 moves FIFO words into the ring and chains to 6, which rewrites
     // 5's write address with trigger (LK3's two-channel ring).
@@ -749,6 +1128,16 @@ void link_input_stop(void) {
     if (count_this) stats_add(&stats_acc, &lf.stats);
     count_this = false;
     memset(&lf.stats, 0, sizeof(lf.stats));
+    // No frames come any more: pending ops are cancelled, the timeline ends.
+    while (aq.n) {
+        link_apply_op_t op;
+        link_apply_pop(&aq, &op);
+        apply_report(op.op, LINK_APPLY_CANCELLED, op.frame);
+    }
+    link_phase_drain(&ph);
+    ph.state = LINK_PHASE_FREE;
+    drop_rows = 0;
+    relocked = false;
     input_arena_release(INPUT_ARENA_LINK);
     input_servo_reset();
     detected_rate = 0;
@@ -761,6 +1150,7 @@ bool link_input_is_running(void) { return running; }
 
 LinkInputState link_input_get_state(void) {
     if (!running) return LINK_INPUT_OFF;
+    if (ph.hold) return LINK_INPUT_HOLDOVER;
     return phase == PH_LOCKED ? LINK_INPUT_LOCKED : LINK_INPUT_SEARCHING;
 }
 
@@ -780,6 +1170,11 @@ void link_input_update_clock_servo(void) {
     float hz = link_meas_hz(&meas);
     if (hz == 0.0f) return;
     if (!input_servo_tick_due(&servo_last_us)) return;
+    // Back from a holdover: the VCXO stays where it was until the long window
+    // is valid again; the 32 ms windows would drag it by several ppm (review lk6 F4).
+    if (relocked && !meas.long_valid) return;
+    relocked = false;
+    if (phase_servo_tick(hz)) return;
     input_servo_apply(hz, 0);
 }
 
@@ -853,6 +1248,150 @@ bool link_input_stats_reset(uint8_t v) {
     return true;
 }
 
+// ----------------------------------------------------------------------------
+// Phase lock and apply at frame: control plane (2.8.5-2.8.7)
+// ----------------------------------------------------------------------------
+
+// d_local_min / d_local_max under the requested latency option at the
+// current rate, as the LINK source would run it.  While LINK runs, the limits
+// in force stay (output_latency_apply() set them with the prefill target), so
+// a read between a latency change and its reset cannot switch the lock off.
+static void refresh_limits(void) {
+    if (running && active_input_source == INPUT_SOURCE_LINK) return;
+    uint32_t fs = audio_state.freq ? audio_state.freq : 48000u;
+    const OutputLatencyOption *opt = output_latency_resolve(output_latency_requested(), INPUT_SOURCE_LINK);
+    link_phase_limits(&ph, output_latency_target_frames(opt, fs), output_latency_block_cap(opt, fs),
+                      output_latency_ring_span());
+}
+
+uint32_t link_input_ring_target(uint32_t target, uint32_t block_cap) {
+    uint32_t span = output_latency_ring_span();
+    link_phase_limits(&ph, target, block_cap, span);
+    return link_phase_prefill(&ph, target, block_cap, span);
+}
+
+void link_input_load_phase(void) {
+    ph.mode = link_phase_store[0];
+    ph.d_local = (uint16_t)(link_phase_store[1] | link_phase_store[2] << 8);
+    ph.hops_offset = (int16_t)(link_phase_store[3] | link_phase_store[4] << 8);
+}
+
+bool link_input_set_phase(const uint8_t p[LINK_PHASE_LEN]) {
+    refresh_limits();
+    bool was = link_phase_active(&ph);
+    int r = link_phase_set(&ph, p);
+    if (r < 0) return false;
+    memcpy(link_phase_store, p, 1);
+    memcpy(link_phase_store + 1, p + 2, 4);
+    // A new mode or delay while the outputs play phase-locked: re-anchor
+    // (2-6 ms of silence, event REANCHOR).
+    if (r > 0 && running && phase == PH_LOCKED && !ph.hold && (was || link_phase_active(&ph))) reanchor();
+    return true;
+}
+
+void link_input_get_phase(uint8_t o[LINK_PHASE_LEN]) {
+    refresh_limits();
+    link_phase_get(&ph, o);
+    if (!running || !link_phase_active(&ph)) o[7] = LINK_PHASE_FREE;
+}
+
+bool link_input_rate_ready(void) {
+    pull_in = false;
+    if (!link_phase_active(&ph)) return true;
+    if (relocked && !meas.long_valid) return true;   // the VCXO is held where it was (F4)
+    float d = soft_vcxo_current_ppm() - input_servo_feedforward_ppm();
+    // Not yet: the decoder keeps up (deliver() drops the rows), so the
+    // prefill starts from current frames once the VCXO is there.
+    // The long window first (a 2 s span, about 1 ppm): an anchor on the 32 ms
+    // windows would be pushed off by the feed-forward's step when it arrives.
+    pull_in = !meas.long_valid || input_servo_feedforward_ppm() == 0.0f ||
+              d <= -LINK_RATE_READY_PPM || d >= LINK_RATE_READY_PPM;
+    return !pull_in;
+}
+
+void link_input_on_drain(void) {
+    link_phase_drain(&ph);
+    drop_rows = 0;
+    pull_in = false;
+    // The prefill target follows the delay (output_latency_apply() asks
+    // link_input_ring_target()); the outputs are drained, so this is inside
+    // the reset bracket that call requires.
+    output_latency_apply(audio_state.freq ? audio_state.freq : 48000u, INPUT_SOURCE_LINK);
+    if (link_phase_active(&ph)) ph.state = LINK_PHASE_ANCHORING;
+}
+
+bool link_input_anchor_ready(void) {
+    if (!link_phase_active(&ph) || !ph.timeline) return true;
+    float since;
+    if (!arrival_since(ph.first, &since)) return false;
+    float wait = link_phase_anchor_wait(&ph, since);
+    // The last millisecond in place (main-loop passes are shorter), so the
+    // start lands on the delay to a fraction of a frame; the verification
+    // corrects a late start, the servo trims the rest.
+    if (wait > (float)(detected_rate / 1000u)) return false;
+    uint32_t t0 = time_us_32();
+    while (wait > 0.0f && time_us_32() - t0 < ANCHOR_SPIN_US) {
+        if (!arrival_since(ph.first, &since)) return false;
+        wait = link_phase_anchor_wait(&ph, since);
+    }
+    return true;
+}
+
+void link_input_on_enabled(void) {
+    link_phase_started(&ph);
+}
+
+// F now: phase-locked from the published reference and the live DMA
+// position; in holdover extrapolated at the stream's rate.
+static uint64_t frame_now(bool *valid) {
+    *valid = false;
+    if (!running) return 0;
+    if (ph.hold) {
+        *valid = true;
+        uint32_t fs = detected_rate ? detected_rate : audio_state.freq;
+        return hold_f + (time_us_64() - hold_us) * fs / 1000000u;
+    }
+    if (phase != PH_LOCKED) return 0;
+    *valid = true;
+    float since;
+    if (arrival_since(pub_f, &since) && since >= 0.0f) return pub_f + (uint64_t)since;
+    return lf.frame;
+}
+
+void link_input_get_frame_counter(uint8_t o[LINK_FRAME_COUNTER_LEN]) {
+    memset(o, 0, LINK_FRAME_COUNTER_LEN);
+    uint32_t save = save_and_disable_interrupts();
+    bool valid;
+    uint64_t f = frame_now(&valid);
+    uint32_t t = time_us_32();
+    float fill;
+    uint32_t played = 0;
+    if (!slot_ring_play_position(0, &fill, &played)) played = 0;
+    restore_interrupts(save);
+    put32(o, (uint32_t)f);
+    put32(o + 4, (uint32_t)(f >> 32));
+    put32(o + 8, t);
+    put32(o + 12, played);
+}
+
+bool link_input_apply(const uint8_t p[LINK_APPLY_LEN]) {
+    link_apply_op_t op;
+    if (!link_apply_parse(&apply_lim, p, &op)) return false;
+    if (op.op == LINK_APPLY_CANCEL_ALL) {
+        while (aq.n) {
+            link_apply_pop(&aq, &op);
+            apply_report(op.op, LINK_APPLY_CANCELLED, op.frame);
+        }
+        return true;
+    }
+    if (link_input_get_state() != LINK_INPUT_LOCKED) return false;   // no lock, no F
+    return link_apply_push(&aq, &op);
+}
+
+void link_input_get_apply(uint8_t o[LINK_APPLY_LEN]) {
+    link_apply_in(&aq, o);
+}
+
 void link_input_get_info(uint8_t o[LINK_INFO_LEN]) {
     memset(o, 0, LINK_INFO_LEN);
     o[0] = 1;                               // receiver
@@ -863,8 +1402,10 @@ void link_input_get_info(uint8_t o[LINK_INFO_LEN]) {
     o[5] = LINK_SLOTS_LEN;
     o[8] = link_config[LINK_CFG_RX_PIN] == 0xFF ? LINK_RX_PIN_DEFAULT : link_config[LINK_CFG_RX_PIN];
     o[9] = 0xFF;                            // no repeater
-    put32(o + 12, 1u << 5);                 // LOS_PIN; PHASE_LOCK / APPLY_AT_FRAME come with LK6
-    // d_local_min / d_local_max (16-19): LK6.
+    put32(o + 12, 1u << 0 | 1u << 1 | 1u << 5);  // PHASE_LOCK, APPLY_AT_FRAME, LOS_PIN
+    refresh_limits();
+    put16(o + 16, ph.d_min);
+    put16(o + 18, ph.d_max);
 }
 
 static void current_stats(link_rx_stats_t *s) {
@@ -883,7 +1424,8 @@ void link_input_get_status(uint8_t o[LINK_STATUS_LEN]) {
     o[5] = (running && los_pin != 0xFF) ? (gpio_get(los_pin) ? 1 : 0) : 0xFF;
     o[6] = sf_valid ? sf_last.sender : 0;
     o[7] = sf_valid ? sf_last.flags : 0;
-    uint64_t f = locked ? lf.frame : 0;
+    bool fv;
+    uint64_t f = frame_now(&fv);
     put32(o + 8, (uint32_t)f);
     put32(o + 12, (uint32_t)(f >> 32));
     link_rx_stats_t s;
@@ -895,7 +1437,7 @@ void link_input_get_status(uint8_t o[LINK_STATUS_LEN]) {
     put32(o + 32, s.bit_slips);
     put32(o + 36, s.superframe_errors);
     putf(o + 40, soft_vcxo_current_ppm());
-    putf(o + 44, 0.0f);                     // phase error: LK6
+    putf(o + 44, (ph.state == LINK_PHASE_LOCKED || ph.state == LINK_PHASE_PENDING) && ph.e_valid ? ph.e : 0.0f);
     put16(o + 48, slot_ring_fill_frames(0));
 }
 
@@ -922,11 +1464,16 @@ void link_input_get_diag(uint8_t o[LINK_DIAG_LEN]) {
     o[1] = (uint8_t)(lf.p & 31u);
     float ff = 0.0f, actual = link_meas_hz(&meas);
     if (running && detected_rate && actual > 0.0f) ff = (actual / (float)detected_rate - 1.0f) * 1e6f;
-    putf(o + 4, ff);                        // ppm_ff; ppm_phase and integral (8, 12): LK6
+    putf(o + 4, ff);                        // ppm_ff
+    putf(o + 8, ph.pi.trim - ph.pi.integ);  // ppm_phase (KP x smoothed e)
+    putf(o + 12, ph.pi.integ);
     uint64_t bits = running ? ring_bits_read(NULL) : 0;
     put32(o + 16, (uint32_t)((bits / 8u) % (LINK_RING_WORDS * 4u)));
     put32(o + 20, (uint32_t)((uint64_t)lf.p / 8u % (LINK_RING_WORDS * 4u)));
-    put32(o + 24, 0);                       // output DMA words consumed: LK6
+    float fill;
+    uint32_t played = 0;
+    if (!slot_ring_play_position(0, &fill, &played)) played = 0;
+    put32(o + 24, played);                  // output frames played (slot 0)
     put32(o + 28, running ? dma_hw->ch[LINK_DMA_DATA].transfer_count : 0);
     if (scan_valid) {
         o[32] = (uint8_t)scan.lo;

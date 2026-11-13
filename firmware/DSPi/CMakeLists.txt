@@ -231,6 +231,7 @@ if (DSPI_LINK AND NOT PICO_PLATFORM STREQUAL "rp2040")
     target_sources(DSPi PRIVATE
         link/link_codec.c
         link/link_fast.c
+        link/link_phase.c
         link/bench_trim.c
         link/link_fast_m33.S
         link/link_fast_m33_loop.S

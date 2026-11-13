@@ -54,6 +54,11 @@ static inline uint64_t link_ring_count(uint32_t idx, uint32_t ring_words, uint32
 
 #define LINK_MEAS_WINDOW_US     32000u      // fast window
 #define LINK_MEAS_LONG_HALF_US  8000000ull  // long window: anchors rotate every 8 s, span 8-16 s
+// -- WP LK6 -- The long window is used from a 2 s span on (it grows to 8 s,
+// then rotates): about 1 ppm at L1 after 2 s, where the smoothed 32 ms
+// windows wander by several ppm (word and microsecond quantisation).  The
+// phase lock anchors once the VCXO has pulled in to this estimate.
+#define LINK_MEAS_LONG_MIN_US   2000000ull
 
 typedef struct {
     uint64_t win_us, win_bits;      // fast window start; win_us 0: no sample yet
@@ -93,13 +98,13 @@ static inline void link_meas_sample(link_meas_t *m, uint64_t us, uint64_t bits, 
         m->long_bits[1] = bits;
     }
     uint64_t long_span = us - m->long_us[0];
-    if (long_span >= LINK_MEAS_LONG_HALF_US) {
+    if (long_span >= LINK_MEAS_LONG_MIN_US) {
         m->hz_long = (float)(bits - m->long_bits[0]) * k / (float)long_span;
         m->long_valid = true;
     }
 }
 
-// The servo's input: the long window once it spans 8 s, the fast one before;
+// The servo's input: the long window once it spans 2 s, the fast one before;
 // 0 while nothing is measured.
 static inline float link_meas_hz(const link_meas_t *m) {
     return m->long_valid ? m->hz_long : m->hz_smooth;

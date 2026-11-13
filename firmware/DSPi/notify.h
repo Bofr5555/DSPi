@@ -124,6 +124,12 @@
 // F_low32_LE].  Announced by NOTIFY_FEAT_LINK_STATE (link builds only).
 #define NOTIFY_EVT_LINK_STATE        0xE1
 
+// Apply result (extension_channel_spec.md 2.8.12, WP LK6): one per completed
+// apply-at-frame op (applied, late, cancelled, refused), not rate-limited.
+// Packet (12 bytes): [ver=2, evt=0xE2, flags=0, seq, op, result, 0, 0,
+// target_F_low32_LE].  Announced by NOTIFY_FEAT_APPLY_RESULT (link builds only).
+#define NOTIFY_EVT_APPLY_RESULT      0xE2
+
 // v2 protocol version byte (first byte of every v2 packet)
 #define NOTIFY_V2_VERSION            0x02
 
@@ -163,8 +169,12 @@ typedef enum {
 // NOTIFY_EVT_LINK_STATE (0xE1) is sent on link lock, loss and re-anchor.
 #define NOTIFY_FEAT_LINK_STATE       (1u << 2)
 
+// NOTIFY_EVT_APPLY_RESULT (0xE2) is sent once per completed apply-at-frame op.
+#define NOTIFY_FEAT_APPLY_RESULT     (1u << 3)
+
 #if defined(DSPI_LINK) && DSPI_LINK
-#define NOTIFY_FEATURES              (NOTIFY_FEAT_BULK_SOURCE | NOTIFY_FEAT_CLIP_EVENT | NOTIFY_FEAT_LINK_STATE)
+#define NOTIFY_FEATURES              (NOTIFY_FEAT_BULK_SOURCE | NOTIFY_FEAT_CLIP_EVENT | NOTIFY_FEAT_LINK_STATE | \
+                                      NOTIFY_FEAT_APPLY_RESULT)
 #else
 #define NOTIFY_FEATURES              (NOTIFY_FEAT_BULK_SOURCE | NOTIFY_FEAT_CLIP_EVENT)
 #endif
@@ -255,6 +265,9 @@ void notify_clip_service(uint32_t now_ms);
 
 // Link state event (NOTIFY_EVT_LINK_STATE); the caller rate-limits.
 void notify_push_link_state(uint8_t state, uint8_t cls, uint8_t reason, uint32_t frame_low);
+
+// Apply result event (NOTIFY_EVT_APPLY_RESULT); never rate-limited.
+void notify_push_apply_result(uint8_t op, uint8_t result, uint32_t frame_low);
 
 // ---------------------------------------------------------------------------
 // Consumers

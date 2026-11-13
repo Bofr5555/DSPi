@@ -3,6 +3,9 @@
 #include <math.h>
 #include "pdm_generator.h"
 #include "link_input.h"
+#if DSPI_LINK
+#include "audio_pipeline.h"   // pipeline_click_inject (WP LK6)
+#endif
 #include "rta.h"
 #include "dsp_pipeline.h"
 #include "crossover.h"
@@ -709,6 +712,9 @@ static void __not_in_flash_func(eq_worker_loop)() {
         // convert rows 2-7 to S24 in place first, so ADAT always sees
         // converted samples; otherwise fuse
         // convert+interleave per pair.  Then interleave pairs 1-3.
+#if DSPI_LINK
+        pipeline_click_inject(buf_out, CORE1_EQ_FIRST_OUTPUT, CORE1_EQ_LAST_OUTPUT);
+#endif
         bool finalize_s24 = core1_eq_work.finalize_s24 != 0;
         if (finalize_s24) {
             for (int out = CORE1_EQ_FIRST_OUTPUT; out <= CORE1_EQ_LAST_OUTPUT; out++)

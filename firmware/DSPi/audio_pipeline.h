@@ -83,6 +83,25 @@ extern int32_t buf_l[192], buf_r[192];
 extern int32_t buf_out[NUM_OUTPUT_CHANNELS][192];
 #endif
 
+#if defined(DSPI_LINK) && DSPI_LINK
+// -- WP LK6 --
+// Link apply op CLICK: the output that gets a one-sample impulse of
+// PIPELINE_CLICK_LEVEL (-20 dBFS) at sample 0 of the next processed block,
+// -1 for none.  link_input.c sets it
+// just before the block that starts at the op's frame and clears it after;
+// each core injects into the outputs it finalizes, after delay and limiter.
+extern volatile int8_t pipeline_click_output;
+#define PIPELINE_CLICK_LEVEL 0.1f      // -20 dBFS (coordinator 2026-11-13, review lk6 F5)
+static inline void pipeline_click_inject(float (*out)[192], int first, int last) {
+    int c = pipeline_click_output;
+    if (c >= first && c <= last) out[c][0] = PIPELINE_CLICK_LEVEL;
+}
+// Slot ring position for the link phase servo: the fill in frames to the
+// reader's DMA word (fractional) and the frames played since the ring reset.
+// False when no valid reading exists.
+bool slot_ring_play_position(uint slot, float *fill, uint32_t *played);
+#endif
+
 // Buffer statistics helpers (used by vendor_commands.c and pipeline)
 uint get_slot_consumer_fill(uint slot);
 // Sample-granular fill in buffer units (0..16) for the clock servo;

@@ -228,7 +228,7 @@ Current firmware answers `01 00 00 00`.
 
 ### 2.8 Link block (`0x8000`-`0x80FF`)
 
-*Status: specified 2026-11-12 (WP LK7). The sender side is implemented by WP LK4 (`firmware/DSPi-Sender`, `Documentation/Features/link_sender.md`; host-tested, not yet run on hardware). Receiver side partly implemented by WP LK5 (2026-11-13, HW-untested): RP2350 builds with `DSPI_LINK` list and serve `0x8000` INFO, `0x8001` STATUS, `0x8002` CONFIG, `0x8003` SLOTS, `0x8008` CTRL_MSG (IN), `0x8009` STATS_RESET, `0x800A` DIAG and event `0xE1` (`EXT_NOTIFY_FEATURES` bit 2). `0x8004`-`0x8006`, `0xE2`, `d_local_min/max` and the phase fields are LK6's (they read 0 or are not listed). No repeater: `tx_pin` and `txdis_pin` must be `0xFF`. The LOS pin is reported in STATUS, not acted on. The receiver's behaviour and limits are in `link_receiver.md`. The design is in the SYS2 link spec, section 5.3; `link_protocol_spec.md` (WP LK1) will hold the line protocol.*
+*Status: specified 2026-11-12 (WP LK7). The sender side is implemented by WP LK4 (`firmware/DSPi-Sender`, `Documentation/Features/link_sender.md`; host-tested, not yet run on hardware). Receiver side implemented by WP LK5 and WP LK6 (2026-11-13, HW-untested): RP2350 builds with `DSPI_LINK` list and serve `0x8000`-`0x8006`, `0x8008` CTRL_MSG (IN), `0x8009` STATS_RESET, `0x800A` DIAG and events `0xE1` and `0xE2` (`EXT_NOTIFY_FEATURES` bits 2 and 3); `EXT_LINK_INFO.features` is `PHASE_LOCK | APPLY_AT_FRAME | LOS_PIN`. On a receiver, op `SYNC_PULSE` completes as `refused` (3), because `EXT_LINK_CONFIG` has no sync GPIO, and so does `CLICK` on the PDM sub output or on a muted unit; `CLICK` plays at -20 dBFS (coordinator 2026-11-13, review lk6). The holdover (state 3) exists in phase lock only; in mode 0 a loss resets as LK5 did. No repeater: `tx_pin` and `txdis_pin` must be `0xFF`. The LOS pin is reported in STATUS, not acted on. The receiver's behaviour and limits are in `link_receiver.md`. The design is in the SYS2 link spec, section 5.3; `link_protocol_spec.md` (WP LK1) will hold the line protocol.*
 
 These sub-commands configure and observe the multi-unit audio link. One sender (the master clock) sends an 8b/10b frame stream to optical receivers, and every receiver plays link frame F a configured number of frames, D, after F arrives. The IDs are in this fork's private range (1.2), so upstream will not assign them. Everything below applies to every link ID.
 
@@ -278,7 +278,7 @@ IN only, 32 bytes. Says what the unit is and what its link can do. The values ar
 | 18 | 2 | `d_local_max` | receiver: the largest effective `D_local` the output rings can hold. Sender: 0 |
 | 20 | 12 | reserved | 0 |
 
-`d_local_min` changes when the output latency option (`REQ_OUTPUT_LATENCY` `0x03`) changes. Re-read it after changing the option.
+`d_local_min` changes when the output latency option (`REQ_OUTPUT_LATENCY` `0x03`) changes. Re-read it after changing the option. The firmware (WP LK6) computes both from the option at the current rate: `d_local_min` = the ring fill target + the block cap + 16 frames (SYS2 3.2), `d_local_max` = the output rings' writable span (448 frames) - the block cap. At 48 kHz that is 81..431 for the 1 ms option and 257..399 for the default 4 ms option; at 96 kHz the 1 ms option gives 145..415. The fake device's example below uses SYS2's round figures.
 
 Example (the fake device: a receiver build on GP0, the 1 ms latency option):
 `01 01 07 01 40 08 00 00 00 ff 00 00 23 00 00 00 70 00 00 04 00 ...` (12 more zero bytes): receiver, v1, L1-L3, 1 link, 64 channels, 8 slots, input GP0, no repeater, `PHASE_LOCK | APPLY_AT_FRAME | LOS_PIN`, `D_local` 112..1024.
@@ -384,12 +384,12 @@ Receivers only. **OUT**, 16 bytes, queues one operation for link frame `frame`:
 | 4 | `MASTER_VOLUME` | 0 | dB x 100, -12800..0 |
 | 5 | `OUT_DELAY` | output index | delay in samples, 0..`MAX_DELAY_SAMPLES` - 1 (2047 on RP2350, 1023 on RP2040) |
 | 6 | `RATE` | refused here: a receiver follows the rate its superframes describe (`link_protocol_spec.md` 6.5). Only the sender schedules RATE (2.8.8, 2.8.9) | |
-| 7 | `CLICK` | output index | 0: a one-sample full-scale impulse on that output, for the scope (SYS2 3.5) |
+| 7 | `CLICK` | output index | 0: a one-sample impulse at -20 dBFS on that output, for the scope and the skew measurement (SYS2 3.5). A unit that is muted (`REQ_SET_USER_MUTE`, or a stream with the superframe's system-mute flag) plays none and reports `refused` (3) |
 | 8 | `SYNC_PULSE` | 0 | 0: toggles the unit's sync GPIO |
 
 - **When.** The op acts on the samples of link frame `frame`, so it is heard `D_local` frames after that frame arrives, at the same moment on every phase-locked unit. `MUTE`, `UNMUTE`, `MASTER_VOLUME` and `CLICK` act on exactly that sample. `PRESET_LOAD` and `OUT_DELAY` start there and then proceed as their opcodes do (mute, ramp, refill). A `RATE` that arrives in the superframe is not an op of this queue: the receiver switches its layout at the frame boundary (`link_protocol_spec.md` 6.5) and re-plans its dividers as `perform_rate_change` does.
 - **Queue.** At most 4 ops are pending. An op whose frame has already passed is applied at once and reported `late`.
-- **Refused (STALL / `ERROR`):** an unknown `op`, op 6 `RATE`, an `arg` or `value` outside the table (unused fields must be 0), a nonzero reserved byte, a full queue, or `EXT_LINK_STATUS.state` other than 2 (without a lock there is no F).
+- **Refused (STALL / `ERROR`):** an unknown `op`, op 6 `RATE`, an `arg` or `value` outside the table (unused fields must be 0), a nonzero reserved byte, a full queue, or `EXT_LINK_STATUS.state` other than 2 (without a lock there is no F). `CANCEL_ALL` is accepted in any state.
 - **Two delivery paths.** Ops that should reach every unit (and `RATE`, which only exists there) go through the sender's superframe (`EXT_LINK_CTRL_MSG` OUT on the sender), which has no control-path latency. This sub-command is the per-unit path for values that differ between units.
 
 **IN**, 16 bytes: `u8 pending` (ops queued), `u8 last_op`, `u8 last_result` (0 applied, 1 late, 2 cancelled, 3 refused at apply time, for example an empty preset slot), `u8` reserved, `u64 last_frame` (the target frame of the last op), `u32` reserved. All zero until the first op completes.
@@ -541,7 +541,7 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 | `identify.{c,h}` | identify blink and tone, hardware description; `DSPI_HW_REV` in `CMakeLists.txt` |
 | `reset_info.{c,h}` | reset-cause capture and decoding; `reset_info_capture()` is the first call in `main()` |
 | `config.h` | `FW_FIX_*`, `FW_FIXES` (the `EXT_FIRMWARE_FIXES` value) |
-| planned (LK4-LK6) | `EXT_LINK_*` IDs in `config.h`, the link sub-commands in `ext_ids[]` / `ext_set_len()` / the handlers, `NOTIFY_FEAT_LINK_STATE` / `NOTIFY_FEAT_APPLY_RESULT` and the `0xE1` / `0xE2` pushers in `notify.{c,h}`, `link_rx.c` / `link_tx.c` |
+| `link_input.{c,h}`, `link/link_phase.{c,h}` | the receiver's link block (WP LK5, LK6): `EXT_LINK_*` IDs in `config.h`, the sub-commands in `ext_ids[]` / `ext_set_len()` / the handlers, `NOTIFY_FEAT_LINK_STATE` / `NOTIFY_FEAT_APPLY_RESULT` and the `0xE1` / `0xE2` pushers in `notify.{c,h}`; `link_receiver.md` |
 | `tools/midi_ctrl/fake_device.py` | `FakeLink`: the control-plane model of 2.8 (host development and tests) |
 | `firmware/DSPi-Sender/sender_vendor.c` | the sender build's link block (WP LK4): 0x0003, 0x8000-0x8002, 0x8005, 0x8007-0x800A; `sender_link.c` holds the `EXT_LINK_TX` / `EXT_LINK_CTRL_MSG` parsing and the RATE scheduling |
 
@@ -556,6 +556,8 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 - 2026-11-12: `0x0005` `EXT_RESET_INFO` added.
 - 2026-11-12: `0x0006` `EXT_FIRMWARE_FIXES` added (bit 0 `FW_FIX_BULK_DB_POWF`).
 - 2026-11-13: the sender side of the link block implemented (WP LK4, `firmware/DSPi-Sender`); `EXT_LINK_DIAG` sender layout `0x81`.
+- 2026-11-13: fixups after review lk6: `CLICK` at -20 dBFS and not on a muted unit (2.8.7); `CANCEL_ALL` accepted without a lock.
+- 2026-11-13: the receiver's phase lock (WP LK6): `0x8004` `EXT_LINK_PHASE`, `0x8005` `EXT_FRAME_COUNTER`, `0x8006` `EXT_APPLY_AT_FRAME`, event `0xE2` and `EXT_NOTIFY_FEATURES` bit 3, `d_local_min/max`, the phase fields of STATUS and DIAG, and state 3 (holdover); `EXT_LINK_PHASE` persists in the V26 link block. On receivers `SYNC_PULSE` and a PDM-sub `CLICK` complete as `refused`.
 - 2026-11-13: fixups LK45F (review lk45): `EXT_LINK_STATUS` offset 50 `hop_delay_frames`, and `hops_offset` is the hub's compensation for re-emitters slower than one frame (`link_protocol_spec.md` 7.2); a receiver plays silence on muted and test-pattern streams (2.8.3); `EXT_LINK_TX` defines "a change" (2.8.8).
 - 2026-11-13: link block aligned with `link_protocol_spec.md` (review lk): counter definitions, `EXT_LINK_DIAG` offsets 32-63 (trim scan and bench counters instead of a histogram), per-unit `RATE` refused, `EXT_LINK_CTRL_MSG` scheduling rules, capacity from `link_max_channels()`, `class` changes not announced in-band, 0xE1 reason 3 renamed `FRAME_ERRORS`.
 - 2026-11-12: link block `0x8000`-`0x800A` specified (WP LK7, SYS2 5.3), with `EXT_NOTIFY_FEATURES` bits 2 and 3 and events `0xE1` / `0xE2`; `0x8000`-`0x80FF` becomes the fork's link range. No firmware implements it yet.

@@ -35,6 +35,16 @@ static __force_inline bool input_servo_tick_due(uint32_t *last_us) {
 // wrong nominal divider.
 void input_servo_apply(float actual_freq, int fill_slot);
 
+// The link input's phase lock (WP LK6): the ppm feed-forward from the
+// measured rate plus the caller's trim (its phase servo), slew-limited like
+// input_servo_apply().  Flash; once per tick.
+void input_servo_apply_trim(float actual_freq, float trim_ppm);
+
+// The last rate feed-forward either apply function computed (ppm), 0 before
+// the first tick: with soft_vcxo_current_ppm() it says whether the VCXO has
+// pulled in to the input's rate (the link anchor waits for that).
+float input_servo_feedforward_ppm(void);
+
 // Zero the integrator and park the VCXO at nominal. Call only when tracking
 // starts or stops: a relock holds the last-good trim, and a call on the
 // pipeline-reset path would park a locked VCXO mid-lock.

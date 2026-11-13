@@ -206,6 +206,10 @@ LINK_COLD = {
     "set_layout", "lf_clean_fixed", "lf_clean", "bank8", "bank_k",
     # link_input.c's decode service: a slot change and the restart after a gap.
     "link_fast_set_slots", "link_fast_set_bank_mask", "link_fast_restart",
+    # -- WP LK6 -- phase lock: the servo tick (once per 75 ms) and the delivery
+    # paths off the steady state (an apply op splitting a block, the holdover,
+    # placing rows after a relock or an anchor correction).
+    "phase_servo_tick", "deliver_slow", "deliver_hold", "deliver_place",
 }
 
 # RP2040 float / integer-divider shims. Their linker names vary by build; the

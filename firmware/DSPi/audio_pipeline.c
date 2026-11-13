@@ -726,6 +726,9 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // convert to S24 in place first, so ADAT always sees converted
         // samples; otherwise fuse convert+interleave and skip the in-place
         // pass.  Then S/PDIF pair 0.
+#if DSPI_LINK
+        pipeline_click_inject(buf_out, 0, CORE1_EQ_FIRST_OUTPUT - 1);
+#endif
         if (finalize_s24) {
             output_block_to_s24_inplace(buf_out[0], sample_count);
             output_block_to_s24_inplace(buf_out[1], sample_count);
@@ -864,6 +867,9 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // Finalize outputs 0-7 (see output_s24.h).  ADAT active: convert to
         // S24 in place first, so ADAT always sees converted samples; otherwise
         // fuse convert+interleave per pair and skip the in-place pass.
+#if DSPI_LINK
+        pipeline_click_inject(buf_out, 0, NUM_SPDIF_INSTANCES * 2 - 1);
+#endif
         if (finalize_s24) {
             for (int out = 0; out < NUM_SPDIF_INSTANCES * 2; out++)
                 output_block_to_s24_inplace(buf_out[out], sample_count);
@@ -1797,6 +1803,40 @@ uint get_slot_consumer_fill(uint slot) {
 bool get_slot_consumer_fill_frames(uint slot, uint32_t *frames) {
     return slot_ring_fill(slot, frames);
 }
+
+#if DSPI_LINK
+volatile int8_t pipeline_click_output = -1;
+
+// Flash: the link servo reads it once per tick, the anchor a few times.
+bool slot_ring_play_position(uint slot, float *fill, uint32_t *played) {
+    if (output_type_switch_in_progress) return false;
+    uint32_t wr, frames, rem, wpf;
+    if (output_types[slot] == OUTPUT_TYPE_I2S) {
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[slot];
+        if (!inst || !inst->ring) return false;
+        uint32_t save = save_and_disable_interrupts();
+        (void)audio_i2s_ring_consumed_words(inst);
+        wr = inst->wr_frames;
+        frames = inst->consumed_frames;
+        rem = inst->consumed_word_rem;
+        restore_interrupts(save);
+        wpf = 2u;
+    } else {
+        audio_spdif_instance_t *inst = spdif_instance_ptrs[slot];
+        if (!inst || !inst->ring) return false;
+        uint32_t save = save_and_disable_interrupts();
+        (void)audio_spdif_ring_consumed_words(inst);
+        wr = inst->wr_frames;
+        frames = inst->consumed_frames;
+        rem = inst->consumed_word_rem;
+        restore_interrupts(save);
+        wpf = 4u;
+    }
+    *played = frames;
+    *fill = (float)(int32_t)(wr - frames) - (float)rem / (float)wpf;
+    return true;
+}
+#endif
 
 uint32_t slot_ring_fill_frames(uint slot) {
     uint32_t fill;

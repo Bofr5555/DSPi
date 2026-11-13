@@ -74,6 +74,7 @@ static float fill_smooth = 0.0f;
 static uint32_t fill_smooth_target_frames = 0;
 static float fill_integral_ppm = 0.0f;
 static float last_cmd_ppm = 0.0f;
+static float last_ff_ppm = 0.0f;
 
 #if DSPI_CLOCK_DIAG
 // Diagnostic snapshot (see input_servo_get_diag).  Plain stores from the
@@ -99,6 +100,7 @@ void input_servo_apply(float actual_freq, int fill_slot) {
     // that transient.
     if (ppm > 2000.0f || ppm < -2000.0f) return;
 
+    last_ff_ppm = ppm;
 #if DSPI_CLOCK_DIAG
     float diag_ff = ppm;
     int32_t diag_fill_error = 0;
@@ -161,7 +163,47 @@ void input_servo_apply(float actual_freq, int fill_slot) {
     soft_vcxo_set_ppm(ppm);
 }
 
+void input_servo_apply_trim(float actual_freq, float trim_ppm) {
+    if (actual_freq < 20000.0f || actual_freq > 200000.0f) return;
+    uint32_t freq_nom = audio_state.freq;
+    if (freq_nom == 0) return;
+    uint32_t div = audio_base_divider_16_8(freq_nom);
+    float ppm = ((actual_freq * (float)div) / (float)clock_get_hz(clk_sys) - 1.0f) * 1e6f;
+    if (ppm > 2000.0f || ppm < -2000.0f) return;
+    last_ff_ppm = ppm;
+#if DSPI_CLOCK_DIAG
+    float diag_ff = ppm;
+#endif
+    ppm += trim_ppm;
+    // The fill loop is idle while the phase loop runs; restart it at the
+    // target if the input falls back to it.
+    fill_integral_ppm = 0.0f;
+    fill_smooth = servo_fill_target();
+    if (ppm > last_cmd_ppm + SERVO_SLEW_PPM_PER_TICK)
+        ppm = last_cmd_ppm + SERVO_SLEW_PPM_PER_TICK;
+    else if (ppm < last_cmd_ppm - SERVO_SLEW_PPM_PER_TICK)
+        ppm = last_cmd_ppm - SERVO_SLEW_PPM_PER_TICK;
+    last_cmd_ppm = ppm;
+#if DSPI_CLOCK_DIAG
+    diag_servo.actual_freq  = actual_freq;
+    diag_servo.ppm_ff       = diag_ff;
+    diag_servo.ppm_total    = ppm;
+    diag_servo.integral_ppm = trim_ppm;
+    diag_servo.fill_error   = 0;
+    diag_servo.fill_slot    = -1;
+    if (ppm < diag_servo.ppm_min) diag_servo.ppm_min = ppm;
+    if (ppm > diag_servo.ppm_max) diag_servo.ppm_max = ppm;
+    diag_servo.ticks++;
+#endif
+    soft_vcxo_set_ppm(ppm);
+}
+
+float input_servo_feedforward_ppm(void) {
+    return last_ff_ppm;
+}
+
 void input_servo_reset(void) {
+    last_ff_ppm = 0.0f;
     fill_smooth_target_frames = output_ring_target_frames;
     fill_smooth = servo_fill_target();   // seed at target so the IIR has no start transient
     fill_integral_ppm = 0.0f;
