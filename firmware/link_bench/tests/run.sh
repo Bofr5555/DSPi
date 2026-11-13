@@ -44,3 +44,8 @@ done
 $CC $CFLAGS -DPICO_NO_HARDWARE=1 -I"$out/gen" -I"$root/tools/link_rx_test" \
     -o "$out/test_bench_model" "$here/test_bench_model.c" $SRC -lm
 "$out/test_bench_model" "$@"
+# WP LK5: the production receiver against the reference on the model's output.
+# shellcheck disable=SC2086
+$CC $CFLAGS -DPICO_NO_HARDWARE=1 -I"$out/gen" -I"$root/tools/link_rx_test" \
+    -o "$out/test_fast_model" "$here/test_fast_model.c" $SRC "$root/firmware/DSPi/link/link_fast.c" -lm
+"$out/test_fast_model"
