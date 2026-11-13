@@ -202,4 +202,8 @@ extern volatile uint32_t preset_mute_counter;
 // input is actually processed, so IRQ-off flash blackouts cost nothing.
 #define PRESET_MUTE_HOLD_MARGIN_MS  120u
 
+// Load the link receiver's stored configuration (V26 directory block) into
+// link_config / link_slots (audio_input.h); factory values when none.
+void preset_load_link_config(void);
+
 #endif // FLASH_STORAGE_H

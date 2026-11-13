@@ -44,6 +44,7 @@
 #include "upmix.h"
 #include "adat_output.h"
 #include "adat_input.h"
+#include "link_input.h"
 #include "input_source_names.h"
 #include "loopback.h"   // DSPI_LOOPBACK glitch counters (self-guarded; empty otherwise)
 #include "core_vreg.h"
@@ -407,6 +408,9 @@ static bool pin_used_by_fixed_peripheral_except_mck(uint8_t pin, uint8_t exclude
     if (uart_ctrl_owns_pin(pin)) return true;                 // UART control (if live)
     if (i2c_ctrl_owns_pin(pin)) return true;                  // I2C control (if live)
     if (control_surfaces_owns_pin(pin)) return true;         // Control Surfaces (live bindings)
+#if DSPI_LINK
+    if (link_input_owns_pin(pin)) return true;                // link receiver RX / LOS (LINK source, enabled)
+#endif
     return false;
 }
 
@@ -573,6 +577,15 @@ static const uint16_t ext_ids[] = {
     EXT_IDENTIFY,
     EXT_RESET_INFO,
     EXT_FIRMWARE_FIXES,
+#if DSPI_LINK
+    EXT_LINK_INFO,
+    EXT_LINK_STATUS,
+    EXT_LINK_CONFIG,
+    EXT_LINK_SLOTS,
+    EXT_LINK_CTRL_MSG,
+    EXT_LINK_STATS_RESET,
+    EXT_LINK_DIAG,
+#endif
 };
 
 // Exact OUT payload length of a sub-command; 0 = no OUT form (STALL).
@@ -581,6 +594,11 @@ static uint16_t ext_set_len(uint16_t id) {
         case EXT_CROSSFEED_PAIR_MAP: return CROSSFEED_MAP_PAIRS;   // uint8[4]
         case EXT_CORE_VREG:          return 2;                     // {op, value}
         case EXT_IDENTIFY:           return sizeof(IdentifyRequest);
+#if DSPI_LINK
+        case EXT_LINK_CONFIG:        return LINK_CFG_LEN;
+        case EXT_LINK_SLOTS:         return LINK_SLOTS_LEN;
+        case EXT_LINK_STATS_RESET:   return 1;
+#endif
         default:                     return 0;
     }
 }
@@ -625,6 +643,26 @@ static bool ext_handle_set(uint16_t id, const uint8_t *p, uint16_t len) {
             // generator; refused (STALL) for a bad tone output or while the
             // generator runs (identify.h).
             return identify_request(p);
+#if DSPI_LINK
+        case EXT_LINK_CONFIG: {
+            // 2.8.3: a pin the live configuration already uses for something
+            // else is refused; the link's own current pins are not "in use"
+            // against themselves (link_input_owns_pin is consulted only for
+            // other functions, inside is_pin_in_use).
+            const uint8_t pins[2] = { p[LINK_CFG_RX_PIN] == 0xFF ? LINK_RX_PIN_DEFAULT : p[LINK_CFG_RX_PIN],
+                                      p[LINK_CFG_LOS_PIN] };
+            for (int i = 0; i < 2; i++) {
+                if (pins[i] == 0xFF) continue;
+                if (link_input_owns_pin(pins[i])) continue;
+                if (is_pin_in_use(pins[i], 0xFF) || i2s_clock_pin_claimed(pins[i])) return false;
+            }
+            return link_input_set_config(p);
+        }
+        case EXT_LINK_SLOTS:
+            return link_input_set_slots(p);
+        case EXT_LINK_STATS_RESET:
+            return link_input_stats_reset(p[0]);
+#endif
     }
     return false;
 }
@@ -674,6 +712,14 @@ static bool ext_handle_get(uint16_t id, uint16_t wLength, uint8_t *resp) {
             n = sizeof(st);
             break;
         }
+#if DSPI_LINK
+        case EXT_LINK_INFO:     link_input_get_info(resp);     n = LINK_INFO_LEN;     break;
+        case EXT_LINK_STATUS:   link_input_get_status(resp);   n = LINK_STATUS_LEN;   break;
+        case EXT_LINK_CONFIG:   memcpy(resp, link_config, LINK_CFG_LEN);  n = LINK_CFG_LEN;   break;
+        case EXT_LINK_SLOTS:    memcpy(resp, link_slots, LINK_SLOTS_LEN); n = LINK_SLOTS_LEN; break;
+        case EXT_LINK_CTRL_MSG: link_input_get_ctrl_msg(resp); n = LINK_CTRL_MSG_LEN; break;
+        case EXT_LINK_DIAG:     link_input_get_diag(resp);     n = LINK_DIAG_LEN;     break;
+#endif
         case EXT_RESET_INFO: {
             ResetInfo ri;
             reset_info_get(&ri);

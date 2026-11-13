@@ -45,6 +45,14 @@
 #define LINK_FAST_M33 0
 #endif
 
+// LINK_FAST_M33_SW 1: also the assembly bank decoder with the table CRC-16
+// (lf_bank8_sw_m33).  Off in DSPi, where the DMA sniffer does the CRC and the
+// C decoder in flash is the fallback when the sniffer fails its self-test;
+// on in the bench image, which measures both.
+#ifndef LINK_FAST_M33_SW
+#define LINK_FAST_M33_SW 0
+#endif
+
 // What the assembly bank decoder reads (offsets fixed: link_fast_m33.S).
 typedef struct {
     const uint32_t *dec;
@@ -183,6 +191,12 @@ void link_fast_init(link_fast_t *f, const volatile uint32_t *ring, uint32_t ring
 // Returns the number of frames delivered.
 LINK_FAST_HOT unsigned link_fast_run(link_fast_t *f, uint64_t avail_bits, uint32_t search_budget_bits);
 
+// Start over in SEARCH at start_bit with class cls and zeroed counters,
+// keeping the tables, the ring, the callback, the bank mask, the slots, the
+// output block and the CRC channel (link_fast_init() without rebuilding the
+// tables).  Safe on whichever core decodes.
+void link_fast_restart(link_fast_t *f, unsigned cls, uint64_t start_bit);
+
 // Change the banks to decode (takes effect at the next frame).
 void link_fast_set_bank_mask(link_fast_t *f, uint8_t bank_mask);
 
@@ -191,7 +205,22 @@ void link_fast_set_bank_mask(link_fast_t *f, uint8_t bank_mask);
 void link_fast_set_slots(link_fast_t *f, const uint8_t slots[8]);
 
 // Deliver LOCKED frames into out[0..cap) (NULL: no delivery, no limit).
-void link_fast_set_output(link_fast_t *f, int32_t (*out)[8], uint16_t cap);
+// Inline: the decode service sets it on every call.
+static inline void link_fast_set_output(link_fast_t *f, int32_t (*out)[8], uint16_t cap) {
+    f->out = out;
+    f->out_cap = cap;
+    f->out_n = 0;
+}
+
+#if LINK_FAST_M33
+// Clean frames only (48/96 kHz, one full bank, the assembly path): what a
+// second core runs without ever reaching the cold paths in flash.  Returns
+// the frames taken.  link_fast_needs_general() then says whether it stopped
+// at a frame that needs link_fast_run() (bits and output room were there),
+// rather than at the end of the bits or the output block.
+LINK_FAST_HOT unsigned link_fast_run_clean(link_fast_t *f, uint64_t avail_bits);
+LINK_FAST_HOT bool link_fast_needs_general(const link_fast_t *f);
+#endif
 
 #if LINK_FAST_CRC_DMA
 // Use DMA channel ch (configured by the platform for the sniffer: 32-bit,

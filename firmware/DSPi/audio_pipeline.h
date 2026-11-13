@@ -91,6 +91,10 @@ float get_slot_consumer_fill_frac(uint slot);
 // True once the slot's ring holds output_ring_target_frames (the prefill
 // threshold); false while no valid reading exists.
 bool slot_fill_at_target(uint slot);
+
+// Output ring fill of `slot` in frames, 0 when the slot is not set up
+// (EXT_LINK_STATUS.fill_frames).
+uint32_t slot_ring_fill_frames(uint slot);
 // Delivery bounds for one stream-input call: returns the most frames it may
 // deliver and sets *min_frames to the fewest worth a call (the latency option's
 // batch). While the slots are stopped for a prefill both shrink to what brings

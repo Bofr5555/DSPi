@@ -260,6 +260,9 @@ def func(name, crc_sw):
         body = schedule(body)
     g.lines = g.lines[:g.mark] + body + g.lines[end:]
     return "\n".join([
+        # One section per function: a build that never calls one (DSPi uses
+        # only the DMA-CRC decoder) drops it with --gc-sections.
+        '    .section .time_critical.link_m33.%s, "ax", %%progbits' % name,
         "    .global %s" % name,
         "    .type   %s, %%function" % name,
         "    .thumb_func",
@@ -279,7 +282,6 @@ def main():
     .syntax unified
     .cpu    cortex-m33
     .thumb
-    .section .time_critical.link_m33, "ax", %progbits
 """)
     print(func("lf_bank8_sw_m33", True))
     print(func("lf_bank8_dma_m33", False))

@@ -43,6 +43,7 @@ static link_fast_t fx;
 static uint32_t fring[8192];
 static uint32_t lcg_state = 12345;
 static uint32_t rand_chunk_max = 3000;  // random chunks: 1..this many bits
+static bool use_restart;                // decode_fast: link_fast_restart() after a wrong-class init
 static uint32_t lcg(void) {
     lcg_state = lcg_state * 1664525u + 1013904223u;
     return lcg_state >> 8;
@@ -56,7 +57,16 @@ static void decode_fast(const uint8_t *bits, size_t n, unsigned cls, uint8_t mas
     lb->log[0] = 0;
     fast_log_t fl = { lb, origin };
     memset(fring, 0xA5, sizeof(fring));     // stale ring contents must never matter
-    link_fast_init(&fx, fring, ring_words, cls, mask, fast_log_cb, &fl, origin);
+    if (use_restart) {
+        // A decoder of another class that has seen other bits, then restarted:
+        // must be the fresh decoder exactly (link_input.c's link-up steps).
+        link_fast_init(&fx, fring, ring_words, cls % 3u + 1u, mask, fast_log_cb, &fl, 0);
+        link_fast_run(&fx, 4096, 0);
+        fx.stats.crc8_errors = 99;
+        link_fast_restart(&fx, cls, origin);
+    } else {
+        link_fast_init(&fx, fring, ring_words, cls, mask, fast_log_cb, &fl, origin);
+    }
     fx.frame_events = true;
     uint32_t wmask = ring_words - 1u;
     for (size_t at = 0; at < n;) {
@@ -98,11 +108,14 @@ static void check_fast_stream(const char *l, const char *file) {
         { 0, 8192, (1ull << 32) - 32u * 777u },     // random chunks, positions cross 2^32
         { 0, 256, 0 },                              // 1 KB ring: wraps every few frames
         { 640, 256, (1ull << 32) - 32u * 3001u },
+        { 320, 8192, 32u * 4096u },                 // after link_fast_restart() (below)
     };
     for (size_t i = 0; i < sizeof(runs) / sizeof(runs[0]); i++) {
         logbuf_t lb = { got_log, 0, sizeof(got_log) };
         rand_chunk_max = 3000;
+        use_restart = i == sizeof(runs) / sizeof(runs[0]) - 1u;
         decode_fast(bits_b, n, cls, mask, runs[i].chunk, runs[i].ring, runs[i].origin, &lb);
+        use_restart = false;
         CHECK(strcmp(got_log, want_log) == 0,
               "%s %s (chunk %zu ring %u origin %" PRIu64 "): log differs\n got  %.800s\n want %.800s", file, name,
               runs[i].chunk, runs[i].ring, runs[i].origin, got_log, want_log);

@@ -21,7 +21,7 @@ CC=${CC:-cc}
 CFLAGS="-std=c11 -O2 -Wall -Wextra -Werror -I$root/firmware/DSPi/link -I$root/firmware/link_bench"
 SRC="$root/firmware/DSPi/link/link_codec.c $root/firmware/DSPi/link/link_decoder.c
      $root/firmware/link_bench/bench_gen.c $root/firmware/link_bench/bench_check.c
-     $root/firmware/link_bench/bench_trim.c $root/firmware/link_bench/bench_cmd.c"
+     $root/firmware/DSPi/link/bench_trim.c $root/firmware/link_bench/bench_cmd.c"
 
 # shellcheck disable=SC2086
 $CC $CFLAGS -o "$out/test_bench_logic" "$here/test_bench_logic.c" $SRC

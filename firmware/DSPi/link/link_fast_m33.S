@@ -8,8 +8,8 @@
     .syntax unified
     .cpu    cortex-m33
     .thumb
-    .section .time_critical.link_m33, "ax", %progbits
 
+    .section .time_critical.link_m33.lf_bank8_sw_m33, "ax", %progbits
     .global lf_bank8_sw_m33
     .type   lf_bank8_sw_m33, %function
     .thumb_func
@@ -287,6 +287,7 @@ lf_bank8_sw_m33:
     pop     {r4-r11, pc}
     .size   lf_bank8_sw_m33, . - lf_bank8_sw_m33
 
+    .section .time_critical.link_m33.lf_bank8_dma_m33, "ax", %progbits
     .global lf_bank8_dma_m33
     .type   lf_bank8_dma_m33, %function
     .thumb_func

@@ -277,8 +277,9 @@ uint8_t __not_in_flash_func(active_input_channel_count)(void) {
         n = usb_input_channels;
     else if (active_input_source == INPUT_SOURCE_I2S)
         n = i2s_input_channels;
-    else if (active_input_source == INPUT_SOURCE_ADAT)
-        n = 8;                            // ADAT is always 8 channels
+    else if (active_input_source == INPUT_SOURCE_ADAT ||
+             active_input_source == INPUT_SOURCE_LINK)
+        n = 8;                            // ADAT, and the link's 8 slots (EXT_LINK_SLOTS)
     else
         n = NUM_STEREO_INPUTS;            // S/PDIF (and any future stereo source)
     if (n > NUM_INPUT_CHANNELS) n = NUM_INPUT_CHANNELS;
@@ -1795,6 +1796,11 @@ uint get_slot_consumer_fill(uint slot) {
 // Returns false when no valid reading exists.
 bool get_slot_consumer_fill_frames(uint slot, uint32_t *frames) {
     return slot_ring_fill(slot, frames);
+}
+
+uint32_t slot_ring_fill_frames(uint slot) {
+    uint32_t fill;
+    return slot_ring_fill(slot, &fill) ? fill : 0u;
 }
 
 bool slot_fill_at_target(uint slot) {

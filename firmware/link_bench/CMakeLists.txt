@@ -38,7 +38,7 @@ add_executable(link_bench
     link_bench.c
     bench_gen.c
     bench_check.c
-    bench_trim.c
+    ${LINK_BENCH_FW}/DSPi/link/bench_trim.c
     bench_cmd.c
     ${LINK_BENCH_FW}/DSPi/link/link_codec.c
     ${LINK_BENCH_FW}/DSPi/link/link_decoder.c
@@ -51,7 +51,7 @@ if (PICO_PLATFORM MATCHES "rp2350-arm")
     # loop, and the CRC-16 by the DMA sniffer.
     target_sources(link_bench PRIVATE ${LINK_BENCH_FW}/DSPi/link/link_fast_m33.S
                                       ${LINK_BENCH_FW}/DSPi/link/link_fast_m33_loop.S)
-    target_compile_definitions(link_bench PRIVATE LINK_FAST_M33=1 LINK_FAST_CRC_DMA=1)
+    target_compile_definitions(link_bench PRIVATE LINK_FAST_M33=1 LINK_FAST_M33_SW=1 LINK_FAST_CRC_DMA=1)
 endif()
 set_target_properties(link_bench PROPERTIES OUTPUT_NAME link_bench-${LINK_BENCH_CHIP})
 # Only the codec directory: firmware/DSPi itself holds DSPi's tusb_config.h.

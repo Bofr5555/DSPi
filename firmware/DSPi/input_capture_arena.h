@@ -27,6 +27,12 @@
 #define INPUT_ARENA_I2S_WORDS    1024u
 #endif
 #define INPUT_ARENA_SPDIF_WORDS  3072u
+#if PICO_RP2350
+// The link receiver's raw ring (link_input.c): 32 KB, the whole arena.  The
+// arena is only INPUT_ARENA_ALIGN-aligned, so the ring wraps by a second DMA
+// channel that reloads the write address, not by the DMA ring-wrap.
+#define INPUT_ARENA_LINK_WORDS   8192u
+#endif
 
 // Alignment is the largest DMA write-wrap requirement of any member.  Each
 // I2S row is its own wrap region, so row bytes == arena alignment is what
@@ -37,7 +43,16 @@ typedef union {
 #endif
     uint32_t i2s_ring[INPUT_ARENA_I2S_PAIRS][INPUT_ARENA_I2S_WORDS];
     uint32_t spdif_fifo[INPUT_ARENA_SPDIF_WORDS];
+#if PICO_RP2350
+    uint32_t link_ring[INPUT_ARENA_LINK_WORDS];
+#endif
 } __attribute__((aligned(INPUT_ARENA_ALIGN))) InputCaptureArena;
+
+#if PICO_RP2350
+// The link ring takes no more than the I2S rows already do.
+_Static_assert(INPUT_ARENA_LINK_WORDS <= INPUT_ARENA_I2S_PAIRS * INPUT_ARENA_I2S_WORDS,
+               "the link ring must not grow the arena");
+#endif
 
 extern InputCaptureArena input_capture_arena;
 
@@ -46,6 +61,7 @@ typedef enum {
     INPUT_ARENA_SPDIF,
     INPUT_ARENA_I2S,
     INPUT_ARENA_ADAT,
+    INPUT_ARENA_LINK,
 } InputArenaOwner;
 
 // Claim panics unless the arena is free or already held by the same owner:

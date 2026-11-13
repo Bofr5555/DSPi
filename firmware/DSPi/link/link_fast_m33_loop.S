@@ -15,7 +15,7 @@
     .syntax unified
     .cpu    cortex-m33
     .thumb
-    .section .time_critical.link_m33, "ax", %progbits
+    .section .time_critical.link_m33.lf_clean_m33, "ax", %progbits
 
     .equ C_WP,      0       @ word holding the first frame's comma end
     .equ C_N,       4       @ frames allowed
