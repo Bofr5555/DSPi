@@ -523,6 +523,7 @@ typedef struct {
     uint32_t underruns[NU], overruns[NU], lost[NU];
     uint32_t holes[NU], hole_samples[NU], muted_silence[NU], gap_events[NU], events[NU], misstamps[NU], stamped[NU];
     double locked_at[NU];
+    uint32_t rides[NU];
     double lat_after_restart[NU];
     int gaps_at_stop;               // unit 1: GAPs counted from 30 ms before the alt 0 to 100 ms after it
     uint32_t gaps_pre;
@@ -690,9 +691,10 @@ static void run(const scen_t *s, res_t *r) {
         r->misstamps[i] = u->misstamps;
         r->stamped[i] = u->stamped;
         r->locked_at[i] = u->locked_at;
+        r->rides[i] = u->us.diag.rides;
         if (getenv("SIM_DEBUG"))
-            printf("    dbg unit %d: tb valid %d have_c %d n %u n_c %u sofs %u | est seeded %d valid %d n0 %u last %u ppm %.3f | tb_ok %d rej %d ticked %d locked %d | e %.3f integ %.3f trim %.3f\n",
-                   i, u->tb.valid, u->tb.have_c, u->tb.n, u->tb.n_c, u->tb.sofs, u->us.est.seeded, u->us.est.valid,
+            printf("    dbg unit %d: tb valid %d have_c %d n %u n_c %u | est seeded %d valid %d n0 %u last %u ppm %.3f | tb_ok %d rej %d ticked %d locked %d | e %.3f integ %.3f trim %.3f\n",
+                   i, u->tb.valid, u->tb.have_c, u->tb.n, u->tb.n_c, u->us.est.seeded, u->us.est.valid,
                    u->us.est.n[0], u->us.est.last_n, u->us.est.ppm, u->us.tb_ok, u->us.rejected, u->us.ticked,
                    u->us.rate_locked, u->us.ph.e, u->us.ph.pi.integ, u->us.ph.pi.trim);
         unit_sel(u);
@@ -1221,6 +1223,41 @@ int main(int argc, char **argv) {
             report(&s, &r);
             expect_locked(&s, &r, 0.05);
             CHECK(r.gaps_at_stop == 0, "R3: GAPs counted around the stop: %d", r.gaps_at_stop);
+        }
+    }
+    // ----------------------------------------------------------------------
+    // WP USB2: ride through SOF absences with the host's frame counter running
+    // ----------------------------------------------------------------------
+    const double absent[] = { 0.1, 0.5, 2.0, 3.0 };
+    for (int k = 0; k < 4; k++) {
+        static char nm[4][100];
+        snprintf(nm[k], sizeof(nm[k]), "U%d SOF absent %.1f s at 20 s, frame counter running: ridden through", k + 1, absent[k]);
+        scen_t s = base(nm[k]);
+        s.sof_gap_at = 20.0;
+        s.sof_gap_len = absent[k];
+        s.gap_counts = true;
+        s.duration = 40.0;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            expect_locked(&s, &r, 0.05);
+            CHECK(r.anchors[0] == 1 && r.anchors[1] == 1 && r.reanchors[0] == 0 && r.reanchors[1] == 0 &&
+                  r.rides[0] >= 1 && r.rides[1] >= 1,
+                  "%s: one anchor each, no re-anchor, ridden (rides %u / %u)", s.name, r.rides[0], r.rides[1]);
+        }
+    }
+    {
+        scen_t s = base("U5 SOF absent 12 s at 20 s (beyond the 10 s ride-through), counter running: one new anchor");
+        s.sof_gap_at = 20.0;
+        s.sof_gap_len = 12.0;
+        s.gap_counts = true;
+        s.duration = 55.0;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            expect_locked(&s, &r, 0.05);
+            CHECK(r.anchors[0] == 2 && r.anchors[1] == 2, "U5: one new anchor each (anchors %u / %u)", r.anchors[0],
+                  r.anchors[1]);
         }
     }
     printf("alink_usb_sim: %d checks, %d failures\n", checks, failures);

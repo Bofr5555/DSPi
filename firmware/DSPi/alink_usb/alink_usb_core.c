@@ -29,7 +29,7 @@ void alink_usb_est_sample(alink_usb_est_t *e, uint32_t n, uint32_t t) {
     // Seed, or reseed after a gap without clean pairs (over 2 s): the anchors
     // stay exact either way, but a long gap is where the frame extension can
     // be wrong (alink_usb_tb_t.long_gap).
-    if (!e->seeded || n - e->last_n > 2048u) {
+    if (!e->seeded || n - e->last_n > ALINK_USB_EST_GAP_MAX) {
         e->n[0] = e->n[1] = e->last_n = n;
         e->t[0] = e->t[1] = t;
         e->seeded = true;
@@ -75,6 +75,7 @@ void alink_usb_init(alink_usb_t *us) {
     us->ph.mode = 0;
     us->ph.d_local = us->d;
     alink_apply_init(&us->aq);
+    us->diag.last_cause = 0xFF;
 }
 
 static void sync_ph(alink_usb_t *us) {
@@ -116,6 +117,7 @@ uint32_t alink_usb_ring_target(alink_usb_t *us, uint32_t fs, uint32_t target, ui
 
 static void timeline_end(alink_usb_t *us);
 static bool rate_ready(const alink_usb_t *us);
+static void end_cause(alink_usb_t *us, uint8_t cause);
 
 bool alink_usb_set_config(alink_usb_t *us, const uint8_t p[ALINK_USB_CFG_LEN]) {
     uint8_t mode = p[0], flags = p[1];
@@ -133,6 +135,7 @@ bool alink_usb_set_config(alink_usb_t *us, const uint8_t p[ALINK_USB_CFG_LEN]) {
     if (was == ALINK_USB_MODE_PHASE && mode != ALINK_USB_MODE_PHASE) alink_usb_port_ring_target();
     // A running timeline that the new values move: re-anchor (main loop).
     if ((us->started || us->prefilling) && (mode != was || d_changed)) {
+        end_cause(us, ALINK_USB_END_RE_OTHER);
         timeline_end(us);
         us->reanchors++;
         us->ev_pending = true;
@@ -361,7 +364,17 @@ static void timeline_end(alink_usb_t *us) {
     alink_phase_drain(&us->ph);
 }
 
-static void reanchor(alink_usb_t *us) {
+// Diagnostics: one timeline end of this cause (EXT_ALINK_USB_DIAG).
+static void end_cause(alink_usb_t *us, uint8_t cause) {
+    if (us->diag.ends[cause] != 0xFFFFu) us->diag.ends[cause]++;
+    us->diag.last_cause = cause;
+}
+
+static void reanchor_for(alink_usb_t *us, uint8_t cause);
+static void reanchor(alink_usb_t *us) { reanchor_for(us, ALINK_USB_END_RE_OTHER); }
+
+static void reanchor_for(alink_usb_t *us, uint8_t cause) {
+    end_cause(us, cause);
     timeline_end(us);
     us->reanchors++;
     uint32_t fs = us->fs ? us->fs : 48000u;
@@ -535,7 +548,7 @@ static void hold(alink_usb_t *us) {
         uint32_t k = (uint32_t)(since - h);
         if (!k) return;
         if (k > 4096u) {                        // the main loop stood still far too long
-            reanchor(us);
+            reanchor_for(us, ALINK_USB_END_RE_PHASE);
             return;
         }
         write_span(us, NULL, 0, k, RAMP_NONE);
@@ -610,7 +623,7 @@ void alink_usb_on_enabled(alink_usb_t *us) {
 
 void alink_usb_outputs_reset(alink_usb_t *us) {
     // Our own drain (main.c) uses drain_and_disable_outputs(), not this.
-    if (us->started || us->prefilling) reanchor(us);
+    if (us->started || us->prefilling) reanchor_for(us, ALINK_USB_END_RE_OUTPUTS);
 }
 
 void alink_usb_stream(alink_usb_t *us, bool on) {
@@ -645,6 +658,8 @@ void alink_usb_stream(alink_usb_t *us, bool on) {
 }
 
 void alink_usb_stop(alink_usb_t *us, uint8_t reason) {
+    if (us->started || us->prefilling) end_cause(us, ALINK_USB_END_STOP);
+    us->dark = false;
     alink_usb_cancel_all(us);
     timeline_end(us);
     bool was = us->state != ALINK_USB_ST_OFF;
@@ -675,33 +690,128 @@ void alink_usb_service(alink_usb_t *us, uint32_t now_ms) {
 
     // Time base.
     uint32_t sv = alink_usb_port_irq_save();
-    bool valid = alink_usb_tb.valid, have_c = alink_usb_tb.have_c, long_gap = alink_usb_tb.long_gap;
+    bool valid = alink_usb_tb.valid, have_c = alink_usb_tb.have_c;
     uint32_t t = alink_usb_tb.t, n_c = alink_usb_tb.n_c, t_c = alink_usb_tb.t_c, n = alink_usb_tb.n;
-    alink_usb_tb.long_gap = false;
+    uint32_t isr = alink_usb_tb.isr;
     uint32_t now = alink_usb_port_now48();
     alink_usb_port_irq_restore(sv);
+    uint32_t now_us = alink_usb_port_now_us();
+
+    // Diagnostics (WP USB2): the main-loop pass, the time without a SOF
+    // interrupt entry, and how late the latest entry ran after its SOF.
+    alink_usb_diag_t *dg = &us->diag;
+    if (dg->last_pass_us) {
+        uint32_t pass = now_us - dg->last_pass_us;
+        if (pass > dg->max_pass_us) dg->max_pass_us = pass;
+    }
+    dg->last_pass_us = now_us ? now_us : 1u;
+    if (valid) {
+        int32_t quiet = (int32_t)(now - isr), late = (int32_t)(isr - t);
+        if (quiet > 0 && (uint32_t)quiet / 48u > dg->max_isr_quiet_us) dg->max_isr_quiet_us = (uint32_t)quiet / 48u;
+        if (late > 0 && (uint32_t)late / 48u > dg->max_isr_late_us) dg->max_isr_late_us = (uint32_t)late / 48u;
+    }
+
     // Signed: the main loop reads whole microseconds, so a SOF stamped exactly
     // (RP2350) can be a few ticks "after" now.
     bool sof_ok = valid && (int32_t)(now - t) < (int32_t)(ALINK_USB_SOF_LOST_MS * ALINK_USB_T48_FRAME);
-    // A frame count and clock that disagree since the last pass (a SOF stall
-    // with the frame number frozen, a small frame jump) is a discontinuity,
-    // handled like a long gap: the timeline ends and the estimator reseeds,
-    // instead of a poisoned rate for 16 s (review usb1 F2).  The SOF times are
-    // exact on the RP2350 (100 us limit) and interrupt entries on the RP2040
-    // (0.5 ms, above the late entries).  Checked here, not in the ISR, to keep
-    // the RAM-resident hook as it was.
-    if (valid && us->seen_valid && n != us->seen_n) {
-        int64_t dev = (int64_t)(int32_t)(t - us->seen_t) - (int64_t)(uint32_t)(n - us->seen_n) * ALINK_USB_T48_FRAME;
-        int64_t lim = us->exact ? 4800 : 24000;
-        if (dev > lim || dev < -lim) long_gap = true;
+    int64_t lim = us->exact ? 4800 : 24000;
+    int end = -1;                               // ALINK_USB_END_* when the time base ends now
+
+    if (us->dark) {
+        if (!sof_ok) {
+            // Riding through: the timeline runs on the extrapolated arrival.
+            if (now_us - us->dark_us > ALINK_USB_RIDE_MAX_MS * 1000u) {
+                end = ALINK_USB_END_SOF_LOST;
+                dg->last_frames = 0;
+                dg->last_us = now_us - us->dark_us;
+            }
+        } else {
+            // Back: the frames counted since the last SOF must match the time
+            // at the measured host rate, modulo the 2048-frame wraps the 11-bit
+            // frame number cannot show over a long absence.
+            // Float and int32 only (no double or 64-bit division helpers, which
+            // the SDK places in RAM): 10 s is 4.8e8 ticks, float resolves 32.
+            int32_t dt = (int32_t)(t - us->dark_t);
+            int32_t dn = (int32_t)(n - us->dark_n);
+            float per = (float)ALINK_USB_T48_FRAME / (1.0f + us->est.ppm * 1e-6f);
+            float exp_frames = (float)dt / per;
+            float kf = (exp_frames - (float)dn) / 2048.0f;
+            int32_t k = (int32_t)(kf >= 0.0f ? kf + 0.5f : kf - 0.5f);
+            int32_t frames = dn + 2048 * k;
+            float dev = (float)dt - (float)frames * per;
+            dg->last_frames = (uint32_t)frames;
+            dg->last_us = (uint32_t)dt / 48u;
+            dg->last_dev_us = (int32_t)(dev / 48.0f);
+            if (k < 0 || dt < 0 || dev > (float)lim || dev < -(float)lim) {
+                end = ALINK_USB_END_DISCONT;
+            } else {
+                if (k) {
+                    // Restore the wraps in the ISR's count (it keeps N mod 2048).
+                    uint32_t add = (uint32_t)k * 2048u;
+                    uint32_t sv2 = alink_usb_port_irq_save();
+                    alink_usb_tb.n += add;
+                    // The clean pair only if it was taken after the return; one
+                    // from before the absence is already right.
+                    if ((int32_t)(alink_usb_tb.t_c - us->dark_t) > 0) alink_usb_tb.n_c += add;
+                    n = alink_usb_tb.n;
+                    n_c = alink_usb_tb.n_c;
+                    alink_usb_port_irq_restore(sv2);
+                }
+                us->dark = false;
+                if (dg->rides != 0xFFFFu) dg->rides++;
+                if (dg->last_us > dg->longest_ride_us) dg->longest_ride_us = dg->last_us;
+                set_state(us, us->state, ALINK_USB_RS_RESUMED);
+                us->seen_valid = true;
+                us->seen_n = n;
+                us->seen_t = t;
+            }
+        }
+    } else {
+        // A frame count and clock that disagree since the last pass (a SOF
+        // stall with the frame number frozen, a small frame jump) is a
+        // discontinuity (review usb1 F2): RP2350 100 us, RP2040 0.5 ms.
+        if (valid && us->seen_valid && n != us->seen_n) {
+            int64_t dt = (int64_t)(int32_t)(t - us->seen_t);
+            int64_t dev = dt - (int64_t)(uint32_t)(n - us->seen_n) * ALINK_USB_T48_FRAME;
+            if (dt > 1000LL * ALINK_USB_T48_FRAME) end = ALINK_USB_END_LONG_GAP;
+            else if (dev > lim || dev < -lim) end = ALINK_USB_END_DISCONT;
+            if (end >= 0) {
+                dg->last_frames = n - us->seen_n;
+                dg->last_us = (uint32_t)(dt / 48);
+                dg->last_dev_us = (int32_t)(dev / 48);
+            }
+        }
+        if (end < 0 && !sof_ok && us->tb_ok) {
+            // No SOF for 50 ms: ride through on the estimate if there is one and
+            // no anchor is half done (WP USB2); else the time base ends.
+            if (dg->holdovers != 0xFFFFu) dg->holdovers++;
+            bool anchoring = us->prefilling || (us->started && us->ph.state == ALINK_PHASE_ANCHORING);
+            if (us->est.valid && !anchoring) {
+                us->dark = true;
+                us->dark_n = n;
+                us->dark_t = t;
+                us->dark_us = now_us - (uint32_t)((int32_t)(now - t) / 48);
+                set_state(us, us->state, ALINK_USB_RS_HOLDOVER);
+            } else {
+                end = ALINK_USB_END_SOF_LOST;
+                dg->last_frames = 0;
+                dg->last_us = (uint32_t)((int32_t)(now - t) / 48);
+            }
+        }
     }
-    us->seen_valid = valid;
-    us->seen_n = n;
-    us->seen_t = t;
-    if (!sof_ok || long_gap) {
+    if (!us->dark) {
+        us->seen_valid = valid;
+        us->seen_n = n;
+        us->seen_t = t;
+    }
+    if (end >= 0 || (!sof_ok && !us->dark)) {
         if (us->tb_ok || us->state != ALINK_USB_ST_NO_SOF) {
-            if (us->started || us->prefilling) alink_usb_cancel_all(us);
+            if (us->started || us->prefilling) {
+                end_cause(us, (uint8_t)(end >= 0 ? end : ALINK_USB_END_SOF_LOST));
+                alink_usb_cancel_all(us);
+            }
             timeline_end(us);
+            us->dark = false;
             us->tb_ok = false;
             us->ticked = false;
             us->rate_locked = false;
@@ -712,6 +822,13 @@ void alink_usb_service(alink_usb_t *us, uint32_t now_ms) {
         event_service(us, now_ms);
         return;                                 // the VCXO holds its trim
     }
+    if (us->dark) {
+        // Holdover: no new rate information, the VCXO holds; the timeline runs
+        // on silence at the extrapolated arrival (hold()).
+        if (us->started) hold(us);
+        event_service(us, now_ms);
+        return;
+    }
     us->tb_ok = true;
     if (have_c) alink_usb_est_sample(&us->est, n_c, t_c);
 
@@ -719,6 +836,7 @@ void alink_usb_service(alink_usb_t *us, uint32_t now_ms) {
     if (us->est.valid) {
         float a = fabs_(us->est.ppm);
         if (!us->rejected && a > ALINK_USB_HOST_MAX_PPM) {
+            if (us->started || us->prefilling) end_cause(us, ALINK_USB_END_REJECTED);
             alink_usb_cancel_all(us);
             timeline_end(us);
             us->rejected = true;
@@ -741,6 +859,7 @@ void alink_usb_service(alink_usb_t *us, uint32_t now_ms) {
     // D no longer allows, ends (the rate change itself resets the outputs).
     bool phase = alink_usb_phase_possible(us, fs);
     if ((us->started || us->prefilling) && (!phase || fs != us->fs)) {
+        end_cause(us, ALINK_USB_END_CONFIG);
         alink_usb_cancel_all(us);
         timeline_end(us);
         set_state(us, us->state, phase ? ALINK_USB_RS_REANCHOR : ALINK_USB_RS_CONFIG);
@@ -840,6 +959,7 @@ void alink_usb_get_status(alink_usb_t *us, uint8_t o[ALINK_USB_STATUS_LEN]) {
     if (us->stream) f |= 0x02;
     if (alink_usb_nominal_feedback(us)) f |= 0x04;
     if (us->tb_ok) f |= 0x08;
+    if (us->dark) f |= 0x10;                    // holdover: no SOF, extrapolating (WP USB2)
     o[3] = f;
     au_putf(o + 4, us->est.valid ? us->est.ppm : 0.0f);
     au_putf(o + 8, alink_usb_port_vcxo_ppm());
@@ -869,4 +989,40 @@ void alink_usb_get_status(alink_usb_t *us, uint8_t o[ALINK_USB_STATUS_LEN]) {
     au_put32(o + 52, us->reanchors);
     au_put32(o + 56, us->missed);
     au_put32(o + 60, us->late);
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics (WP USB2)
+// ---------------------------------------------------------------------------
+
+void alink_usb_get_diag(const alink_usb_t *us, uint8_t o[ALINK_USB_DIAG_LEN]) {
+    const alink_usb_diag_t *d = &us->diag;
+    memset(o, 0, ALINK_USB_DIAG_LEN);
+    o[0] = 1;                                   // layout version
+    o[1] = d->last_cause;
+    au_put16(o + 2, d->rides);
+    au_put16(o + 4, d->holdovers);
+    for (int i = 0; i < ALINK_USB_END_N; i++) au_put16(o + 6 + 2 * i, d->ends[i]);
+    // 6 + 2 * 9 = 24
+    au_put16(o + 24, d->suspends);
+    au_put16(o + 26, d->resumes);
+    au_put16(o + 28, d->mounts);
+    au_put16(o + 30, d->umounts);
+    au_put32(o + 32, d->last_frames);
+    au_put32(o + 36, d->last_us);
+    au_put32(o + 40, (uint32_t)d->last_dev_us);
+    au_put32(o + 44, d->longest_ride_us);
+    au_put32(o + 48, d->max_pass_us);
+    au_put32(o + 52, d->max_isr_quiet_us);
+    au_put32(o + 56, d->max_isr_late_us);
+    au_put32(o + 60, us->dark ? alink_usb_port_now_us() - us->dark_us : 0u);
+}
+
+bool alink_usb_clear_diag(alink_usb_t *us, uint8_t v) {
+    if (v != 1u) return false;
+    uint32_t last = us->diag.last_pass_us;
+    memset(&us->diag, 0, sizeof(us->diag));
+    us->diag.last_cause = 0xFF;
+    us->diag.last_pass_us = last;
+    return true;
 }

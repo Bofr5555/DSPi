@@ -92,9 +92,6 @@ static void test_time_base(void) {
     // Three SOFs missed (IRQ held off 3 ms): still exact on RP2350.
     alink_usb_tb_sof(&tb, (2064u) & 0x7FF, t + 24u * 48000u + 5000, 5000);
     CHECK(tb.n == 2064 && tb.n_c == 2064, "a 4-frame step counts and stays clean: %u", tb.n);
-    // Over a second dark: flagged.
-    alink_usb_tb_sof(&tb, (2064u + 1500u) & 0x7FF, t + (24u + 1500u) * 48000u, 0);
-    CHECK(tb.long_gap, "a 1.5 s gap is flagged");
 
     // RP2040 (ISR time): clean only for 1-frame steps within 3 us.
     memset(&tb, 0, sizeof(tb));
@@ -620,6 +617,78 @@ static void test_round3(void) {
     CHECK(alink_usb_ring_target(&us, 48000, 96, 49, 448) == 96, "no time base: stock target");
 }
 
+// WP USB2: ride through SOF absences; EXT_ALINK_USB_DIAG.
+static void ride_pass(alink_usb_t *us, uint32_t t48) {
+    now48 = t48;
+    now_us = t48 / 48u;
+    us->tick_last_us = now_us;                  // no servo tick: the stub's fill is not a plant
+    alink_usb_service(us, now_us / 1000u);
+}
+
+// Passes every millisecond from t0 to t1 (t48), no SOF.
+static void ride_dark(alink_usb_t *us, uint32_t t0, uint32_t t1) {
+    for (uint32_t t = t0; t <= t1; t += 48000u) ride_pass(us, t);
+}
+
+static void ride_setup(alink_usb_t *us) {
+    locked_engine(us);
+    us->est.valid = us->est.seeded = true;
+    us->est.ppm = 0.0f;
+    us->est.last_n = 1000u;
+    us->est.n[0] = us->est.n[1] = 1000u;
+    us->rate_locked = us->ticked = true;
+    us->state = ALINK_USB_ST_PHASE_LOCK;
+    us->exact = true;
+    alink_usb_tb.isr = 0;
+    ride_pass(us, 48u * 100u);                  // the SOF of frame 1000 is fresh: seen pair recorded
+}
+
+static void sof_at(uint32_t frame, uint32_t t48) {
+    alink_usb_tb_sof(&alink_usb_tb, frame & 0x7FFu, t48 + 96u, 96u);
+}
+
+static void test_ride(void) {
+    alink_usb_t us;
+    // 0.3 s absence, frame counter running: ridden through.
+    ride_setup(&us);
+    ride_dark(&us, 48000u, 48000u * 299u);
+    CHECK(us.dark && us.started && us.diag.holdovers == 1, "no SOF for 50 ms: holdover, timeline kept");
+    sof_at(1300u, 48000u * 300u);
+    ride_pass(&us, 48000u * 300u + 200u);
+    CHECK(!us.dark && us.started && us.diag.rides == 1 && us.diag.last_frames == 300 && us.diag.last_us == 300000,
+          "back after 300 frames in 300 ms: resumed (frames %u, us %u)", us.diag.last_frames, us.diag.last_us);
+    // 3 s: the 11-bit frame number wrapped once; restored.
+    ride_setup(&us);
+    ride_dark(&us, 48000u, 48000u * 2999u);
+    sof_at(4000u, 48000u * 3000u);
+    CHECK(alink_usb_tb.n == 1000u + (3000u & 2047u), "the ISR alone counts %u frames", alink_usb_tb.n - 1000u);
+    ride_pass(&us, 48000u * 3000u + 200u);
+    CHECK(!us.dark && us.started && alink_usb_tb.n == 4000u, "3 s: one wrap restored (n %u)", alink_usb_tb.n);
+    // The frame number jumped 777 beyond the time: a discontinuity, the timeline ends.
+    ride_setup(&us);
+    ride_dark(&us, 48000u, 48000u * 299u);
+    sof_at(1300u + 777u, 48000u * 300u);
+    ride_pass(&us, 48000u * 300u + 200u);
+    CHECK(!us.started && !us.dark && us.diag.last_cause == ALINK_USB_END_DISCONT && us.diag.ends[ALINK_USB_END_DISCONT] == 1,
+          "an inconsistent return ends the timeline (cause %u)", us.diag.last_cause);
+    // Beyond 10 s: the time base ends.
+    ride_setup(&us);
+    ride_dark(&us, 48000u, 48000u * 10100u);
+    CHECK(!us.started && !us.dark && us.diag.ends[ALINK_USB_END_SOF_LOST] == 1 && us.state == ALINK_USB_ST_NO_SOF,
+          "over 10 s dark: SOF_LOST");
+    // Diag layout and clear.
+    uint8_t o[ALINK_USB_DIAG_LEN];
+    us.diag.max_pass_us = 1234u;
+    alink_usb_get_diag(&us, o);
+    uint16_t ends_sof;
+    uint32_t pass;
+    memcpy(&ends_sof, o + 6, 2);
+    memcpy(&pass, o + 48, 4);
+    CHECK(o[0] == 1 && o[1] == ALINK_USB_END_SOF_LOST && ends_sof == 1 && pass == 1234u, "diag layout");
+    CHECK(!alink_usb_clear_diag(&us, 2) && alink_usb_clear_diag(&us, 1) && us.diag.ends[0] == 0 &&
+          us.diag.last_cause == 0xFF, "diag clear (1 only)");
+}
+
 int main(void) {
     test_time_base();
     test_estimator();
@@ -631,6 +700,7 @@ int main(void) {
     test_fades();
     test_fixups();
     test_round3();
+    test_ride();
     printf("test_alink_usb: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

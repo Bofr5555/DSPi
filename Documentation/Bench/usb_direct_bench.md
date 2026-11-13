@@ -158,7 +158,14 @@ times a second. Measure it on the real host with the real programme path, with n
 3. Expected on a quiet PC: `gaps` 0 to a few per hour, `late` 0, `anchors` unchanged. More than one gap a minute: find
    the cause before using mode 2 (host load, USB hub, the unit's main loop: a long command, a preset save); every preset
    save or flash write re-anchors (about 0.25 s muted), by design.
-4. Note the worst minute; it decides whether D 192 (about 1-2 ms of main-loop stall budget: the held frame costs one
+4. Read and keep `EXT_ALINK_USB_DIAG` at the start (clear it: `M $U set 0x00 --wvalue 0x8012 --payload 01`), every 10
+   minutes and at the end: `M $U get 0x00 --wvalue 0x8012 --out out/diag.bin` and
+   `python3 -I tools/alink_usb/alink_usb_status.py --diag tools/midi_ctrl/out/diag.bin`. Expected: `holdovers` and
+   `rides` equal (every SOF absence ridden through), no timeline ends but `stop`, no USB events. If `anchors` still
+   rises: the `ends` cause, `last_frames` against `last_us` (equal: the host's counter ran on), the bus events (a host
+   suspend or reset), and `max pass` / `max time without a SOF interrupt` / `max SOF interrupt latency` (the unit's own
+   main loop or USB interrupt starved) say which.
+5. Note the worst minute; it decides whether D 192 (about 1-2 ms of main-loop stall budget: the held frame costs one
    frame of ring fill) is enough for the installation. A larger D (up to 399) buys stall budget at 1 sample per sample.
 
 ## 5. One K340 alone
