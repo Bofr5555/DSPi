@@ -13,6 +13,8 @@ no devices). Protocol: `Documentation/Features/link_protocol_spec.md`.
 | `bench.py` | drives link bench Picos (`firmware/link_bench`, WP LK3) over their USB consoles: lock, trim scan, BER, impairments, PASS/FAIL summary; `Documentation/Bench/link_gpio_bench.md` |
 | `bench.sh`, `Containerfile.bench` | runs `bench.py` in a container venv with only the named tty devices passed in |
 | `tests/test_bench_tool.py` | `bench.py` against simulated bench boards and a pty |
+| `sender_usb.py` | the link sender's extension block over Linux usbfs (WP LK4): `EXT_LINK_TX`, `EXT_LINK_CTRL_MSG`, `EXT_FRAME_COUNTER`, `EXT_LINK_DIAG`; used by `bench.py sender` / `sender-diag` (`Documentation/Bench/link_sender_bench.md`) |
+| `tests/test_sender_tool.py` | `bench.py sender` against a simulated RX board and LK7's `FakeLink("sender")` |
 
 ```sh
 ./run.sh -m unittest discover -s tests -v

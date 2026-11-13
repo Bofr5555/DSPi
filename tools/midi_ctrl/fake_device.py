@@ -87,6 +87,7 @@ class FakeLink:
         self.counters = [0] * 6         # lock, loss, crc8, crc16, bit_slip, superframe
         self.bench = [3, 1, 2, 0]       # DIAG: comma, counter, code, idle errors
         self.vcxo_ppm, self.phase_error, self.fill = 0.0, 0.0, 0
+        self.hop_delay = 2              # sender in fan-out: frames from receiving F to re-sending it (LK4: 2-3)
         self.queue = []                 # pending (frame, op, arg, value)
         self.last = (0, 0, 0)           # (op, result, frame)
         self.tx = bytearray(struct.pack("<HBBBBBBHHBBH", 0, 1, 8, 1, 0, 0, 0xFF, 0x00FF, 0, 0, 0, 0))
@@ -113,7 +114,8 @@ class FakeLink:
         los = 0xFF if self.config[4] == 0xFF else (1 if self.state == 3 else 0)
         return (struct.pack("<8BQ", self.state, self.cls, self.rate, self.chans, self.hops, los,
                             0x5A if self.state else 0, self.sf_flags, self.frame)
-                + struct.pack("<6IffHH", *self.counters, self.vcxo_ppm, self.phase_error, self.fill, 0))
+                + struct.pack("<6IffHBB", *self.counters, self.vcxo_ppm, self.phase_error, self.fill,
+                              self.hop_delay if self.role == 4 and self.state == 2 else 0, 0))
 
     def phase(self) -> bytes:
         below = int(self.d_local + self.hops_offset < D_LOCAL_MIN)
@@ -217,9 +219,15 @@ class FakeLink:
             if (mask >> 8 or not 1 <= cls <= 3 or rate > 2 or not 1 <= chans <= MAX_CHANNELS[(cls, rate)]
                     or test > 3 or smap or not link_pin_ok(sync) or txdis >> 8 or flags & ~1 or res):
                 return False
-            running = struct.unpack_from("<H", self.tx)[0] != 0
-            old_cls, old_rate, old_chans = self.tx_layout
-            if running and (rate, chans) != (old_rate, old_chans) and cls == old_cls:
+            # As sender_vendor.c set_tx(): "a change" is against the last accepted
+            # request (self.tx), not the stream's layout, so writing the stream's
+            # layout back while its RATE is pending is a change and is refused.
+            running = mask != 0 or struct.unpack_from("<H", self.tx)[0] != 0
+            req_cls, req_chans, req_rate = self.tx[2], self.tx[3], self.tx[4]
+            old_chans = self.tx_layout[2]
+            if cls == req_cls and (rate, chans) == (req_rate, req_chans):
+                pass                               # no layout change (a pending RATE stays)
+            elif running and cls == req_cls:
                 if self.injected:
                     return False                   # one apply at a time
                 at = (self._next_sf() + RATE_LEAD + SF_LEN - 1) & ~(SF_LEN - 1)
@@ -247,6 +255,8 @@ class FakeLink:
                 if not ok or self.injected or frame < self._next_sf() + SF_LEN:
                     return False
                 self.injected = (frame, op, arg, value)
+                if op == OP_RATE:
+                    self.tx[4] = arg               # the request follows (set_ctrl())
             self.sf_flags = (self.sf_flags & ~1) | sysflags
             return True
         if sub == 0x8009:

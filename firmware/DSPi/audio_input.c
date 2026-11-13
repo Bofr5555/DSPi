@@ -107,3 +107,13 @@ uint8_t adat_clock_mode = ADAT_CLOCK_MODE_MASTER;
 volatile bool adat_clock_mode_change_pending = false;
 volatile uint8_t pending_adat_clock_mode = ADAT_CLOCK_MODE_MASTER;
 volatile bool adat_input_restart_pending = false;
+
+// Link receiver configuration (audio_input.h; acted on by link_input.c).
+uint8_t link_config[LINK_CFG_LEN] = { 0, 0xFF, 0, 0xFF, 0xFF, 0xFF, 0x03, 0 };
+uint8_t link_slots[LINK_SLOTS_LEN] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+
+void link_config_defaults(uint8_t cfg[LINK_CFG_LEN], uint8_t slots[LINK_SLOTS_LEN]) {
+    static const uint8_t c[LINK_CFG_LEN] = { 0, 0xFF, 0, 0xFF, 0xFF, 0xFF, 0x03, 0 };
+    memcpy(cfg, c, LINK_CFG_LEN);
+    for (uint8_t i = 0; i < LINK_SLOTS_LEN; i++) slots[i] = i;
+}

@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include "pdm_generator.h"
+#include "link_input.h"
 #include "rta.h"
 #include "dsp_pipeline.h"
 #include "crossover.h"
@@ -548,6 +549,10 @@ static void __not_in_flash_func(eq_worker_loop)() {
         // Wait for work from Core 0
         while (!core1_eq_work.work_ready) {
             if (core1_mode != CORE1_MODE_EQ_WORKER) return;
+#if DSPI_LINK && DSPI_LINK_DECODE_CORE1
+            // The link decoder, between blocks (link_input.h).
+            link_input_core1_service();
+#endif
             __wfe();
         }
         __dmb();

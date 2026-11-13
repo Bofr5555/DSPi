@@ -40,6 +40,7 @@
 #include "pico/audio_i2s_multi.h"
 #include "adat_output.h"
 #include "adat_input.h"
+#include "link_input.h"
 #include "input_servo.h"
 #include "pdm_generator.h"
 #include "siggen.h"
@@ -343,6 +344,11 @@ static bool i2s_prefilling = false;
 // prepare_pipeline_reset(). Driven by the main-loop ADAT block (RP2350).
 static bool adat_prefilling = false;
 
+// Link input prefill (WP LK5): the same lock-gated handshake as ADAT slave.
+#if DSPI_LINK
+static bool link_prefilling = false;
+#endif
+
 // Input receiver exclusivity: at most one receiver may run, and only the one
 // the source in `keep` owns (INPUT_SOURCE_*, or 0xFF for none).  Stops every
 // other running receiver; each stop is a no-op when already inactive.  A
@@ -363,6 +369,12 @@ static void stop_foreign_input_receivers(uint8_t keep) {
     if (keep != INPUT_SOURCE_ADAT && adat_input_is_running()) {
         adat_input_stop();
         adat_prefilling = false;
+    }
+#endif
+#if DSPI_LINK
+    if (keep != INPUT_SOURCE_LINK && link_input_is_running()) {
+        link_input_stop();
+        link_prefilling = false;
     }
 #endif
 }
@@ -986,6 +998,10 @@ bool pipeline_producer_is_streaming(void) {
     if (active_input_source == INPUT_SOURCE_ADAT &&
         adat_input_get_state() == ADAT_INPUT_LOCKED) return true;
 #endif
+#if DSPI_LINK
+    if (active_input_source == INPUT_SOURCE_LINK &&
+        link_input_get_state() == LINK_INPUT_LOCKED) return true;
+#endif
     // The generator's idle pump counts only when it would actually run:
     // siggen_pump() refuses while a source change or type switch is in
     // flight, and (for non-USB sources) while preset_loading is set, since
@@ -1038,6 +1054,10 @@ static void pipeline_service_producer(bool lock_gated) {
 #if PICO_RP2350
     } else if (active_input_source == INPUT_SOURCE_ADAT) {
         adat_input_poll();
+#endif
+#if DSPI_LINK
+    } else if (active_input_source == INPUT_SOURCE_LINK) {
+        link_input_poll();
 #endif
     } else if (active_input_source == INPUT_SOURCE_I2S) {
         if (!lock_gated || i2s_clock_mode != I2S_CLOCK_MODE_SLAVE ||
@@ -1436,7 +1456,8 @@ static void complete_pipeline_reset(void) {
     if (!(preset_loading &&
           (active_input_source == INPUT_SOURCE_I2S ||
            input_source_is_spdif(active_input_source) ||
-           active_input_source == INPUT_SOURCE_ADAT))) {
+           active_input_source == INPUT_SOURCE_ADAT ||
+           (active_input_source == INPUT_SOURCE_LINK && link_config[LINK_CFG_ENABLE])))) {
         dac_hw_mute_release();
     }
 
@@ -1750,6 +1771,9 @@ void core0_init() {
     adat_output_init();
     adat_input_init();
 #endif
+#if DSPI_LINK
+    link_input_init();
+#endif
 
     // Initialize feedback controller and nominal rate
     fb_ctrl_init(&fb_ctrl);
@@ -1759,6 +1783,9 @@ void core0_init() {
     // Load preset from flash.  Always selects a preset (factory defaults if
     // the target slot is empty).  Migrates legacy data on first boot.
     preset_boot_load();
+    // Link receiver configuration: device-global, outside the presets (V26
+    // directory block, saved by REQ_SAVE_OUTPUT_CONFIG).
+    preset_load_link_config();
     output_latency_request(preset_get_output_latency());
     output_latency_apply(48000u, active_input_source);
 
@@ -1916,6 +1943,15 @@ void core0_init() {
         adat_input_start();
     }
 #endif
+#if DSPI_LINK
+    else if (active_input_source == INPUT_SOURCE_LINK && link_config[LINK_CFG_ENABLE]) {
+        // Boot into LINK: outputs stay muted until the receiver has detected
+        // the class, scanned the trim and locked; the main-loop LINK block owns
+        // drain/prefill/enable.  The stream's rate is applied after lock.
+        prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+        link_input_start();
+    }
+#endif
 
     // Baseline the notification shadow from the fully-initialised live state.
     // Must come after preset_boot_load() / apply_factory_defaults() so any
@@ -2045,6 +2081,38 @@ static void input_service_handshakes(void) {
         }
     }
 #endif
+#if DSPI_LINK
+    // Link input (WP LK5).  ADAT slave's flow: once the receiver is locked
+    // (class, trim, superframe), a rate the pipeline does not run yet arms a
+    // deferred rate change; at the right rate, drain, prefill from live input
+    // and start in sync.  Every loss (and a RATE switch in the stream) mutes
+    // and goes round again.
+    else if (active_input_source == INPUT_SOURCE_LINK) {
+        LinkInputState ln_state = link_input_get_state();
+        if (link_input_take_loss()) {
+            link_prefilling = false;
+            if (!preset_loading) {
+                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+                pipeline_reset_cpu_metering();
+            }
+        }
+        if (ln_state == LINK_INPUT_LOCKED && preset_loading && !link_prefilling
+                && dac_hw_mute_hold_elapsed()) {
+            if (!link_input_check_rate_change()) {
+                drain_and_disable_outputs();
+                preset_loading = false;
+                preset_mute_counter = 0;
+                link_prefilling = true;
+                link_input_discard_queued();   // prefill starts from live input
+            }
+        }
+        if (link_prefilling && ln_state == LINK_INPUT_LOCKED && slot_fill_at_target(0)) {
+            enable_outputs_in_sync();
+            link_prefilling = false;
+            dac_hw_mute_release();
+        }
+    }
+#endif
 
     else if (active_input_source == INPUT_SOURCE_I2S &&
              i2s_clock_mode == I2S_CLOCK_MODE_SLAVE) {
@@ -2137,6 +2205,11 @@ static void input_service_servos(void) {
         adat_input_update_clock_servo();   // slave mode + LOCKED only
     }
 #endif
+#if DSPI_LINK
+    else if (active_input_source == INPUT_SOURCE_LINK) {
+        link_input_update_clock_servo();   // LOCKED at the stream's rate only
+    }
+#endif
     else if (active_input_source == INPUT_SOURCE_I2S &&
              i2s_clock_mode == I2S_CLOCK_MODE_SLAVE) {
         i2s_slave_update_clock_servo();
@@ -2185,6 +2258,9 @@ int main(void) {
         // usbd_edpt_xfer from within a control-transfer DATA stage.
         LOOP_PROF(LP_NOTIFY);
         notify_clip_service(to_ms_since_boot(get_absolute_time()));
+#if DSPI_LINK
+        link_input_event_service(to_ms_since_boot(get_absolute_time()));
+#endif
         usb_notify_tick();
 
         // External control transports: parse any complete UART/I2C frames
@@ -2751,7 +2827,8 @@ int main(void) {
             // doesn't release the mute before that block's drain (for ADAT,
             // before the receiver has even re-locked).  USB/SPDIF restart here.
             perform_rate_change(r, active_input_source == INPUT_SOURCE_I2S ||
-                                   active_input_source == INPUT_SOURCE_ADAT);
+                                   active_input_source == INPUT_SOURCE_ADAT ||
+                                   active_input_source == INPUT_SOURCE_LINK);
         }
 
         // Handle loudness table recomputation
@@ -3530,6 +3607,7 @@ int main(void) {
                     perform_rate_change(target_rate,
                                         new_source == INPUT_SOURCE_I2S ||
                                         new_source == INPUT_SOURCE_ADAT ||
+                                        new_source == INPUT_SOURCE_LINK ||
                                         input_source_is_spdif(new_source));
                     dsp_update_delay_samples((float)target_rate);
 
@@ -3575,6 +3653,23 @@ int main(void) {
                     }
 
                     // Reset DSP state to prevent stale ADAT data leaking
+                    leveller_reset_pending = true;
+                    pipeline_reset_cpu_metering();
+                }
+#endif
+#if DSPI_LINK
+                else if (old_source == INPUT_SOURCE_LINK) {
+                    link_input_stop();
+                    link_prefilling = false;
+                    // The servo is parked by the stop; USB gets its retained rate back
+                    // (mirrors the ADAT branch).
+                    if (new_source == INPUT_SOURCE_USB) {
+                        uint32_t target_rate = usb_audio_get_selected_rate();
+                        if (target_rate != audio_state.freq) {
+                            perform_rate_change(target_rate, false);
+                            dsp_update_delay_samples((float)target_rate);
+                        }
+                    }
                     leveller_reset_pending = true;
                     pipeline_reset_cpu_metering();
                 }
@@ -3675,6 +3770,15 @@ int main(void) {
                     // ADAT block owns drain/prefill/enable + the mute release.
                 }
 #endif
+#if DSPI_LINK
+                else if (new_source == INPUT_SOURCE_LINK) {
+                    // The stream owns the rate (applied after lock).  With
+                    // EXT_LINK_CONFIG.enable 0 nothing starts and LINK plays
+                    // silence; complete the reset so the outputs run on it.
+                    link_input_start();
+                    if (!link_config[LINK_CFG_ENABLE]) complete_pipeline_reset();
+                }
+#endif
                 else {
                     // Switching to USB: flush stale ring data, complete reset
                     usb_audio_flush_ring();
@@ -3757,6 +3861,26 @@ int main(void) {
             }
 #endif
         }
+
+#if DSPI_LINK
+        // Handle deferred link input restart (EXT_LINK_CONFIG changed the pin,
+        // the class or enable while LINK is the source).
+        if (link_input_restart_pending) {
+            link_input_restart_pending = false;
+            if (active_input_source == INPUT_SOURCE_LINK && pipeline_reset_ready()) {
+                if (link_input_is_running()) {
+                    pipeline_settle_to_silence();
+                    link_input_stop();
+                    link_prefilling = false;
+                }
+                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+                link_input_start();
+                if (!link_config[LINK_CFG_ENABLE]) complete_pipeline_reset();
+            } else if (active_input_source == INPUT_SOURCE_LINK) {
+                link_input_restart_pending = true;   // retry once a reset is allowed
+            }
+        }
+#endif
 
         // Handle deferred I2S RX restarts: data-pin hot-swap and full
         // restart after a BCK pin change in the input-master role.  Gated on

@@ -762,12 +762,13 @@ def decode_link_status(b: bytes) -> str:
     if len(b) < LINK_STATUS_LEN:
         return f"short reply {b.hex()}"
     state, cls, rate, chans, hops, los, sender, sflags, frame = struct.unpack_from("<8BQ", b)
-    locks, losses, crc8, crc16_, slips, sferr, ppm, phase, fill = struct.unpack_from("<6IffH", b, 16)
+    locks, losses, crc8, crc16_, slips, sferr, ppm, phase, fill, hop_delay = struct.unpack_from("<6IffHB", b, 16)
     los_s = {0: "clear", 1: "ASSERTED", 0xFF: "n/a"}.get(los, los)
     return (f"state={LINK_STATES.get(state, state)} class=L{cls} rate={RATE_CODES.get(rate, rate)} "
             f"C={chans} hops={hops} los={los_s} sender=0x{sender:02X} sf_flags=0x{sflags:02X} F={frame} "
             f"locks={locks} losses={losses} crc8={crc8} crc16={crc16_} slips={slips} sf_errors={sferr} "
-            f"vcxo={ppm:+.2f}ppm phase_error={phase:+.3f} fill={fill}")
+            f"vcxo={ppm:+.2f}ppm phase_error={phase:+.3f} fill={fill}"
+            + (f" hop_delay={hop_delay}" if hop_delay else ""))
 
 
 def decode_link_phase(b: bytes) -> str:

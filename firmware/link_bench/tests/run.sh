@@ -21,7 +21,7 @@ CC=${CC:-cc}
 CFLAGS="-std=c11 -O2 -Wall -Wextra -Werror -I$root/firmware/DSPi/link -I$root/firmware/link_bench"
 SRC="$root/firmware/DSPi/link/link_codec.c $root/firmware/DSPi/link/link_decoder.c
      $root/firmware/link_bench/bench_gen.c $root/firmware/link_bench/bench_check.c
-     $root/firmware/link_bench/bench_trim.c $root/firmware/link_bench/bench_cmd.c"
+     $root/firmware/DSPi/link/bench_trim.c $root/firmware/link_bench/bench_cmd.c"
 
 # shellcheck disable=SC2086
 $CC $CFLAGS -o "$out/test_bench_logic" "$here/test_bench_logic.c" $SRC
@@ -44,3 +44,8 @@ done
 $CC $CFLAGS -DPICO_NO_HARDWARE=1 -I"$out/gen" -I"$root/tools/link_rx_test" \
     -o "$out/test_bench_model" "$here/test_bench_model.c" $SRC -lm
 "$out/test_bench_model" "$@"
+# WP LK5: the production receiver against the reference on the model's output.
+# shellcheck disable=SC2086
+$CC $CFLAGS -DPICO_NO_HARDWARE=1 -I"$out/gen" -I"$root/tools/link_rx_test" \
+    -o "$out/test_fast_model" "$here/test_fast_model.c" $SRC "$root/firmware/DSPi/link/link_fast.c" -lm
+"$out/test_fast_model"

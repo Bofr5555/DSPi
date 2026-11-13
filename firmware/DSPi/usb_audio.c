@@ -314,6 +314,9 @@ void get_default_channel_name(int ch, uint8_t input_source,
         } else if (input_source == INPUT_SOURCE_ADAT) {
             // ADAT lightpipe carries 8 discrete channels; number them like USB.
             snprintf(buf, PRESET_NAME_LEN, "ADAT %d", ch + 1);
+        } else if (input_source == INPUT_SOURCE_LINK) {
+            // The link's 8 slots (EXT_LINK_SLOTS), numbered like ADAT.
+            snprintf(buf, PRESET_NAME_LEN, "LINK %d", ch + 1);
         } else {  // USB (and any future per-channel source)
             snprintf(buf, PRESET_NAME_LEN, "USB %d", ch + 1);
         }

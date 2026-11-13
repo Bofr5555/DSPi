@@ -228,7 +228,7 @@ Current firmware answers `01 00 00 00`.
 
 ### 2.8 Link block (`0x8000`-`0x80FF`)
 
-*Status: specified 2026-11-12 (WP LK7), not implemented. The receiver side comes with WP LK5/LK6, the sender side with WP LK4. Firmware at de9614c lists none of these IDs and refuses all of them. The design is in the SYS2 link spec, section 5.3; `link_protocol_spec.md` (WP LK1) will hold the line protocol.*
+*Status: specified 2026-11-12 (WP LK7). The sender side is implemented by WP LK4 (`firmware/DSPi-Sender`, `Documentation/Features/link_sender.md`; host-tested, not yet run on hardware). Receiver side partly implemented by WP LK5 (2026-11-13, HW-untested): RP2350 builds with `DSPI_LINK` list and serve `0x8000` INFO, `0x8001` STATUS, `0x8002` CONFIG, `0x8003` SLOTS, `0x8008` CTRL_MSG (IN), `0x8009` STATS_RESET, `0x800A` DIAG and event `0xE1` (`EXT_NOTIFY_FEATURES` bit 2). `0x8004`-`0x8006`, `0xE2`, `d_local_min/max` and the phase fields are LK6's (they read 0 or are not listed). No repeater: `tx_pin` and `txdis_pin` must be `0xFF`. The LOS pin is reported in STATUS, not acted on. The receiver's behaviour and limits are in `link_receiver.md`. The design is in the SYS2 link spec, section 5.3; `link_protocol_spec.md` (WP LK1) will hold the line protocol.*
 
 These sub-commands configure and observe the multi-unit audio link. One sender (the master clock) sends an 8b/10b frame stream to optical receivers, and every receiver plays link frame F a configured number of frames, D, after F arrives. The IDs are in this fork's private range (1.2), so upstream will not assign them. Everything below applies to every link ID.
 
@@ -307,7 +307,8 @@ IN only, 52 bytes. On a receiver it describes the link input. On a sender, offse
 | 40 | 4 | `vcxo_ppm` | f32, the soft VCXO's current correction |
 | 44 | 4 | `phase_error_frames` | f32, the phase error e in frames (SYS2 3.1); 0 unless `EXT_LINK_PHASE.state` is 2 |
 | 48 | 2 | `fill_frames` | output ring fill in frames (the guard term) |
-| 50 | 2 | reserved | 0 |
+| 50 | 1 | `hop_delay_frames` | a re-emitter (fan-out, role 4, or repeater, role 3): frames between receiving link frame F and sending it again (`link_protocol_spec.md` 7.2), 0 while it is not re-emitting. 0 on every other unit. The hub compensates it through `EXT_LINK_PHASE.hops_offset` (2.8.5) |
+| 51 | 1 | reserved | 0 |
 
 The counters are those of `link_protocol_spec.md` 8.9, which defines exactly what each one counts. They run from boot or from the last `EXT_LINK_STATS_RESET` and wrap at 2^32. The four bench counters of 8.9 (`comma_errors`, `counter_errors`, `code_errors`, `idle_errors`) are in `EXT_LINK_DIAG` (2.8.11).
 
@@ -327,6 +328,7 @@ IN / OUT, 8 bytes.
 | 7 | reserved | 0 | 0 |
 
 - **Receiver:** the link input runs while `enable` is 1 *and* the input source is LINK (`REQ_SET_INPUT_SOURCE 0xE0`, value 7; stock firmware refuses 7). It uses the S/PDIF receiver's PIO and DMA, which are free only then. Under any other source, or with `enable` 0, `state` reads 0, and LINK as the source plays silence. Clearing `enable` while locked sends `0xE1` with reason `DISABLED`.
+- **Muted and test-pattern streams play silence.** While the superframe's flags (`EXT_LINK_STATUS.sf_flags`) show system mute (bit 0) or a test pattern (bit 4, PRBS-7 payload, which is not audio), a receiver stays locked, follows the rate, counts and reports as usual, but its link inputs play silence. Audio returns with the first superframe that clears the bit.
 - **Sender:** `enable` 1 slaves the sender to its link input (fan-out mode, `role` 4).
 - **Refused (STALL / `ERROR`):** `enable` above 1, `class` above 3, undefined flag bits or a nonzero reserved byte, or a pin that is neither `0xFF` nor a header GPIO (0-22, 26-28; 23-25 and 29 are internal on a Pico 2). Also refused: two set pins that are equal, `tx_pin` set on a sender or on a build without `REPEATER`, `los_pin` on a build without `LOS_PIN`, and a pin that the live configuration already uses for something else (an output slot, the PDM sub, ADAT, UART, I2C, an enabled S/PDIF input). The firmware checks that last rule against its pin table at the time of the write.
 
@@ -349,7 +351,7 @@ IN / OUT, 8 bytes. Receivers only.
 | 0 | 1 | `mode` | 0 fill servo (today's behaviour), 1 phase lock (SYS2 3.1) | 1 |
 | 1 | 1 | reserved | 0 | 0 |
 | 2 | 2 | `d_local` | frames between the arrival of link frame F and its samples leaving the outputs (SYS2 3.2: `D - hops`, written by the hub) | 128 |
-| 4 | 2 | `hops_offset` | i16, normally 0 (`d_local` already includes the hops); a trim for measured offsets | 0 |
+| 4 | 2 | `hops_offset` | i16, the hub's compensation for re-emitters that delay the stream by more than one frame: `-sum(hop_delay_frames - 1)` over the fan-outs and repeaters between the sender and this unit (`link_protocol_spec.md` 7.2; `d_local = D - hops` counts one frame per hop). 0 for a unit fed directly or when every hop takes one frame. The hub may add a trim for measured offsets | 0 |
 | 6 | 1 | `flags` | IN: bit 0 `D_BELOW_MIN` (the effective delay is below `d_local_min`, for example after the latency option changed; the unit then runs in fill-servo behaviour until a valid value is written). OUT: must be 0 | 0 |
 | 7 | 1 | `state` | *IN only*: 0 free, 1 anchoring, 2 locked, 3 re-anchor pending | |
 
@@ -415,6 +417,7 @@ Sender builds only. IN / OUT, 16 bytes.
 
 - **`class` change.** Not announced in-band (the protocol has no op for it, because it changes the line rate itself). While links run, the sender restarts every link output at the new line rate. The receivers lose lock (`0xE1`), re-detect the class and lock again. That is a dropout of tens of milliseconds, so a host changes the class only with the system muted.
 - **`rate_code` or `channels` change.** Carried in-band: while links run, the sender schedules apply op `RATE` at the first superframe boundary (a multiple of 32) at least 2400 frames (50 ms at 48 kHz) ahead, with `value` = the new C, or 0 when C is unchanged (`link_protocol_spec.md` 6.5). Receivers switch at that frame. The IN form shows the requested values at once; the superframe (`EXT_LINK_CTRL_MSG` IN) shows the old ones until the switch.
+- **What is a change.** `class`, `rate_code` and `channels` are compared with the last accepted request (the IN form), not with the stream. So writing the stream's old layout back while its `RATE` is pending is a change (and is refused, below), and rewriting the pending request is no change: it is accepted, updates the other fields and leaves the `RATE` as scheduled. A `RATE` scheduled through `EXT_LINK_CTRL_MSG` moves the requested `rate_code` too.
 - **Refused (STALL / `ERROR`):** `channels` above `link_max_channels` for the class and rate, a `class` outside `class_mask`, `rate_code` above 2, `test_pattern` above 3, a nonzero `slot_map_id`, enable or TX_DISABLE bits at or above `max_links`, a bad `sync_pin`, undefined flag bits or a nonzero reserved byte. Also refused: a `rate_code` or `channels` change while links run and an apply is already pending (the sender carries one apply at a time; wait for `EXT_LINK_CTRL_MSG` IN to show it gone).
 
 #### 2.8.9 `EXT_LINK_CTRL_MSG` (0x8008)
@@ -463,6 +466,10 @@ IN only, 64 bytes, for bench tools (`link_check.py`, SYS2 8a). Byte 0 is a layou
 | 48 | 4 | u32 `code_errors`: non-data symbols in heads and decoded banks |
 | 52 | 4 | u32 `idle_errors`: non-idle padding symbols |
 | 56 | 8 | reserved |
+
+A sender build (WP LK4) answers with its own layout, byte 0 = `0x81`: engine state, encoder cycles per frame against
+the frame's budget, ring lead, FIFO and USB counters, feedback value, fan-out delay and input rate
+(`Documentation/Features/link_sender.md` 7.1).
 
 #### 2.8.12 Link events `0xE1`, `0xE2`
 
@@ -536,6 +543,7 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 | `config.h` | `FW_FIX_*`, `FW_FIXES` (the `EXT_FIRMWARE_FIXES` value) |
 | planned (LK4-LK6) | `EXT_LINK_*` IDs in `config.h`, the link sub-commands in `ext_ids[]` / `ext_set_len()` / the handlers, `NOTIFY_FEAT_LINK_STATE` / `NOTIFY_FEAT_APPLY_RESULT` and the `0xE1` / `0xE2` pushers in `notify.{c,h}`, `link_rx.c` / `link_tx.c` |
 | `tools/midi_ctrl/fake_device.py` | `FakeLink`: the control-plane model of 2.8 (host development and tests) |
+| `firmware/DSPi-Sender/sender_vendor.c` | the sender build's link block (WP LK4): 0x0003, 0x8000-0x8002, 0x8005, 0x8007-0x800A; `sender_link.c` holds the `EXT_LINK_TX` / `EXT_LINK_CTRL_MSG` parsing and the RATE scheduling |
 
 **Adding a sub-command:** pick the next free ID (`0x0001`-`0x7FFF` only after agreeing it with Weeb Labs; a link sub-command takes the next free ID from `0x800B`). Add it to `config.h`, to `ext_ids[]` in ascending order and to `ext_set_len()` if it has an OUT form, then add cases to `ext_handle_set()` / `ext_handle_get()` and a row to section 2.
 
@@ -547,5 +555,7 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 - 2026-11-12: `0x0004` `EXT_IDENTIFY` added.
 - 2026-11-12: `0x0005` `EXT_RESET_INFO` added.
 - 2026-11-12: `0x0006` `EXT_FIRMWARE_FIXES` added (bit 0 `FW_FIX_BULK_DB_POWF`).
+- 2026-11-13: the sender side of the link block implemented (WP LK4, `firmware/DSPi-Sender`); `EXT_LINK_DIAG` sender layout `0x81`.
+- 2026-11-13: fixups LK45F (review lk45): `EXT_LINK_STATUS` offset 50 `hop_delay_frames`, and `hops_offset` is the hub's compensation for re-emitters slower than one frame (`link_protocol_spec.md` 7.2); a receiver plays silence on muted and test-pattern streams (2.8.3); `EXT_LINK_TX` defines "a change" (2.8.8).
 - 2026-11-13: link block aligned with `link_protocol_spec.md` (review lk): counter definitions, `EXT_LINK_DIAG` offsets 32-63 (trim scan and bench counters instead of a histogram), per-unit `RATE` refused, `EXT_LINK_CTRL_MSG` scheduling rules, capacity from `link_max_channels()`, `class` changes not announced in-band, 0xE1 reason 3 renamed `FRAME_ERRORS`.
 - 2026-11-12: link block `0x8000`-`0x800A` specified (WP LK7, SYS2 5.3), with `EXT_NOTIFY_FEATURES` bits 2 and 3 and events `0xE1` / `0xE2`; `0x8000`-`0x80FF` becomes the fork's link range. No firmware implements it yet.

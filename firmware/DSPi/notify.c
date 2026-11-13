@@ -505,6 +505,20 @@ void notify_push_clip(uint32_t mask) {
     restore_interrupts(flags);
 }
 
+void notify_push_link_state(uint8_t state, uint8_t cls, uint8_t reason, uint32_t frame_low) {
+    uint32_t flags = save_and_disable_interrupts();
+    NotifyRingEntry e = {
+        .event_id = NOTIFY_EVT_LINK_STATE,
+        .source   = PARAM_SRC_INTERNAL,
+    };
+    e.value[0] = state;
+    e.value[1] = cls;
+    e.value[2] = reason;
+    memcpy(&e.value[3], &frame_low, 4);
+    ring_push_locked(&e);
+    restore_interrupts(flags);
+}
+
 void notify_clip_service(uint32_t now_ms) {
     if (clip_notify_latch == 0) return;
     if (clip_pushed_once && (uint32_t)(now_ms - clip_last_push_ms) < NOTIFY_CLIP_MIN_INTERVAL_MS)
@@ -824,6 +838,21 @@ uint16_t notify_peek_next_for(NotifyConsumer c, uint8_t *out_buf, uint16_t max_l
             out_buf[6] = 0;
             out_buf[7] = 0;
             memcpy(&out_buf[8], e.value, 4);
+            return 12;
+        }
+
+        case NOTIFY_EVT_LINK_STATE: {
+            // 12 bytes: state, class, reason, pad, F low 32 bits LE.
+            if (max_len < 12) return 0;
+            out_buf[0] = NOTIFY_V2_VERSION;
+            out_buf[1] = NOTIFY_EVT_LINK_STATE;
+            out_buf[2] = 0;
+            out_buf[3] = seq;
+            out_buf[4] = e.value[0];
+            out_buf[5] = e.value[1];
+            out_buf[6] = e.value[2];
+            out_buf[7] = 0;
+            memcpy(&out_buf[8], &e.value[3], 4);
             return 12;
         }
 
