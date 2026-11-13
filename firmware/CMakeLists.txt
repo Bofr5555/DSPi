@@ -42,4 +42,11 @@ add_subdirectory(pico-extras/src/rp2_common/pico_audio_i2s_multi)
 # S/PDIF receiver library (forked from elehobica/pico_spdif_rx, patched for DSPi)
 add_subdirectory(pico-extras/src/rp2_common/pico_spdif_rx)
 
-add_subdirectory(DSPi)
+# DSPI_ROLE_SENDER (WP LK4): build the link sender (firmware/DSPi-Sender, RP2350
+# only) instead of DSPi.  OFF builds are unchanged.
+option(DSPI_ROLE_SENDER "Build the link sender (USB sound card driving link outputs) instead of DSPi" OFF)
+if (DSPI_ROLE_SENDER)
+    add_subdirectory(DSPi-Sender)
+else()
+    add_subdirectory(DSPi)
+endif()

@@ -228,7 +228,7 @@ Current firmware answers `01 00 00 00`.
 
 ### 2.8 Link block (`0x8000`-`0x80FF`)
 
-*Status: specified 2026-11-12 (WP LK7), not implemented. The receiver side comes with WP LK5/LK6, the sender side with WP LK4. Firmware at de9614c lists none of these IDs and refuses all of them. The design is in the SYS2 link spec, section 5.3; `link_protocol_spec.md` (WP LK1) will hold the line protocol.*
+*Status: specified 2026-11-12 (WP LK7). The sender side is implemented by WP LK4 (`firmware/DSPi-Sender`, `Documentation/Features/link_sender.md`; host-tested, not yet run on hardware); the receiver side comes with WP LK5/LK6. Firmware at de9614c lists none of these IDs and refuses all of them. The design is in the SYS2 link spec, section 5.3; `link_protocol_spec.md` (WP LK1) will hold the line protocol.*
 
 These sub-commands configure and observe the multi-unit audio link. One sender (the master clock) sends an 8b/10b frame stream to optical receivers, and every receiver plays link frame F a configured number of frames, D, after F arrives. The IDs are in this fork's private range (1.2), so upstream will not assign them. Everything below applies to every link ID.
 
@@ -464,6 +464,10 @@ IN only, 64 bytes, for bench tools (`link_check.py`, SYS2 8a). Byte 0 is a layou
 | 52 | 4 | u32 `idle_errors`: non-idle padding symbols |
 | 56 | 8 | reserved |
 
+A sender build (WP LK4) answers with its own layout, byte 0 = `0x81`: engine state, encoder cycles per frame against
+the frame's budget, ring lead, FIFO and USB counters, feedback value, fan-out delay and input rate
+(`Documentation/Features/link_sender.md` 7.1).
+
 #### 2.8.12 Link events `0xE1`, `0xE2`
 
 Both events are v2 packets of 12 bytes. They are sent on every notification consumer (USB EP 0x83, UART, USB MIDI), like the clip event (2.4.1). Each is announced by an `EXT_NOTIFY_FEATURES` bit (2.4).
@@ -536,6 +540,7 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 | `config.h` | `FW_FIX_*`, `FW_FIXES` (the `EXT_FIRMWARE_FIXES` value) |
 | planned (LK4-LK6) | `EXT_LINK_*` IDs in `config.h`, the link sub-commands in `ext_ids[]` / `ext_set_len()` / the handlers, `NOTIFY_FEAT_LINK_STATE` / `NOTIFY_FEAT_APPLY_RESULT` and the `0xE1` / `0xE2` pushers in `notify.{c,h}`, `link_rx.c` / `link_tx.c` |
 | `tools/midi_ctrl/fake_device.py` | `FakeLink`: the control-plane model of 2.8 (host development and tests) |
+| `firmware/DSPi-Sender/sender_vendor.c` | the sender build's link block (WP LK4): 0x0003, 0x8000-0x8002, 0x8005, 0x8007-0x800A; `sender_link.c` holds the `EXT_LINK_TX` / `EXT_LINK_CTRL_MSG` parsing and the RATE scheduling |
 
 **Adding a sub-command:** pick the next free ID (`0x0001`-`0x7FFF` only after agreeing it with Weeb Labs; a link sub-command takes the next free ID from `0x800B`). Add it to `config.h`, to `ext_ids[]` in ascending order and to `ext_set_len()` if it has an OUT form, then add cases to `ext_handle_set()` / `ext_handle_get()` and a row to section 2.
 
@@ -547,5 +552,6 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 - 2026-11-12: `0x0004` `EXT_IDENTIFY` added.
 - 2026-11-12: `0x0005` `EXT_RESET_INFO` added.
 - 2026-11-12: `0x0006` `EXT_FIRMWARE_FIXES` added (bit 0 `FW_FIX_BULK_DB_POWF`).
+- 2026-11-13: the sender side of the link block implemented (WP LK4, `firmware/DSPi-Sender`); `EXT_LINK_DIAG` sender layout `0x81`.
 - 2026-11-13: link block aligned with `link_protocol_spec.md` (review lk): counter definitions, `EXT_LINK_DIAG` offsets 32-63 (trim scan and bench counters instead of a histogram), per-unit `RATE` refused, `EXT_LINK_CTRL_MSG` scheduling rules, capacity from `link_max_channels()`, `class` changes not announced in-band, 0xE1 reason 3 renamed `FRAME_ERRORS`.
 - 2026-11-12: link block `0x8000`-`0x800A` specified (WP LK7, SYS2 5.3), with `EXT_NOTIFY_FEATURES` bits 2 and 3 and events `0xE1` / `0xE2`; `0x8000`-`0x80FF` becomes the fork's link range. No firmware implements it yet.
