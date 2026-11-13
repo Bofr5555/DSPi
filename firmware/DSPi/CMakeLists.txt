@@ -247,6 +247,28 @@ if (DSPI_LINK AND NOT PICO_PLATFORM STREQUAL "rp2040")
     endif()
 endif()
 
+# DSPI_ALINK_USB (WP USB1): alink USB-direct units.  SOF-locked clock, USB-frame
+# time base, phase lock and apply-at-frame over USB (EXT_ALINK_USB, spec 2.9).
+# RP2040 and RP2350.  Opt-in at run time (mode 0 by default: stock behaviour).
+# It reuses link/link_phase.c (built above on link builds).
+# DSPI_ALINK_USB_GPIO=<pin>: bench builds only, a GPIO pulsed at every 128th
+# SOF and at SYNC_PULSE ops (Documentation/Bench/usb_direct_bench.md E0).
+option(DSPI_ALINK_USB "Build the alink USB-direct sync (SOF lock, phase lock)" ON)
+set(DSPI_ALINK_USB_GPIO "" CACHE STRING "Bench only: GPIO for the SOF / SYNC_PULSE marker (empty = none)")
+if (DSPI_ALINK_USB)
+    target_sources(DSPi PRIVATE alink_usb.c alink_usb/alink_usb_core.c)
+    if (NOT (DSPI_LINK AND NOT PICO_PLATFORM STREQUAL "rp2040"))
+        target_sources(DSPi PRIVATE link/link_phase.c)
+    endif()
+    target_compile_definitions(DSPi PRIVATE DSPI_ALINK_USB=1)
+    if (PICO_PLATFORM MATCHES "rp2350")
+        target_compile_definitions(DSPi PRIVATE ALINK_USB_HW_TIMESTAMP=1)
+    endif()
+    if (NOT DSPI_ALINK_USB_GPIO STREQUAL "")
+        target_compile_definitions(DSPi PRIVATE DSPI_ALINK_USB_GPIO=${DSPI_ALINK_USB_GPIO})
+    endif()
+endif()
+
 target_include_directories(DSPi PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}/generated

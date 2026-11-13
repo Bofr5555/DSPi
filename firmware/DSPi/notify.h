@@ -130,6 +130,13 @@
 // target_F_low32_LE].  Announced by NOTIFY_FEAT_APPLY_RESULT (link builds only).
 #define NOTIFY_EVT_APPLY_RESULT      0xE2
 
+// USB sync state (extension_channel_spec.md 2.9.5, WP USB1): EXT_ALINK_USB_STATUS
+// state changed, a re-anchor, a stream gap or the host range.  Rate-limited to
+// one per 250 ms by alink_usb_core.c.  Packet (12 bytes): [ver=2, evt=0xE3,
+// flags=0, seq, state, phase_state, reason, 0, S_low32_LE].  Announced by
+// NOTIFY_FEAT_ALINK_USB.
+#define NOTIFY_EVT_ALINK_USB          0xE3
+
 // v2 protocol version byte (first byte of every v2 packet)
 #define NOTIFY_V2_VERSION            0x02
 
@@ -172,12 +179,21 @@ typedef enum {
 // NOTIFY_EVT_APPLY_RESULT (0xE2) is sent once per completed apply-at-frame op.
 #define NOTIFY_FEAT_APPLY_RESULT     (1u << 3)
 
+// NOTIFY_EVT_ALINK_USB (0xE3) is sent on USB sync state changes (WP USB1).
+#define NOTIFY_FEAT_ALINK_USB         (1u << 4)
+
 #if defined(DSPI_LINK) && DSPI_LINK
-#define NOTIFY_FEATURES              (NOTIFY_FEAT_BULK_SOURCE | NOTIFY_FEAT_CLIP_EVENT | NOTIFY_FEAT_LINK_STATE | \
-                                      NOTIFY_FEAT_APPLY_RESULT)
+#define NOTIFY_FEATURES_LINK         (NOTIFY_FEAT_LINK_STATE | NOTIFY_FEAT_APPLY_RESULT)
 #else
-#define NOTIFY_FEATURES              (NOTIFY_FEAT_BULK_SOURCE | NOTIFY_FEAT_CLIP_EVENT)
+#define NOTIFY_FEATURES_LINK         0u
 #endif
+#if defined(DSPI_ALINK_USB) && DSPI_ALINK_USB
+#define NOTIFY_FEATURES_ALINK_USB     (NOTIFY_FEAT_ALINK_USB | NOTIFY_FEAT_APPLY_RESULT)
+#else
+#define NOTIFY_FEATURES_ALINK_USB     0u
+#endif
+#define NOTIFY_FEATURES              (NOTIFY_FEAT_BULK_SOURCE | NOTIFY_FEAT_CLIP_EVENT | NOTIFY_FEATURES_LINK | \
+                                      NOTIFY_FEATURES_ALINK_USB)
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -268,6 +284,9 @@ void notify_push_link_state(uint8_t state, uint8_t cls, uint8_t reason, uint32_t
 
 // Apply result event (NOTIFY_EVT_APPLY_RESULT); never rate-limited.
 void notify_push_apply_result(uint8_t op, uint8_t result, uint32_t frame_low);
+
+// USB sync event (NOTIFY_EVT_ALINK_USB); the caller rate-limits.
+void notify_push_alink_usb(uint8_t state, uint8_t phase_state, uint8_t reason, uint32_t s_low);
 
 // ---------------------------------------------------------------------------
 // Consumers

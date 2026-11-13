@@ -1,6 +1,6 @@
 # Extension Channel (`REQ_EXTENSION`, 0x00)
 
-*Last updated: 2026-11-12*
+*Last updated: 2026-11-13*
 *Status: implemented on the bofr fork, HW-untested; the link block (2.8) is specified, not implemented*
 *Platforms: RP2040 + RP2350*
 
@@ -43,7 +43,7 @@ IN replies are truncated to `wLength` like every other DSPi GET. On UART / I2C /
 |---|---|
 | `0x0000` | `EXT_LIST` (discovery) |
 | `0x0001`-`0x7FFF` | Features coordinated with Weeb Labs. Every assigned ID is listed in section 2. An ID is never reused for a different meaning. |
-| `0x8000`-`0x80FF` | This fork's link block (2.8), assigned by the fork; an ID is never reused for a different meaning. Fork firmware without the link and stock firmware refuse them. |
+| `0x8000`-`0x80FF` | This fork's private blocks, assigned by the fork; an ID is never reused for a different meaning. `0x8000`-`0x800F` the link block (2.8), `0x8010`-`0x801F` the alink USB-direct block (2.9). Firmware without a block and stock firmware refuse its IDs. |
 | `0x8100`-`0xFFFF` | Experimental or private. Never shipped in a release build; hosts must not depend on them. |
 
 ## 2. Sub-commands
@@ -58,14 +58,17 @@ IN replies are truncated to `wLength` like every other DSPi GET. On UART / I2C /
 | `0x0005` | `EXT_RESET_INFO` | `ResetInfo`, 20 bytes | none (STALL) |
 | `0x0006` | `EXT_FIRMWARE_FIXES` | `uint32` LE fixed-bug flags | none (STALL) |
 | `0x8000`-`0x800A` | link block | section 2.8; which IDs and directions depend on the build (receiver or sender) | section 2.8 |
+| `0x8005`, `0x8006` | `EXT_FRAME_COUNTER`, `EXT_APPLY_AT_FRAME` | also on builds with the alink USB-direct block, on the USB time base (2.9.4) | 2.9.4 |
+| `0x8010` | `EXT_ALINK_USB` | 8 bytes (2.9.2) | 8 bytes (2.9.2) |
+| `0x8011` | `EXT_ALINK_USB_STATUS` | 64 bytes (2.9.3) | none (STALL) |
 
-Current firmware answers `EXT_LIST` with `01 00 02 00 03 00 04 00 05 00 06 00`.
+Firmware without the link and the alink USB-direct block answers `EXT_LIST` with `01 00 02 00 03 00 04 00 05 00 06 00`. An RP2040 build (USB-direct block, no link) answers `01 00 02 00 03 00 04 00 05 00 06 00 05 80 06 80 10 80 11 80`.
 
 ### 2.1 `EXT_LIST` (0x0000)
 
 The IN-only discovery read. A host can read 64 bytes (room for 32 IDs) and use the reply length to count the IDs. On stock firmware this read STALLs.
 
-- **Order.** The IDs come in ascending order, so a link build lists `0x8000`-`0x800A` after `0x0006`. A receiver build answers `01 00 02 00 03 00 04 00 05 00 06 00 00 80 01 80 02 80 03 80 04 80 05 80 06 80 08 80 09 80 0a 80` (16 IDs, 32 bytes); a sender build lists the IDs of the table in 2.8.
+- **Order.** The IDs come in ascending order, so a link build lists `0x8000`-`0x800A` after `0x0006`. A receiver build answers `01 00 02 00 03 00 04 00 05 00 06 00 00 80 01 80 02 80 03 80 04 80 05 80 06 80 08 80 09 80 0a 80 10 80 11 80` (18 IDs, 36 bytes; the last two are the alink USB-direct block, 2.9); a sender build lists the IDs of the table in 2.8.
 - **The list is the contract.** An ID that is not listed STALLs (`ERROR` on UART / I2C / MIDI) in both directions, including the link IDs on firmware without the link. A host never probes unlisted IDs, and it reads a feature's own flags (`EXT_NOTIFY_FEATURES`, `EXT_LINK_INFO.features`) before relying on the details.
 - **Limit.** The firmware builds the reply in its 64-byte response buffer, so the list holds at most 32 IDs. Adding a 33rd needs a bigger buffer first.
 
@@ -124,8 +127,9 @@ IN only: a `uint32` (little-endian) of flags that describe how the firmware fill
 | 0 | `NOTIFY_FEAT_BULK_SOURCE` | A bulk SET's `BULK_INVALIDATED` carries the SET's dispatch source (`HOST_SET` for USB vendor, `UART`, `I2C`, `MIDI`) instead of `BULK_SET`. An invalidation merged from causes with different sources carries `UNKNOWN`. A pending invalidation absorbs a new one only while nothing is queued after it. See `notification_protocol_v2_spec.md` §3.5.1. |
 | 1 | `NOTIFY_FEAT_CLIP_EVENT` | The device sends `NOTIFY_EVT_EXT_CLIP` (`0xE0`) when a clip flag sets (section 2.4.1). |
 | 2 | `NOTIFY_FEAT_LINK_STATE` | The device sends `NOTIFY_EVT_LINK_STATE` (`0xE1`) on link lock, loss and re-anchor (2.8.12). Set only by link builds. |
-| 3 | `NOTIFY_FEAT_APPLY_RESULT` | The device sends `NOTIFY_EVT_APPLY_RESULT` (`0xE2`) for each completed apply-at-frame op (2.8.12). Set only by receiver builds with `APPLY_AT_FRAME`. |
-| 4-31 | reserved | zero |
+| 3 | `NOTIFY_FEAT_APPLY_RESULT` | The device sends `NOTIFY_EVT_APPLY_RESULT` (`0xE2`) for each completed apply-at-frame op (2.8.12). Set by receiver builds with `APPLY_AT_FRAME` and by builds with the alink USB-direct block (2.9.4). |
+| 4 | `NOTIFY_FEAT_ALINK_USB` | The device sends `NOTIFY_EVT_ALINK_USB` (`0xE3`) on alink USB-direct state changes (2.9.5). Set by builds with the alink USB-direct block. |
+| 5-31 | reserved | zero |
 
 A host that sees bit 0 can recognise its own bulk write from the source byte and drop the time-window echo heuristic it needs for older firmware.
 
@@ -361,7 +365,7 @@ IN / OUT, 8 bytes. Receivers only.
 
 #### 2.8.6 `EXT_FRAME_COUNTER` (0x8005)
 
-IN only, 16 bytes: `u64 frame` (F at the moment of the read; 0 unless `state` is 2 or 3; on a sender, the counter it sends), `u32 time_us` (the unit's `time_us_32()` at that moment), `u32 output_frames` (O, output frames played since the outputs started in sync, low 32 bits). The hub reads every unit in one tick and checks that the F values agree within the Link round trip (SYS2 3.5). `frame - output_frames` is constant while the unit is phase-locked.
+IN only, 16 bytes (20 since WP USB1: byte 16 `time_base`, 17 reserved, 18-19 `bus_frame`; 2.9.4): `u64 frame` (F at the moment of the read; 0 unless `state` is 2 or 3; on a sender, the counter it sends), `u32 time_us` (the unit's `time_us_32()` at that moment), `u32 output_frames` (O, output frames played since the outputs started in sync, low 32 bits). The hub reads every unit in one tick and checks that the F values agree within the Link round trip (SYS2 3.5). `frame - output_frames` is constant while the unit is phase-locked.
 
 #### 2.8.7 `EXT_APPLY_AT_FRAME` (0x8006)
 
@@ -373,7 +377,7 @@ Receivers only. **OUT**, 16 bytes, queues one operation for link frame `frame`:
 | 8 | 1 | `op` |
 | 9 | 1 | `arg` |
 | 10 | 2 | `value` (i16) |
-| 12 | 4 | reserved, 0 |
+| 12 | 4 | reserved, 0 (byte 12 is `time_base` since WP USB1: 0 here; 1 and 2 address the USB time base, 2.9.4) |
 
 | `op` | Name | `arg` | `value` |
 |---|---|---|---|
@@ -517,6 +521,138 @@ Example: `02 e2 00 01 04 00 00 00 a0 4b 0f 00`: MASTER_VOLUME applied at frame 1
 
 The `midi_ctrl` tool's fake device (`tools/midi_ctrl/fake_device.py`, `FakeDevice(link="receiver" | "sender")`) implements this control plane: validation, refusals, the per-build ID lists, the apply queue and both events. Its tests (`tests/test_midi_ctrl.py`, class `LinkBlock`) check the example bytes in this section, so host code can be built against it before the firmware exists. `midi_ctrl.py link` prints a unit's link state, read only.
 
+### 2.9 alink USB-direct block (`0x8010`-`0x801F`)
+
+*Status: implemented by WP USB1 (2026-11-13), host-tested and simulated, not yet run on hardware. Every build with `DSPI_ALINK_USB` (the default; RP2040 and RP2350) lists `0x8010` and `0x8011` and serves `0x8005` `EXT_FRAME_COUNTER` and `0x8006` `EXT_APPLY_AT_FRAME` on the USB time base. Design and behaviour: `Documentation/Features/alink_usb.md`. Bench: `Documentation/Bench/usb_direct_bench.md`.*
+
+A unit whose input source is USB can run as an alink USB-direct unit: it locks its clock to the host's Start of Frame (SOF) instead of asking the host to follow its crystal, and plays every USB sample a fixed number of samples D after the sample arrived, so all units on one host play sample-aligned. It is the audio link's phase lock (2.8.5-2.8.7) with the USB bus as the time base. The IDs are in the fork's private range next to the link's.
+
+- **Opt-in.** `EXT_ALINK_USB.mode` is 0 by default. In mode 0 nothing a host can see changes: asynchronous feedback, the unit's crystal clock, the same packets, no `0xE3` events, apply ops refused. Only `EXT_LIST`, `EXT_NOTIFY_FEATURES` (bits 3 and 4) and these IDs are new.
+- **Discovery.** A host uses this block when `EXT_LIST` names `0x8010`. Fork firmware without it and stock firmware refuse every ID here (STALL / `ERROR`).
+- **Rules of 2.8 apply.** Little-endian, packed, normative offsets; IN replies truncated to `wLength` and only ever extended at the end; reserved fields read 0 and must be 0 on OUT; IN-only fields are ignored on OUT; a refused write changes nothing; no `PARAM_CHANGED`; admin-only on the hub.
+- **Persistence.** `EXT_ALINK_USB` takes effect at once and is saved by `REQ_SAVE_OUTPUT_CONFIG` (`0x52`) in its own directory block (V27); preset loads and factory resets of the DSP settings do not touch it. A directory saved by older firmware reads as mode 0.
+- **Only while USB is the source.** With any other input source the unit behaves as stock (the VCXO belongs to that source), `EXT_ALINK_USB_STATUS.state` reads 0, and the USB-time-base forms of 0x8005/0x8006 are not used.
+
+#### 2.9.1 The USB time base
+
+- Every device on one host sees the same 1 ms SOF with the same 11-bit frame number (the *bus frame*). The unit counts SOFs into a 32-bit frame count **N** with `N mod 2048 = bus frame`. Units started at different times count from different origins, always by multiples of 2048.
+- The **sample index** is `S = spf * N + k`, `spf` = samples per frame (48 at 48 kHz, 96 at 96 kHz), k = 0..spf-1. The host's packet in frame N carries `S = spf*N .. spf*N + spf - 1`. The sample *arriving now* is `F_arr = spf * (N + time since the SOF of N / 1 ms)`. Equal S means the same bus instant on every unit; only the bus frame (N mod 2048) is comparable between units without a read.
+- The SOF instant is taken from the RP2350's `SOF_TIMESTAMP_RAW - SOF_TIMESTAMP_LAST` (the PHY's 21 ns, read against the 1 us timer) or from the RP2040's interrupt entry (about 1-4 us). Each OUT packet is stamped with its frame in the interrupt that completes it.
+- 44.1 kHz has no whole number of samples per frame: rate lock only (mode 1 behaviour).
+- N is 32 bits: it wraps after 49.7 days, which costs one re-anchor.
+
+#### 2.9.2 `EXT_ALINK_USB` (0x8010)
+
+IN / OUT, 8 bytes.
+
+| Offset | Size | Field | Meaning | Default |
+|---|---|---|---|---|
+| 0 | 1 | `mode` | 0 off (stock: asynchronous feedback, crystal clock), 1 SOF rate lock, 2 SOF rate lock + phase lock | 0 |
+| 1 | 1 | `flags` | bit 0 `AUTO_REANCHOR`: a phase error beyond 2 samples re-anchors (clear: state 3 "pending", the servo pulls it in while playing); bits 1-7 reserved, 0 | `0x01` |
+| 2 | 2 | `d` | u16, samples from the arrival of USB sample S (2.9.1) to its output; the same on every unit that should play aligned | 192 |
+| 4 | 2 | reserved | 0 | 0 |
+| 6 | 1 | `status_flags` | *IN only*: bit 0 `D_BELOW_MIN`, bit 1 `D_ABOVE_MAX` (mode 2 with D outside `d_min..d_max` now: runs as mode 1), bit 2 `RATE_UNSUPPORTED` (mode 2 at 44.1 kHz: runs as mode 1) | |
+| 7 | 1 | `state` | *IN only*: `EXT_ALINK_USB_STATUS.state` | |
+
+- **Refused (STALL / `ERROR`):** `mode` above 2, undefined flag bits, `d` 0, a nonzero reserved byte, or `mode` 2 with `d` outside [`d_min`, `d_max`] (`EXT_ALINK_USB_STATUS` 26-29) at the time of the write.
+- **Limits.** `d_min = 1.5 * spf + block_cap + 32`, `d_max = 448 - block_cap`, with `block_cap` the output latency option's block cap. Every option USB can run (2 ms and up; the 0.67 and 1 ms options are not offered to USB) has a block cap of 49 at 48 kHz and 97 at 96 kHz, so the limits are **153..399 at 48 kHz** and **273..351 at 96 kHz** whatever the option. The default 192 (4.0 ms at 48 kHz) is valid at 48 kHz only; a 96 kHz system writes 273..351.
+- **Mode 1.** The unit measures the host's SOF rate against its crystal (2 s to the first estimate, then an 8-16 s window), pulls its soft VCXO to it (slew 6.7 ppm/s, so up to 45 s from 300 ppm; the asynchronous feedback keeps the fill meanwhile), then reports exactly nominal feedback (the host sends 48.000 samples per frame) and holds the ring fill with the VCXO. All units on one host then run at the same rate; their phase is whatever the streams started with.
+- **Mode 2.** Mode 1, then the anchor: the outputs mute, drain, prefill with silence and start when the arrival reaches D; the first measurement verifies within half a sample (whole-sample corrections, at most two, otherwise re-anchor), and the unit stays muted until then. From then on the outputs play the *timeline*: silence while no stream runs, and every packet placed by its S. A stream that stops and starts again, or a missing packet, never moves the timeline: constant latency across stream restarts, no re-anchor. The phase servo is the link's: `ppm = feed-forward + PI(e)`, `e = F_arr - (next_w - fill) - D`.
+- **Host range.** A host whose SOF rate is more than **295 ppm** from the unit's crystal cannot be followed (the VCXO has 300 ppm); the unit reports state 6, parks its VCXO and keeps the stock asynchronous behaviour until the host comes back below 285 ppm.
+- **Changes.** A write that changes `mode` or `d` while the timeline runs re-anchors (about D + 20 ms of silence, `0xE3` reason `REANCHOR`). Mode 0 parks the VCXO and cancels pending ops (`0xE2` result `cancelled`). Rewriting the same values does nothing.
+
+Example: `02 01 c0 00 00 00 00 05`: phase lock, automatic re-anchor, D 192, phase-locked.
+
+#### 2.9.3 `EXT_ALINK_USB_STATUS` (0x8011)
+
+IN only, 64 bytes.
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 1 | `state` | 0 off (mode 0, or the source is not USB), 1 no SOF (not configured, suspended, unplugged: no time base), 2 pull-in (measuring the host, VCXO slewing), 3 rate-locked (mode 1, or mode 2 that cannot phase-lock: see `status_flags`), 4 anchoring (mode 2: drain, prefill, start, verify; muted), 5 phase-locked (mode 2, with or without a stream), 6 rejected (host beyond 295 ppm: stock behaviour) |
+| 1 | 1 | `phase_state` | as `EXT_LINK_PHASE.state`: 0 free, 1 anchoring, 2 locked, 3 re-anchor pending (`AUTO_REANCHOR` clear) |
+| 2 | 1 | `rate_code` | 0 = 44.1 kHz, 1 = 48 kHz, 2 = 96 kHz, `0xFF` other |
+| 3 | 1 | `flags` | bit 0 `HW_TIMESTAMP` (RP2350 SOF timestamps), bit 1 `STREAM` (the host has the audio interface at alt > 0), bit 2 `NOMINAL_FEEDBACK` (the host follows the SOF-locked clock), bit 3 `TIME_BASE` (SOF seen within 50 ms) |
+| 4 | 4 | `host_ppm` | f32, the host's SOF rate against the unit's crystal (+ = host fast); 0 until measured |
+| 8 | 4 | `vcxo_ppm` | f32, the soft VCXO's correction |
+| 12 | 4 | `phase_error` | f32, e in samples; 0 unless `phase_state` is 2 or 3 |
+| 16 | 8 | `sample` | u64, S arriving now (2.9.1); 0 without a time base |
+| 24 | 2 | `bus_frame` | the bus frame of the latest SOF (bits 0-10) |
+| 26 | 2 | `d_min` | 2.9.2 |
+| 28 | 2 | `d_max` | 2.9.2 |
+| 30 | 2 | `fill` | output ring fill of slot 0, samples |
+| 32 | 2 | `stream_first_bus_frame` | bus frame of the first packet of the current stream placed on the timeline; `0xFFFF` none (no stream, or not phase-locked) |
+| 34 | 2 | reserved | 0 |
+| 36 | 4 | `stream_age_frames` | frames since that packet (`N_now - N_first`) |
+| 40 | 4 | `stream_shift` | i32 samples: silence the unit inserted for missing packets minus late samples it dropped, since that packet. The stream's content now plays `stream_shift` samples later than its first packet's placement implies |
+| 44 | 4 | `stream_samples` | stream samples placed since that packet |
+| 48 | 4 | `anchors` | anchors completed since boot |
+| 52 | 4 | `reanchors` | re-anchors since boot (phase error, new D or mode, an output reset by a preset load, flash write or rate change). A time-base jump (`0xE3` `SOF_LOST`) ends the timeline without counting here; the next anchor counts in `anchors` |
+| 56 | 4 | `missed_samples` | silence inserted for missing packets while streaming, since boot |
+| 60 | 4 | `late_samples` | samples dropped because their packet came too late, since boot |
+
+**Start offsets (U6).** Two units of one host are phase-locked to the bus, but a host that opens their streams one after the other (ALSA, PipeWire) puts the same content into different frames. The hub reads `EXT_ALINK_USB_STATUS` of each unit after the streams start and computes, per unit, the bus frame its content began in: `first = (bus_frame - stream_age_frames) mod 2048`, unwrapped near the hub's own reading of `bus_frame` (the streams started less than 1 s apart). Unit A's content then plays `((first_B - first_A) mod 2048, as a signed value) * spf + (shift_B - shift_A)` samples earlier than unit B's; the hub delays the earlier units by that many samples (`REQ_SET_DELAY` or `EXT_APPLY_AT_FRAME` `OUT_DELAY`). A custom sender that puts sample S of the programme into frame S / spf on every unit needs no correction.
+
+#### 2.9.4 `EXT_FRAME_COUNTER` (0x8005) and `EXT_APPLY_AT_FRAME` (0x8006) on the USB time base
+
+The link IDs are reused where the meaning is the same; a field selects the time base. A link-only host sees no change.
+
+**`EXT_FRAME_COUNTER` IN** is 20 bytes on every build that lists it (16 before WP USB1; a host reads at least 16):
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | `frame`: link F (time base 0) or USB S (time base 1) now |
+| 8 | 4 | `time_us` |
+| 12 | 4 | `output_frames`: output samples played since the outputs started |
+| 16 | 1 | `time_base`: 0 link frame F, 1 USB sample index S, `0xFF` none |
+| 17 | 1 | reserved, 0 |
+| 18 | 2 | `bus_frame`: time base 1 only, the bus frame of the latest SOF; 0 otherwise |
+
+The USB time base answers when the input source is USB and `EXT_ALINK_USB.mode` is not 0; otherwise the link answers (link builds) or `time_base` is `0xFF`. `frame - output_frames` is constant while the unit is phase-locked.
+
+**`EXT_APPLY_AT_FRAME` OUT**: byte 12, reserved on the link, is `time_base`:
+
+| `time_base` | `frame` (bytes 0-7) |
+|---|---|
+| 0 | link frame F (2.8.7) |
+| 1 | USB sample index S, as `EXT_FRAME_COUNTER` time base 1 and `EXT_ALINK_USB_STATUS.sample` report it |
+| 2 | a bus frame: bits 0-10 the bus frame number, bits 16-23 the sample in that frame (0..spf-1), every other bit 0. The unit takes the next occurrence of that frame; a frame within the last 64 frames is past (the op runs at once and reports `late`). So the same 8 bytes address the same instant on every unit of the host, with no read first, for up to 1.98 s ahead |
+
+- Ops, arguments, the 4-deep queue, CLICK at -20 dBFS and never on a muted unit (here: `REQ_SET_USER_MUTE` or the host's UAC mute), `CANCEL_ALL`, and the results are those of 2.8.7. An op acts on the sample S as it enters the pipeline, and every phase-locked unit with the same D outputs that sample at the same instant, D samples after it arrived. Ops also act on the silence of the timeline (no stream needed: a CLICK measures the units' skew without any programme).
+- **Refused (STALL / `ERROR`):** `time_base` 1 or 2 unless the input source is USB and `EXT_ALINK_USB_STATUS.phase_state` is 2 or 3 (phase-locked); a bad bus-frame form (bits outside 0-10 and 16-23, or a sample offset of spf or more); `time_base` above 2; everything 2.8.7 refuses. `CANCEL_ALL` with `time_base` 1 or 2 cancels the USB queue in any state.
+- **`CLICK`** is refused at apply time (result 3) on the RP2040, whose fixed-point pipeline has no click injection, and on the PDM sub output.
+- **`SYNC_PULSE`** is refused at apply time (result 3) except on bench builds with `-DDSPI_ALINK_USB_GPIO=<pin>`, where the pin goes high for one frame at the SOF of the op's frame (frame = S / spf; the pin also pulses at every SOF whose frame number is a multiple of 128). Such builds are for the bench only.
+- **IN** reads the USB queue's `pending`, `last_op`, `last_result`, `last_frame` (S) while the USB time base answers (as `EXT_FRAME_COUNTER`), the link's otherwise.
+- **Event `0xE2`** for a USB op carries the target in bus form in bytes 8-11: bus frame in bits 0-10, sample in bits 16-23 (from S: `bus = (S / spf) mod 2048`, `k = S mod spf`).
+
+Example (2.8.7's volume change, on the USB bus): MASTER_VOLUME -20 dB at bus frame 1100, sample 0: `4c 04 00 00 00 00 00 00 04 00 30 f8 02 00 00 00`. Once applied, `0xE2` reads `02 e2 00 <seq> 04 00 00 00 4c 04 00 00`.
+
+#### 2.9.5 Event `NOTIFY_EVT_ALINK_USB` (`0xE3`)
+
+Announced by `EXT_NOTIFY_FEATURES` bit 4 `NOTIFY_FEAT_ALINK_USB`; sent on every notification consumer like `0xE1`. 12 bytes:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0-3 | 4 | `2, 0xE3, 0, seq` |
+| 4 | 1 | `state` (as `EXT_ALINK_USB_STATUS.state`) |
+| 5 | 1 | `phase_state` |
+| 6 | 1 | `reason`: 0 `NONE`, 1 `LOCKED` (rate lock reached in mode 1, or phase-locked and playing in mode 2), 2 `HOST_RANGE` (state 6 entered, or the host back in range), 3 `SOF_LOST` (no SOF for 50 ms, or a gap of over 1 s: the timeline ends, it re-anchors when the bus returns), 4 `REANCHOR`, 5 `GAP` (packets missing while streaming: silence on the timeline, muted 20 ms, then the stream fades back in), 6 `DISABLED` (mode 0 written, or the source left USB), 7 `CONFIG` (mode 2 cannot phase-lock: 44.1 kHz or D outside the limits; it runs rate-locked) |
+| 7 | 1 | reserved, 0 |
+| 8 | 4 | S now, low 32 bits |
+
+Sent on every change of `state` and with every reason other than `NONE`, at most one per 250 ms; a burst collapses into one event with the latest state and reason (a host that needs every transition reads the counters in `EXT_ALINK_USB_STATUS`). Never sent in mode 0 except the one `DISABLED` that leaves another mode.
+
+Example: `02 e3 00 07 05 02 01 00 00 b4 c4 04`: phase-locked, reason `LOCKED`, S low 32 = 0x04c4b400.
+
+#### 2.9.6 Host recipe
+
+1. `EXT_LIST`: `0x8010` present. Read `EXT_NOTIFY_FEATURES` (decode `0xE3` only with bit 4, `0xE2` only with bit 3).
+2. Input source USB (`REQ_SET_INPUT_SOURCE` 0), stream at 48 kHz (or 96 kHz with D 273..351).
+3. Write `EXT_ALINK_USB` `02 01 <D LE> 00 00 00 00` on every unit, the same D; `REQ_SAVE_OUTPUT_CONFIG` to persist.
+4. Wait for state 5 (`0xE3` reason `LOCKED`, or poll `EXT_ALINK_USB_STATUS`): about 3-12 s after enumeration (pull-in from the host's offset at 6.7 ppm/s, then about D + 20 ms of muted anchoring). A unit that was phase-locked before a stream starts plays the stream at once.
+5. After every stream start read each unit's `stream_first_bus_frame`, `stream_age_frames` and `stream_shift` and equalise (2.9.3), unless the sender schedules the frames itself.
+6. Use `EXT_APPLY_AT_FRAME` time base 2 for ops that must land together on every unit (one write per unit, same 16 bytes).
+
 ## 3. Transports
 
 | Transport | Reaches `0x00`? | Refusal |
@@ -543,11 +679,14 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 | `config.h` | `FW_FIX_*`, `FW_FIXES` (the `EXT_FIRMWARE_FIXES` value) |
 | `link_input.{c,h}`, `link/link_phase.{c,h}` | the receiver's link block (WP LK5, LK6): `EXT_LINK_*` IDs in `config.h`, the sub-commands in `ext_ids[]` / `ext_set_len()` / the handlers, `NOTIFY_FEAT_LINK_STATE` / `NOTIFY_FEAT_APPLY_RESULT` and the `0xE1` / `0xE2` pushers in `notify.{c,h}`; `link_receiver.md` |
 | `tools/midi_ctrl/fake_device.py` | `FakeLink`: the control-plane model of 2.8 (host development and tests) |
+| `alink_usb.{c,h}`, `alink_usb/alink_usb_core.{c,h}` | the alink USB-direct block (WP USB1, 2.9): `EXT_ALINK_USB*` IDs in `config.h`, the 0x8005/0x8006 time-base dispatch in `vendor_commands.c`, `NOTIFY_FEAT_ALINK_USB` and `notify_push_alink_usb()` in `notify.{c,h}`, the V27 directory block in `flash_storage.c`, the SOF and packet-stamp hooks in `usb_audio.c`, the anchor in `main.c`; `Documentation/Features/alink_usb.md`; host tests `firmware/tests/test_alink_usb.c`, simulation `tools/alink_usb_sim/` |
 | `firmware/DSPi-Sender/sender_vendor.c` | the sender build's link block (WP LK4): 0x0003, 0x8000-0x8002, 0x8005, 0x8007-0x800A; `sender_link.c` holds the `EXT_LINK_TX` / `EXT_LINK_CTRL_MSG` parsing and the RATE scheduling |
 
-**Adding a sub-command:** pick the next free ID (`0x0001`-`0x7FFF` only after agreeing it with Weeb Labs; a link sub-command takes the next free ID from `0x800B`). Add it to `config.h`, to `ext_ids[]` in ascending order and to `ext_set_len()` if it has an OUT form, then add cases to `ext_handle_set()` / `ext_handle_get()` and a row to section 2.
+**Adding a sub-command:** pick the next free ID (`0x0001`-`0x7FFF` only after agreeing it with Weeb Labs; a link sub-command takes the next free ID from `0x800B`, an alink USB-direct one from `0x8012`). Add it to `config.h`, to `ext_ids[]` in ascending order and to `ext_set_len()` if it has an OUT form, then add cases to `ext_handle_set()` / `ext_handle_get()` and a row to section 2.
 
 ## 5. History
+
+- 2026-11-13: the alink USB-direct block (WP USB1, 2.9): `0x8010` `EXT_ALINK_USB`, `0x8011` `EXT_ALINK_USB_STATUS`, event `0xE3` and `EXT_NOTIFY_FEATURES` bit 4; `EXT_FRAME_COUNTER` grows to 20 bytes with `time_base` and `bus_frame`; `EXT_APPLY_AT_FRAME` byte 12 selects the time base; `0x8005`/`0x8006` and bit 3 also on builds without the link. Range `0x8010`-`0x801F` assigned.
 
 - 2026-11-06: introduced. Replaces the fork's squatted opcodes `0x02` (`REQ_CROSSFEED_PAIR_MAP`), `0x4F` (`REQ_SET_CORE_VREG`) and `0x6F` (`REQ_GET_CORE_VREG`), which are removed with no aliases.
 - 2026-11-06: `0x0003` `EXT_NOTIFY_FEATURES` added (bit 0 `NOTIFY_FEAT_BULK_SOURCE`).

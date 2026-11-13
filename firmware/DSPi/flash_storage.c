@@ -54,6 +54,9 @@
 #include "output_latency.h"  // option IDs for the V23 latency block sanitize
 #include "input_source_names.h"
 #include "core_vreg.h"       // CORE_VREG_FLOOR/CAP/FLAG_* for the same block's vreg bytes
+#if DSPI_ALINK_USB
+#include "alink_usb.h"       // V27 alink USB-direct block (WP USB1)
+#endif
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -695,6 +698,15 @@ typedef struct __attribute__((packed)) {
 // WP LK6 took 6 of the V26 block's 7 reserved bytes (zero in every earlier
 // save, so those read as "never saved": factory phase settings), no V27.
 #define FLASH_LINK_PHASE_VERSION 1
+
+// V27 alink USB-direct block (WP USB1): EXT_ALINK_USB mode, flags, D.  Stored
+// on every platform so a directory round-trips; DSPI_ALINK_USB builds use it.
+#define FLASH_ALINK_USB_VERSION 1
+typedef struct __attribute__((packed)) {
+    uint8_t version;                         // FLASH_ALINK_USB_VERSION; 0 = never saved
+    uint8_t cfg[4];                          // mode, flags, d (u16 LE)
+    uint8_t reserved[3];
+} FlashAlinkUsbConfig;                       // 8 bytes
 #define FLASH_OUTPUT_LATENCY_CONFIG_VERSION 1
 
 typedef struct __attribute__((packed)) {
@@ -778,6 +790,11 @@ typedef struct __attribute__((packed)) {
     // (extension_channel_spec.md 2.8; device-global, saved by
     // REQ_SAVE_OUTPUT_CONFIG).  version 0 = never saved: factory values.
     FlashLinkConfig link;                    // 24 bytes
+
+    // V27 addition: the alink USB-direct configuration (EXT_ALINK_USB,
+    // extension_channel_spec.md 2.9; saved by REQ_SAVE_OUTPUT_CONFIG).
+    // version 0 = never saved: mode 0 (off).
+    FlashAlinkUsbConfig alink_usb;           // 8 bytes
 } PresetDirectory;
 
 // Historical directory layout at V4, where output_config was the 20-byte
@@ -1308,7 +1325,13 @@ _Static_assert(offsetof(PresetDirectory, link) == PRESET_DIRECTORY_V25_SIZE,
                "V26 link block must directly follow the V25 layout");
 _Static_assert(sizeof(FlashLinkConfig) == 24, "V26 link block geometry is frozen");
 
-#define DIR_VERSION_CURRENT  26
+// V27 only appends, so a V26 directory migrates by copying its whole data block.
+#define PRESET_DIRECTORY_V26_SIZE (PRESET_DIRECTORY_V25_SIZE + 24)
+_Static_assert(offsetof(PresetDirectory, alink_usb) == PRESET_DIRECTORY_V26_SIZE,
+               "V27 alink USB block must directly follow the V26 layout");
+_Static_assert(sizeof(FlashAlinkUsbConfig) == 8, "V27 alink USB block geometry is frozen");
+
+#define DIR_VERSION_CURRENT  27
 
 // The directory occupies exactly one flash sector; growth past it would
 // silently overrun into preset slot 0.
@@ -1933,6 +1956,31 @@ static bool dir_load_cache(void) {
         dir_sanitize_output_latency();
         dir_sanitize_input_source_names();
         dir_cache_valid = true;
+        return true;
+    }
+
+    if (flash_dir->version == 26) {
+        // V26 -> V27 migration.  V27 only appends the alink USB block, so the
+        // whole V26 data block copies across and it reads as never saved.
+        const uint8_t *v26_data_start = (const uint8_t *)&flash_dir->startup_mode;
+        size_t v26_data_len = PRESET_DIRECTORY_V26_SIZE - offsetof(PresetDirectory, startup_mode);
+        if (crc32(v26_data_start, v26_data_len) != flash_dir->crc32) {
+            dir_cache_valid = false;
+            return false;
+        }
+        memset(&dir_cache, 0, sizeof(dir_cache));
+        memcpy(&dir_cache.startup_mode, v26_data_start, v26_data_len);
+        dir_sanitize_ctrl_iface();
+        dir_sanitize_cs_config();
+        dir_sanitize_cs_ir();
+        dir_sanitize_cs_groups();
+        dir_sanitize_cs_macros();
+        dir_sanitize_cs_display();
+        dir_sanitize_limiter();
+        dir_sanitize_output_latency();
+        dir_sanitize_input_source_names();
+        dir_cache_valid = true;
+        (void)dir_flush();   // persist at the current version
         return true;
     }
 
@@ -4993,6 +5041,11 @@ uint8_t preset_save_output_config(void) {
     dir_cache.link.phase_version = FLASH_LINK_PHASE_VERSION;
     memcpy(dir_cache.link.phase, link_phase_store, LINK_PHASE_STORE_LEN);
     memset(dir_cache.link.reserved, 0, sizeof(dir_cache.link.reserved));
+    memset(&dir_cache.alink_usb, 0, sizeof(dir_cache.alink_usb));
+#if DSPI_ALINK_USB
+    dir_cache.alink_usb.version = FLASH_ALINK_USB_VERSION;
+    alink_usb_fw_store(dir_cache.alink_usb.cfg);
+#endif
     dir_cache.spdif_rx_pin = dir_cache.output_config.spdif_rx_pin;
     limiter_to_dir();
     if (dir_flush() != 0) return PRESET_ERR_FLASH_WRITE;
@@ -5311,6 +5364,11 @@ void preset_load_link_config(void) {
     const FlashLinkConfig *c = &dir_cache.link;
     link_config_defaults(link_config, link_slots);
     link_phase_store_defaults(link_phase_store);
+#if DSPI_ALINK_USB
+    // V27 alink USB block (WP USB1): implausible values keep the defaults.
+    if (dir_cache_valid && dir_cache.alink_usb.version == FLASH_ALINK_USB_VERSION)
+        alink_usb_fw_load(dir_cache.alink_usb.cfg);
+#endif
     if (!dir_cache_valid || c->version != FLASH_LINK_CONFIG_VERSION) return;
     // EXT_LINK_PHASE (WP LK6): ranges here, the d_local limits when it is used.
     int16_t hops = (int16_t)(c->phase[3] | c->phase[4] << 8);

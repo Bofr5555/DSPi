@@ -27,6 +27,11 @@
 #include "hardware/gpio.h"
 #include "hardware/adc.h"
 #include "hardware/vreg.h"
+#if DSPI_ALINK_USB
+#include "alink_usb.h"
+#include "hardware/structs/usb_dpram.h"
+#include "device/dcd.h"
+#endif
 
 #include "tusb.h"
 #include "device/usbd_pvt.h"
@@ -621,7 +626,17 @@ void unpack_s24x4(const usb_s24_word_t *in,
 // USB-specific wrapper: byte decode + gap detection, then pipeline
 // (process_input_block is in audio_pipeline.c)
 // ----------------------------------------------------------------------------
-static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint16_t data_len) {
+// Samples (frames) in a packet of `len` bytes in the current format.
+uint32_t usb_audio_packet_samples(uint16_t len) {
+    uint32_t bpf = (uint32_t)usb_input_channels * (usb_input_bit_depth / 8u);
+    return bpf ? len / bpf : 0;
+}
+
+// Decode one packet into buf_l / buf_r / buf_in_ext (with the input preamp)
+// and return its sample count (-1: a format the pipeline refuses, nothing
+// decoded); process_audio_packet() then runs the pipeline on it.  alink_usb
+// (WP USB1) runs the pipeline on parts of it.
+int32_t __not_in_flash_func(usb_audio_decode_packet)(const uint8_t *data, uint16_t data_len) {
     // USB format snapshot
     const uint8_t bit_depth = usb_input_bit_depth;  // snapshot once — avoid double-read of volatile
     const uint8_t channels  = usb_input_channels;   // 2 (stereo alts) or 4/6/8 (multichannel alts)
@@ -632,7 +647,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     if (bit_depth == 24 &&
         channels != NUM_STEREO_INPUTS &&
         channels != 4) {
-        return;
+        return -1;
     }
 #endif
 
@@ -777,7 +792,12 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     }
 #endif
 
-    process_input_block(sample_count);
+    return (int32_t)sample_count;
+}
+
+static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint16_t data_len) {
+    int32_t n = usb_audio_decode_packet(data, data_len);
+    if (n >= 0) process_input_block((uint32_t)n);
 }
 
 // ----------------------------------------------------------------------------
@@ -791,6 +811,11 @@ DSP_TIME_CRITICAL
 void usb_audio_drain_ring(void) {
     usb_audio_slot_t *slot;
     while ((slot = usb_audio_ring_peek(&audio_ring)) != NULL) {
+#if DSPI_ALINK_USB
+        // Phase mode: packets are placed on the USB time base (flash, cold).
+        if (alink_usb_engaged(&alink_usb)) alink_usb_fw_deliver(slot->frame, slot->data, slot->data_len);
+        else
+#endif
         process_audio_packet(slot->data, slot->data_len);
         usb_audio_ring_consume(&audio_ring);
     }
@@ -1035,8 +1060,36 @@ static uint16_t uac1_driver_open(uint8_t rhport, tusb_desc_interface_t const *it
 
 // Arm a fresh data OUT xfer.  Called once on alt>0 activation and from xfer_cb
 // completion.
+#if DSPI_ALINK_USB
+// WP USB1: the OUT packet is stamped with its USB frame in the IRQ that
+// completes it (tud_event_hook_cb below).  xfer_cb runs later from tud_task(),
+// up to a main-loop pass after the packet, so the stamp cannot be taken there.
+static volatile bool out_wait;
+
+// TinyUSB calls this in the USB IRQ for every event it queues.  The OUT EP's
+// buffer is FULL from its completion until the next arm, which happens with
+// out_wait set and interrupts off, so a FULL buffer seen while out_wait is
+// set is this packet.
+void __not_in_flash_func(tud_event_hook_cb)(uint8_t rhport, uint32_t eventid, bool in_isr) {
+    (void)rhport;
+    (void)in_isr;
+    if (eventid != DCD_EVENT_XFER_COMPLETE || !out_wait) return;
+    if (!(usb_dpram->ep_buf_ctrl[AUDIO_OUT_ENDPOINT & 0x0Fu].out & USB_BUF_CTRL_FULL)) return;
+    out_wait = false;
+    alink_usb_isr_out_done();
+}
+#endif
+
 static inline void uac1_arm_data_out(uint8_t rhport) {
+#if DSPI_ALINK_USB
+    uint32_t save = save_and_disable_interrupts();
+    alink_usb_tb.stamp = ALINK_USB_FRAME_NONE;
+    out_wait = true;
     usbd_edpt_xfer(rhport, AUDIO_OUT_ENDPOINT, ep_out_buf, AUDIO_EP_MAX_PKT);
+    restore_interrupts(save);
+#else
+    usbd_edpt_xfer(rhport, AUDIO_OUT_ENDPOINT, ep_out_buf, AUDIO_EP_MAX_PKT);
+#endif
 }
 
 // Arm a fresh feedback IN xfer with the current 10.14 feedback value.
@@ -1256,7 +1309,14 @@ static bool uac1_apply_alt(uint8_t rhport, uint8_t alt) {
         // queue stream_restart_resync_pending (which fires complete_pipeline_reset
         // inside save_and_disable_interrupts() and could starve the SPDIF
         // RX library's 10ms decode-timeout alarm).
+#if DSPI_ALINK_USB
+        // Phase mode keeps its timeline across streams: the new stream's
+        // packets are placed by their frame, no pipeline reset (WP USB1).
+        alink_usb_stream(&alink_usb, true);
+        if (need_resync && active_input_source == INPUT_SOURCE_USB && !alink_usb_engaged(&alink_usb)) {
+#else
         if (need_resync && active_input_source == INPUT_SOURCE_USB) {
+#endif
             // Engage the mute envelope immediately so any packets decoded
             // between here and the main-loop's full pipeline resync are
             // silenced. Main loop will honor stream_restart_resync_pending
@@ -1283,6 +1343,9 @@ static bool uac1_apply_alt(uint8_t rhport, uint8_t alt) {
         uac1_close_stream_eps(rhport);
         if (!uac1_open_stream_eps(rhport, alt)) return false;
     } else {
+#if DSPI_ALINK_USB
+        alink_usb_stream(&alink_usb, false);
+#endif
         uac1_close_stream_eps(rhport);
         if (prev_alt > 0) {
             fb_ctrl_stream_stop(&fb_ctrl);
@@ -1528,7 +1591,13 @@ static bool __not_in_flash_func(uac1_driver_xfer_cb)(uint8_t rhport, uint8_t ep_
             // and (more importantly) the data would be discarded anyway.
             if (active_input_source == INPUT_SOURCE_USB) {
                 usb_audio_ring_push(&audio_ring, ep_out_buf,
-                                    xferred_bytes > 0xFFFFu ? 0xFFFFu : (uint16_t)xferred_bytes);
+                                    xferred_bytes > 0xFFFFu ? 0xFFFFu : (uint16_t)xferred_bytes,
+#if DSPI_ALINK_USB
+                                    alink_usb_tb.stamp
+#else
+                                    0
+#endif
+                                    );
             }
         }
         // Re-arm regardless of this frame's success — iso transfers fail-open.
@@ -1561,6 +1630,11 @@ static void __not_in_flash_func(uac1_driver_sof)(uint8_t rhport, uint32_t frame_
 
     extern audio_spdif_instance_t *spdif_instance_ptrs[];
     extern volatile bool output_type_switch_in_progress;
+
+#if DSPI_ALINK_USB
+    // WP USB1: the USB-frame time base counts every SOF, before any early return.
+    alink_usb_isr_sof(frame_count);
+#endif
 
     // Skip during output-type reconfiguration (slot ownership is transiently
     // inconsistent; reading DMA state could crash).
@@ -1600,7 +1674,12 @@ static void __not_in_flash_func(uac1_driver_sof)(uint8_t rhport, uint32_t frame_
                        (fill_frames << 16) / SLOT_FILL_FRAMES_PER_BUCKET,
                        (output_ring_target_frames << 16) / SLOT_FILL_FRAMES_PER_BUCKET);
 
-    if (active_input_source != INPUT_SOURCE_USB) {
+    if (active_input_source != INPUT_SOURCE_USB
+#if DSPI_ALINK_USB
+        // SOF-locked (WP USB1): the device follows the host, exactly nominal.
+        || alink_usb_fb_nominal
+#endif
+        ) {
         // In non-USB modes the host's stream is decorative.  Output DMA can
         // be transiently stalled (SPDIF prefill window, lock loss) which
         // would let the servo emit zero/garbage feedback values — Windows

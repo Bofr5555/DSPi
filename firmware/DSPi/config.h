@@ -164,6 +164,11 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define EXT_LINK_CTRL_MSG           0x8008  // IN: 24 B (receiver)
 #define EXT_LINK_STATS_RESET        0x8009  // OUT: 1 B
 #define EXT_LINK_DIAG               0x800A  // IN: 64 B
+// USB sync block (extension_channel_spec.md 2.9, WP USB1); DSPI_ALINK_USB builds
+// (RP2040 and RP2350).  They also serve EXT_FRAME_COUNTER and
+// EXT_APPLY_AT_FRAME on the USB time base (time_base 1 / 2).
+#define EXT_ALINK_USB                0x8010  // IN/OUT: 8 B
+#define EXT_ALINK_USB_STATUS         0x8011  // IN: 64 B
 
 // Fixed firmware bugs a host may rely on (EXT_FIRMWARE_FIXES).  A bit is set
 // only while the fix is in the tree; bits 1-31 are reserved, zero.

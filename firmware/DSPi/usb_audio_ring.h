@@ -50,6 +50,7 @@
 
 typedef struct {
     uint16_t data_len;                  // Actual byte count this packet
+    uint32_t frame;                     // USB frame the packet arrived in (alink_usb, WP USB1)
     // 4-byte aligned: the 24-bit USB deinterleave casts `data` to uint32_t* and
     // the compiler may emit `ldrd`, which faults on a non-word-aligned address.
     // Without this, `data` lands at offset 2 (after data_len) and is only
@@ -74,7 +75,7 @@ typedef struct {
 // is silently dropped (no partial frames — clamping would produce
 // malformed data).
 static inline bool __not_in_flash_func(usb_audio_ring_push)(
-        usb_audio_ring_t *ring, const uint8_t *data, uint16_t len) {
+        usb_audio_ring_t *ring, const uint8_t *data, uint16_t len, uint32_t frame) {
 
     // Defensive: reject oversize packets rather than clamping.
     if (len > USB_RING_MAX_PKT) {
@@ -93,6 +94,7 @@ static inline bool __not_in_flash_func(usb_audio_ring_push)(
 
     usb_audio_slot_t *slot = &ring->slots[h];
     slot->data_len = len;
+    slot->frame = frame;
     memcpy(slot->data, data, len);
 
     // Release barrier: ensure slot data is visible before head advances.

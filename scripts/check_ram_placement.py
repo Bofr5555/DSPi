@@ -49,6 +49,9 @@ COMMON = [
     ("process_input_block", False),
     ("uac1_driver_xfer_cb", True),
     ("uac1_driver_sof", True),
+    # -- WP USB1 -- the USB-frame time base and the OUT packet stamp (USB IRQ).
+    ("alink_usb_isr_sof", True),
+    ("tud_event_hook_cb", True),
     ("process_audio_packet", True),
     ("fb_ctrl_sof_update", False),
     ("fb_ctrl_get_10_14", False),
@@ -210,6 +213,10 @@ LINK_COLD = {
     # paths off the steady state (an apply op splitting a block, the holdover,
     # placing rows after a relock or an anchor correction).
     "phase_servo_tick", "deliver_slow", "deliver_hold", "deliver_place",
+    # -- WP USB1 -- alink USB-direct phase mode: usb_audio_drain_ring() hands
+    # packets to the timeline placement (flash) only while a phase timeline
+    # runs (alink_usb_engaged()); off by default.
+    "alink_usb_fw_deliver",
 }
 
 # RP2040 float / integer-divider shims. Their linker names vary by build; the
