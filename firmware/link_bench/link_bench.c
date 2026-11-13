@@ -47,6 +47,7 @@
 
 #include "bench_check.h"
 #include "bench_cmd.h"
+#include "bench_decode.h"
 #include "bench_gen.h"
 #include "bench_trim.h"
 
@@ -875,6 +876,9 @@ static void run_scan(uint32_t dwell_ms) {
 // Console
 // ---------------------------------------------------------------------------
 
+// WP LK5: the RX ring as the decode benchmark sees it.
+static uint64_t live_writer_bits(void) { return rx_words_now() * 32u; }
+
 static void print_id(void) {
     char serial[2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1];
     pico_get_unique_board_id_string(serial, sizeof(serial));
@@ -890,7 +894,9 @@ static void print_help(void) {
            "OK  loop <cls> <rate> [ch=] [pay=] [txpins=2] [rxpin=0] [drive=]\n"
            "OK  inject comma|flip|idle <n> | inject slip <-3..3>\n"
            "OK  trim <t> | scan [dwell_ms]\n"
-           "OK  impair [in=0] [out=2] [div=1] [drive=4] | impair flip <cycles> <period_ms> | impair drop <us> <period_ms> | impair off\n");
+           "OK  impair [in=0] [out=2] [div=1] [drive=4] | impair flip <cycles> <period_ms> | impair drop <us> <period_ms> | impair off\n"
+           "OK  decode all [crc=dma|sw] | decode canned <cls> <rate> [ch=C] [mask=M] [slot=S] [crc=dma|sw] [runs=N] [batch=F]\n"
+           "OK  decode live [mask=M] [slot=S] [crc=dma|sw] [ms=T] [batch=F]   (LK5 receiver cycles per frame)\n");
 }
 
 static void reply(const char *err) {
@@ -973,6 +979,11 @@ static void cmd(char *line) {
         if (err) { all_stop(); reply(err); return; }
         start_job(JOB_RX);
         reply(NULL);
+        return;
+    }
+    if (!strcmp(c, "decode")) {
+        bench_decode_live_t live = { rx.on ? rx_ring : NULL, RX_RING_WORDS, rx.cls, live_writer_bits };
+        bench_decode_cmd(&a, &live, sys_hz);
         return;
     }
     if (!strcmp(c, "inject")) {

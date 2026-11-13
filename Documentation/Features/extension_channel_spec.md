@@ -228,7 +228,7 @@ Current firmware answers `01 00 00 00`.
 
 ### 2.8 Link block (`0x8000`-`0x80FF`)
 
-*Status: specified 2026-11-12 (WP LK7). The sender side is implemented by WP LK4 (`firmware/DSPi-Sender`, `Documentation/Features/link_sender.md`; host-tested, not yet run on hardware); the receiver side comes with WP LK5/LK6. Firmware at de9614c lists none of these IDs and refuses all of them. The design is in the SYS2 link spec, section 5.3; `link_protocol_spec.md` (WP LK1) will hold the line protocol.*
+*Status: specified 2026-11-12 (WP LK7). The sender side is implemented by WP LK4 (`firmware/DSPi-Sender`, `Documentation/Features/link_sender.md`; host-tested, not yet run on hardware). Receiver side partly implemented by WP LK5 (2026-11-13, HW-untested): RP2350 builds with `DSPI_LINK` list and serve `0x8000` INFO, `0x8001` STATUS, `0x8002` CONFIG, `0x8003` SLOTS, `0x8008` CTRL_MSG (IN), `0x8009` STATS_RESET, `0x800A` DIAG and event `0xE1` (`EXT_NOTIFY_FEATURES` bit 2). `0x8004`-`0x8006`, `0xE2`, `d_local_min/max` and the phase fields are LK6's (they read 0 or are not listed). No repeater: `tx_pin` and `txdis_pin` must be `0xFF`. The LOS pin is reported in STATUS, not acted on. The design is in the SYS2 link spec, section 5.3; `link_protocol_spec.md` (WP LK1) will hold the line protocol.*
 
 These sub-commands configure and observe the multi-unit audio link. One sender (the master clock) sends an 8b/10b frame stream to optical receivers, and every receiver plays link frame F a configured number of frames, D, after F arrives. The IDs are in this fork's private range (1.2), so upstream will not assign them. Everything below applies to every link ID.
 

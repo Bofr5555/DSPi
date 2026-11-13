@@ -24,6 +24,8 @@ set_source_files_properties(
 add_executable(DSPi
     adat_input.c
     adat_input.h
+    link_input.c
+    link_input.h
     adat_output.c
     adat_output.h
     audio_input.c
@@ -217,6 +219,32 @@ endif()
 
 pico_generate_pio_header(DSPi ${CMAKE_CURRENT_SOURCE_DIR}/i2s_input.pio)
 pico_generate_pio_header(DSPi ${CMAKE_CURRENT_SOURCE_DIR}/adat_input.pio)
+
+# DSPI_LINK (WP LK5): the multi-unit audio link receiver, INPUT_SOURCE_LINK.
+# RP2350 only (PIO2, DMA 5/6, the M33 decoder).  The decoder (link/) is the
+# portable C of LK1/LK5 plus the generated M33 assembly; its hot functions go
+# to .time_critical like DSP_TIME_CRITICAL.  DSPI_LINK_DECODE_CORE1 moves the
+# decode service to the Core 1 EQ worker (link_input.h).
+option(DSPI_LINK "Build the link receiver input (RP2350)" ON)
+option(DSPI_LINK_DECODE_CORE1 "Run the link decoder on Core 1 in EQ-worker mode" OFF)
+if (DSPI_LINK AND NOT PICO_PLATFORM STREQUAL "rp2040")
+    target_sources(DSPi PRIVATE
+        link/link_codec.c
+        link/link_fast.c
+        link/bench_trim.c
+        link/link_fast_m33.S
+        link/link_fast_m33_loop.S
+    )
+    set_source_files_properties(link_input.c link/link_fast.c PROPERTIES COMPILE_FLAGS "-O3")
+    foreach(p link_rx_20 link_rx_10 link_rx_5)
+        pico_generate_pio_header(DSPi ${CMAKE_CURRENT_SOURCE_DIR}/${p}.pio)
+    endforeach()
+    target_compile_definitions(DSPi PRIVATE DSPI_LINK=1 LINK_FAST_M33=1 LINK_FAST_CRC_DMA=1
+        "LINK_FAST_HOT=__attribute__((section(\".time_critical.link\")))")
+    if (DSPI_LINK_DECODE_CORE1)
+        target_compile_definitions(DSPi PRIVATE DSPI_LINK_DECODE_CORE1=1)
+    endif()
+endif()
 
 target_include_directories(DSPi PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

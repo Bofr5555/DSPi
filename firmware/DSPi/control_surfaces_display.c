@@ -600,7 +600,7 @@ static const char *const s_noun_label[CS_NOUN_COUNT] = {
 };
 
 static const char *const s_input_label[] = {"USB", "SPDIF", "I2S", "ADAT",
-                                            "SPDIF 2", "SPDIF 3", "SPDIF 4"};
+                                            "SPDIF 2", "SPDIF 3", "SPDIF 4", "Link"};
 static const char *const s_rate_label[]  = {"44.1 kHz", "48 kHz", "96 kHz"};
 static const char *const s_xf_preset_label[] = {"Default", "Chu Moy", "Meier", "Custom"};
 static const char *const s_lev_speed_label[] = {"Slow", "Medium", "Fast"};

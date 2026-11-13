@@ -33,6 +33,7 @@ RAM_LEN = {"rp2040": 262144, "rp2350": 524288}
 DATA_BUDGET = {"rp2040": 72704, "rp2350": 100352}
 
 # Flash callees that are cold-path-only and safe for a hot caller to reference.
+# (LINK_COLD is merged in after its definition below.)
 WHITELIST = {
     "panic", "panic_unsupported", "__assert_func", "hard_assert",
     "assert_failed", "isr_hardfault", "__wrap_printf", "weak_raw_printf",
@@ -180,7 +181,32 @@ RP2350_EXTRA = [
     ("adat_output_keepalive", False),
     ("adat_output_on_slot_skip", False),
     ("output_ring_fill_signed", False),
+    # Link receiver (WP LK5; DSPI_LINK builds only, so absence is a WARN):
+    # the decode service, the delivery, the decoder's steady state and the
+    # M33 assembly.  Its cold paths are whitelisted below (LINK_COLD).
+    ("link_input_decode_service", True),
+    ("link_input_update_clock_servo", True),
+    ("deliver", True),
+    ("link_fast_run", True),
+    ("lf_clean_asm", True),
+    ("lf_clean_m33", True),
+    ("lf_bank8_dma_m33", True),
+    ("sf_complete", True),
+    ("lf_sf_check", True),
 ]
+
+# Flash callees of the link decoder's hot functions that run only off the
+# steady state: comma search, alignment, loss, error counting, layout changes,
+# and the C clean-frame paths for 44.1 kHz, partial and multiple banks
+# (link_fast.c COLD / CPATH; extension_channel_spec.md 2.8, LK5 report).
+LINK_COLD = {
+    "lf_step_search", "lf_body_aligned", "lf_next_aligned", "lf_loss", "lf_emit_simple",
+    "lf_emit_simple.constprop.0", "lf_sf_error", "count_code_errors", "count_idle_errors",
+    "bank_failed", "emit_frame", "emit_clean_frame", "rate_switch", "slip_or_flywheel",
+    "set_layout", "lf_clean_fixed", "lf_clean", "bank8", "bank_k",
+    # link_input.c's decode service: a slot change and the restart after a gap.
+    "link_fast_set_slots", "link_fast_set_bank_mask", "link_fast_restart",
+}
 
 # RP2040 float / integer-divider shims. Their linker names vary by build; the
 # names below were confirmed as DEFINED symbols in build-rp2040/DSPi/DSPi.elf
@@ -212,6 +238,8 @@ LOOPBACK_EXTRA = [
     ("lb_arm_in", True),
     ("lb_driver_xfer_cb", True),
 ]
+
+WHITELIST |= LINK_COLD
 
 # Core-1 roots for the literal-pool scan (Check B2).
 CORE1_ROOTS = ["pdm_core1_entry", "pdm_processing_loop", "eq_worker_loop"]

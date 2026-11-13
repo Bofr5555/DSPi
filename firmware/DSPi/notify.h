@@ -117,6 +117,13 @@
 #define NOTIFY_EVT_EXT_CLIP          0xE0
 #define NOTIFY_CLIP_MIN_INTERVAL_MS  250
 
+// Link state (extension_channel_spec.md 2.8.12): the link receiver's
+// EXT_LINK_STATUS.state changed, or it re-anchored.  Rate-limited to one per
+// 250 ms by link_input.c, which holds the latest transition until then.
+// Packet (12 bytes): [ver=2, evt=0xE1, flags=0, seq, state, class, reason, 0,
+// F_low32_LE].  Announced by NOTIFY_FEAT_LINK_STATE (link builds only).
+#define NOTIFY_EVT_LINK_STATE        0xE1
+
 // v2 protocol version byte (first byte of every v2 packet)
 #define NOTIFY_V2_VERSION            0x02
 
@@ -153,7 +160,14 @@ typedef enum {
 // one event per NOTIFY_CLIP_MIN_INTERVAL_MS.
 #define NOTIFY_FEAT_CLIP_EVENT       (1u << 1)
 
+// NOTIFY_EVT_LINK_STATE (0xE1) is sent on link lock, loss and re-anchor.
+#define NOTIFY_FEAT_LINK_STATE       (1u << 2)
+
+#if defined(DSPI_LINK) && DSPI_LINK
+#define NOTIFY_FEATURES              (NOTIFY_FEAT_BULK_SOURCE | NOTIFY_FEAT_CLIP_EVENT | NOTIFY_FEAT_LINK_STATE)
+#else
 #define NOTIFY_FEATURES              (NOTIFY_FEAT_BULK_SOURCE | NOTIFY_FEAT_CLIP_EVENT)
+#endif
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -238,6 +252,9 @@ void notify_push_clip(uint32_t mask);
 // event when anything clipped and at least NOTIFY_CLIP_MIN_INTERVAL_MS have
 // passed since the last one.  now_ms is milliseconds since boot.
 void notify_clip_service(uint32_t now_ms);
+
+// Link state event (NOTIFY_EVT_LINK_STATE); the caller rate-limits.
+void notify_push_link_state(uint8_t state, uint8_t cls, uint8_t reason, uint32_t frame_low);
 
 // ---------------------------------------------------------------------------
 // Consumers

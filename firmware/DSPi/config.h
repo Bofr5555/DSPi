@@ -151,6 +151,15 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define EXT_IDENTIFY                0x0004  // IN: IdentifyStatus (56 B); OUT: IdentifyRequest (4 B) (identify.h)
 #define EXT_RESET_INFO              0x0005  // IN: ResetInfo (20 B) (reset_info.h); no OUT
 #define EXT_FIRMWARE_FIXES          0x0006  // IN: uint32 LE FW_FIX_* flags; no OUT
+// Link block (extension_channel_spec.md 2.8); a receiver build (DSPI_LINK)
+// serves INFO, STATUS, CONFIG, SLOTS, CTRL_MSG (IN), STATS_RESET and DIAG.
+#define EXT_LINK_INFO               0x8000  // IN: 32 B
+#define EXT_LINK_STATUS             0x8001  // IN: 52 B
+#define EXT_LINK_CONFIG             0x8002  // IN/OUT: 8 B
+#define EXT_LINK_SLOTS              0x8003  // IN/OUT: 8 B
+#define EXT_LINK_CTRL_MSG           0x8008  // IN: 24 B (receiver)
+#define EXT_LINK_STATS_RESET        0x8009  // OUT: 1 B
+#define EXT_LINK_DIAG               0x800A  // IN: 64 B
 
 // Fixed firmware bugs a host may rely on (EXT_FIRMWARE_FIXES).  A bit is set
 // only while the fix is in the tree; bits 1-31 are reserved, zero.

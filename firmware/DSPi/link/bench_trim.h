@@ -1,5 +1,5 @@
 /*
- * bench_trim.h - link bench: RX sampling trim and the trim scan
+ * bench_trim.h - link RX sampling trim and the trim scan (link bench, DSPi receiver)
  *
  * The link_rx_N programs (LK2) expose public labels hi_entry and lo_emit.
  * A trim of t moves t cycles of delay from the fall exits (every `jmp

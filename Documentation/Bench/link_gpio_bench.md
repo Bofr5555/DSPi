@@ -164,9 +164,10 @@ identical edges, which is the property the LK4 sender needs.
 
 ## 7. A Pico 2 running the LK5 DSPi receiver
 
-The eventual LK5 receiver build (`INPUT_SOURCE_LINK`, RP2350 only) reads the link on **GP0**: the default of
-`EXT_LINK_CONFIG.rx_pin`, which no other DSPi default uses. It enables the same Schmitt input as the bench RX. So a DSPi
-Pico 2 (or a K340's Pico 2, at its GP0 pad) is wired **exactly like board B above**:
+The LK5 receiver is part of every RP2350 DSPi build (`DSPI_LINK`, on by default): input source 7, `INPUT_SOURCE_LINK`.
+It reads the link on **GP0**, the default of `EXT_LINK_CONFIG.rx_pin`, which no other DSPi default uses, with the same
+Schmitt input as the bench RX. So a DSPi Pico 2 (or a K340's Pico 2, at its GP0 pad) is wired **exactly like board B
+above**:
 
 ```
    bench TX board (Pico or Pico 2)            DSPi Pico 2 running the LK5 build
@@ -174,11 +175,31 @@ Pico 2 (or a K340's Pico 2, at its GP0 pad) is wired **exactly like board B abov
    GND (pin 3) ─═════════════════════════════ GND (pin 3)
 ```
 
-The LK4 link sender (`link_sender_bench.md`) can stand in for the bench TX here: its link 0 is GP2 too. Without it, the bench TX stands in for the sender. Its stream is a valid protocol-v1 stream: superframe, frame
-counter, CRCs, the test-pattern flag set for PRBS. Use `pay=vec` for a payload that decodes to fixed, non-zero samples
-(`bench_vector_sample()`). The DSPi end is then read with `midi_ctrl.py link` / `EXT_LINK_STATUS` / `EXT_LINK_DIAG`
-instead of `bench.py`. Its counters and its trim scan should match what a bench RX board reports on the same wire.
-Power both from one hub, or join the grounds first (rule 6), because a K340 may share its supply with amplifiers.
+The LK4 link sender (`link_sender_bench.md`) can stand in for the bench TX here: its link 0 is GP2 too. Without it, the bench TX stands in for the sender: `tx L1 48k ch=8 pay=vec` (or L2/L3, 44k1/96k). Its stream is a
+valid protocol-v1 stream: superframe, frame counter, CRCs. With `pay=prbs` the superframe carries the test-pattern
+flag, and the receiver then **plays silence** (the payload is not audio) while still locking and counting. With
+`pay=vec` it plays the fixed vector samples (`bench_vector_sample()`): steady DC levels on all 8 inputs, visible on
+the input meters. **Connect no amplifier or speaker to the DSPi outputs** for this test. Power both from one hub, or join the
+grounds first (rule 6), because a K340 may share its supply with amplifiers.
+
+The receiver is configured over the extension channel (`extension_channel_spec.md` 2.8). With a USB MIDI build
+(`-DDSPI_USB_MIDI=ON`), `tools/midi_ctrl` does it, `DSPI_MIDI_DEV` naming the unit's rawmidi node:
+
+```sh
+M="./run.sh midi_ctrl.py"              # in tools/midi_ctrl, DSPI_MIDI_DEV=/dev/snd/midiCxD0 exported
+$M ext-list                             # lists 0x8000 0x8001 0x8002 0x8003 0x8008 0x8009 0x800a
+$M set 0x00 --wvalue 0x8002 --payload 01ff00ffffff0300   # EXT_LINK_CONFIG: enable, GP0, class auto
+$M set 0x00 --wvalue 0x8003 --payload 0001020304050607   # EXT_LINK_SLOTS: link channels 0-7 -> inputs 0-7
+$M set 0xE0 --u8 7                      # REQ_SET_INPUT_SOURCE: LINK
+$M get 0x00 --wvalue 0x8001             # EXT_LINK_STATUS (52 bytes): state 2 = locked
+$M get 0x00 --wvalue 0x800A             # EXT_LINK_DIAG: trim scan at offsets 32-39, bench counters 40-55
+$M set 0x52                             # REQ_SAVE_OUTPUT_CONFIG: keep the link settings across reboots
+```
+
+`dspi_poke.py` does the same over the vendor interface (`set 0x00 --wvalue 0x8002 --hex "01 ff 00 ff ff ff 03 00"`).
+On link-up the receiver detects the class (about 12 ms per class tried), runs the trim scan (a few hundred frames
+per trim step: L1 19 steps, L2 9, L3 3, about 0.1-0.4 s), locks, matches the pipeline to the stream's rate, prefills
+and plays. Its STATUS counters and its trim scan should match what a bench RX board reports on the same wire.
 
 ## 8. Flashing
 

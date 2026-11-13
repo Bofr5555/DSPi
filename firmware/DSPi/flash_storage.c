@@ -680,6 +680,16 @@ typedef struct __attribute__((packed)) {
     uint8_t  core_vreg;                      // 0 = build default, else vreg enum (1.15..1.30 V)
     uint8_t  core_vreg_flags;                // CORE_VREG_FLAG_*
 } FlashOutputLatencyConfig;                  // 4 bytes
+
+// V26 link receiver block (WP LK5).  Stored on every platform so a directory
+// round-trips; only RP2350 link builds act on it.
+#define FLASH_LINK_CONFIG_VERSION 1
+typedef struct __attribute__((packed)) {
+    uint8_t version;                         // FLASH_LINK_CONFIG_VERSION; 0 = never saved
+    uint8_t config[LINK_CFG_LEN];            // EXT_LINK_CONFIG
+    uint8_t slots[LINK_SLOTS_LEN];           // EXT_LINK_SLOTS
+    uint8_t reserved[7];
+} FlashLinkConfig;                           // 24 bytes
 #define FLASH_OUTPUT_LATENCY_CONFIG_VERSION 1
 
 typedef struct __attribute__((packed)) {
@@ -758,6 +768,11 @@ typedef struct __attribute__((packed)) {
     // V25 addition: user name for the board (device-global).  All zeros =
     // unnamed; hosts supply their own fallback.
     char device_name[DEVICE_NAME_LEN];       // 32 bytes
+
+    // V26 addition: the link receiver's EXT_LINK_CONFIG and EXT_LINK_SLOTS
+    // (extension_channel_spec.md 2.8; device-global, saved by
+    // REQ_SAVE_OUTPUT_CONFIG).  version 0 = never saved: factory values.
+    FlashLinkConfig link;                    // 24 bytes
 } PresetDirectory;
 
 // Historical directory layout at V4, where output_config was the 20-byte
@@ -1282,7 +1297,13 @@ _Static_assert(offsetof(PresetDirectory_v20, cs_display) == offsetof(PresetDirec
 _Static_assert(sizeof(PresetDirectory_v20) == 3327,
                "V20 directory geometry is frozen; snapshot any struct that grew");
 
-#define DIR_VERSION_CURRENT  25
+// V26 only appends, so a V25 directory migrates by copying its whole data block.
+#define PRESET_DIRECTORY_V25_SIZE (PRESET_DIRECTORY_V24_SIZE + 32)
+_Static_assert(offsetof(PresetDirectory, link) == PRESET_DIRECTORY_V25_SIZE,
+               "V26 link block must directly follow the V25 layout");
+_Static_assert(sizeof(FlashLinkConfig) == 24, "V26 link block geometry is frozen");
+
+#define DIR_VERSION_CURRENT  26
 
 // The directory occupies exactly one flash sector; growth past it would
 // silently overrun into preset slot 0.
@@ -1907,6 +1928,31 @@ static bool dir_load_cache(void) {
         dir_sanitize_output_latency();
         dir_sanitize_input_source_names();
         dir_cache_valid = true;
+        return true;
+    }
+
+    if (flash_dir->version == 25) {
+        // V25 -> V26 migration.  V26 only appends the link block, so the whole
+        // V25 data block copies across and the link reads as never saved.
+        const uint8_t *v25_data_start = (const uint8_t *)&flash_dir->startup_mode;
+        size_t v25_data_len = PRESET_DIRECTORY_V25_SIZE - offsetof(PresetDirectory, startup_mode);
+        if (crc32(v25_data_start, v25_data_len) != flash_dir->crc32) {
+            dir_cache_valid = false;
+            return false;
+        }
+        memset(&dir_cache, 0, sizeof(dir_cache));
+        memcpy(&dir_cache.startup_mode, v25_data_start, v25_data_len);
+        dir_sanitize_ctrl_iface();
+        dir_sanitize_cs_config();
+        dir_sanitize_cs_ir();
+        dir_sanitize_cs_groups();
+        dir_sanitize_cs_macros();
+        dir_sanitize_cs_display();
+        dir_sanitize_limiter();
+        dir_sanitize_output_latency();
+        dir_sanitize_input_source_names();
+        dir_cache_valid = true;
+        (void)dir_flush();   // persist at the current version
         return true;
     }
 
@@ -4936,6 +4982,10 @@ float preset_get_saved_master_volume(void) {
 uint8_t preset_save_output_config(void) {
     dir_ensure();
     io_config_from_live(&dir_cache.output_config);
+    dir_cache.link.version = FLASH_LINK_CONFIG_VERSION;
+    memcpy(dir_cache.link.config, link_config, LINK_CFG_LEN);
+    memcpy(dir_cache.link.slots, link_slots, LINK_SLOTS_LEN);
+    memset(dir_cache.link.reserved, 0, sizeof(dir_cache.link.reserved));
     dir_cache.spdif_rx_pin = dir_cache.output_config.spdif_rx_pin;
     limiter_to_dir();
     if (dir_flush() != 0) return PRESET_ERR_FLASH_WRITE;
@@ -5245,4 +5295,20 @@ void flash_factory_reset(void) {
     dir_ensure();
     apply_output_config_from_mode(NULL, false);
     notify_end_bulk();
+}
+
+// Link receiver block (V26): the stored EXT_LINK_CONFIG / EXT_LINK_SLOTS, or
+// the factory values when never saved or implausible.  Boot, main loop.
+void preset_load_link_config(void) {
+    dir_ensure();
+    const FlashLinkConfig *c = &dir_cache.link;
+    link_config_defaults(link_config, link_slots);
+    if (!dir_cache_valid || c->version != FLASH_LINK_CONFIG_VERSION) return;
+    bool ok = c->config[LINK_CFG_ENABLE] <= 1u && c->config[LINK_CFG_CLASS] <= 3u &&
+              !(c->config[LINK_CFG_FLAGS] & ~0x03u) && c->config[7] == 0;
+    for (int i = 0; i < LINK_SLOTS_LEN; i++)
+        if (c->slots[i] >= 64u && c->slots[i] != 0xFF) ok = false;
+    if (!ok) return;
+    memcpy(link_config, c->config, LINK_CFG_LEN);
+    memcpy(link_slots, c->slots, LINK_SLOTS_LEN);
 }
