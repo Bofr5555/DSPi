@@ -34,7 +34,7 @@ RP2350-only: CLICK (the RP2040's fixed-point pipeline has no click injection) an
   exactly nominal feedback and the fill servo (the S/PDIF slave's) holds the fill. All units of a host then run at the
   host's rate.
 - **Mode 2 (phase lock)**: mode 1, then the anchor (section 3) and the timeline. Needs 48 or 96 kHz and
-  `d_min <= D <= d_max` (153..399 at 48 kHz, 273..351 at 96 kHz for every latency option USB offers); otherwise it
+  `d_min <= D <= d_max` (170..399 at 48 kHz, 324..351 at 96 kHz for every latency option USB offers); otherwise it
   runs as mode 1 and says why (`status_flags`, event reason `CONFIG`).
 - **Host range**: a host more than 295 ppm off the unit's crystal is rejected (state 6, event `HOST_RANGE`): VCXO parked,
   stock asynchronous behaviour, until it is back under 285 ppm.
@@ -56,6 +56,17 @@ SOF belongs to the frame before (a packet of 44 or more samples takes at least 1
 cannot be that frame's own): the interrupt was held off across the SOF. The stamp travels with the packet in the USB
 ring slot (`usb_audio_slot_t.frame`).
 
+**Stamp limitation, on both chips** (review usb1 F5): the PHY timestamps the SOF, not the packet. A completion whose
+interrupt runs more than 100 us after the *next* SOF (interrupts held off that long: flash writes, the pipeline reset)
+is stamped one frame late, on the RP2350 as on the RP2040. The packet is then placed a frame late: it is late against
+the timeline (dropped) and its frame reads as lost (faded hole, section 3). Hold-offs that long come with operations that
+re-anchor anyway; the simulation's probe P8c (400 us hold-offs every 100 ms) mis-stamps a few packets in 400.
+
+**SOF discontinuities** (review usb1 F2): a SOF whose frame count and clock disagree by more than 100 us (RP2350) or
+0.5 ms (RP2040) — a stall with the frame number frozen, a small frame jump — sets the long-gap flag: the timeline ends,
+the estimator reseeds, and the unit anchors again once the rate estimate is back (instead of a poisoned estimate for
+16 s, a false `HOST_RANGE` or a re-anchor loop).
+
 `S = spf * N + k` (spf 48 or 96). `F_arr` (the sample arriving now) comes from the clean pair extrapolated at the
 measured host rate.
 
@@ -72,13 +83,23 @@ measured host rate.
    otherwise whole-sample corrections (skip by advancing `next_w`, or insert silence without advancing it: review lk6
    F2), at most two, then a re-anchor.
 
-From then on the outputs play the **timeline**. Every packet is placed by its S: a gap is filled with silence (a missing
-packet; counted, muted 20 ms, event `GAP`), late samples are dropped, a placement more than the rings' span off
-re-anchors. While no packet comes the service writes silence so the rings never run more than `D - block_cap - 16`
-behind the arrival. The phase servo runs on the timeline whether or not a stream is playing, so a stream that stops and
+From then on the outputs play the **timeline**. Every packet is placed by its S, and the newest placed packet is
+**held back one frame**: it is written when the next one arrives, or when the hold decides that none will (review usb1
+F1). So a lost packet is never a hard hole: the held packet before the gap fades out over its own 1 ms, the gap is
+silence, and the packet after it fades in over its 1 ms (linear ramps on the input samples, before the DSP; a packet
+between two gaps fades in over its first half and out over its second). Each gap counts once (`gap_count`, event `GAP`).
+Late samples are dropped; a placement more than the rings' span off re-anchors. While no packet comes the service first
+writes the held packet (faded out), then silence, so the rings never run more than `D - block_cap - 16` behind the
+arrival; a loss that long (about three frames at D 192) also mutes the stream for 20 ms, after which it fades back in
+through the pipeline's 8 ms envelope. The held frame is why `d_min` is `2.2 spf + block_cap + 16` (a frame held, 1.2
+frames of packet lateness before the hold calls it lost, the block cap and a floor of 16). The phase servo runs on the timeline whether or not a stream is playing, so a stream that stops and
 starts again (alt 0 and back, a PipeWire suspend) is placed exactly: **constant latency across stream restarts, no
-re-anchor, no pipeline reset** (the stock alt-setting resync is skipped while the timeline runs). The first packet of a
-stream is muted and the pipeline's 8 ms fade-in follows.
+re-anchor, no pipeline reset** (the stock alt-setting resync is skipped while the timeline runs). A stream's first packet
+fades in; its last one fades out when the stream stops.
+
+**Idle load.** With no stream the timeline runs on silence and the whole DSP processes it in real time: in mode 2 the CPU
+load and the heat do not drop when nothing plays (the stock firmware idles the outputs without the pipeline). For the
+K340 that matters for its thermal and 1.20 V margin story; mode 1 and mode 0 idle as stock.
 
 Re-anchors: a phase error beyond 2 samples (`AUTO_REANCHOR`; otherwise phase state 3 and the servo pulls it in), a new D
 or mode, any other reset of the output rings (`complete_pipeline_reset()`: preset load, flash write, output type
@@ -106,7 +127,7 @@ every unit (usbfs `start_frame`, USBL1 6.2 model B) needs none.
 
 ## 6. RAM and placement
 
-RAM-resident: the SOF hook (152 B RP2350 / 228 B RP2040), the packet stamp in `tud_event_hook_cb` (84 / 92 B), the
+The held packet's copy is a `.bss` buffer of one USB packet (788 B RP2350, 582 B RP2040; not `.data`). RAM-resident: the SOF hook (152 B RP2350 / 228 B RP2040), the packet stamp in `tud_event_hook_cb` (84 / 92 B), the
 stamp in `xfer_cb` and the ring slot (+52), the drain loop's branch. Everything else is flash: the engine
 (`alink_usb_core.c`), the per-packet placement (`alink_usb_fw_deliver`, whitelisted in `check_ram_placement.py` as a cold
 callee of `usb_audio_drain_ring()`: it runs only while a phase timeline runs) and `notify_push_alink_usb` (linker

@@ -46,8 +46,21 @@ void alink_usb_port_irq_restore(uint32_t s) { (void)s; }
 uint32_t alink_usb_port_fs(void) { return fs; }
 bool alink_usb_port_play(float *fill) { *fill = fill_now; return true; }
 uint32_t alink_usb_port_room(void) { return 49; }
-void alink_usb_port_write_packet(const alink_usb_pkt_t *p, uint32_t off, uint32_t k) { (void)p; (void)off; (void)k; n_writes++; }
-void alink_usb_port_write_silence(uint32_t k) { (void)k; n_writes++; }
+// Writes recorded in order: samples, ramp end points (silence: g -1).
+#define WLOG 64
+static struct { uint32_t off, k; float g0, g1; } wlog[WLOG];
+static int n_wlog;
+static uint8_t keep_copy[8];
+void alink_usb_port_write_packet(const alink_usb_pkt_t *p, uint32_t off, uint32_t k, float g0, float g1) {
+    (void)p;
+    n_writes++;
+    if (n_wlog < WLOG) { wlog[n_wlog].off = off; wlog[n_wlog].k = k; wlog[n_wlog].g0 = g0; wlog[n_wlog].g1 = g1; n_wlog++; }
+}
+void alink_usb_port_write_silence(uint32_t k) {
+    n_writes++;
+    if (n_wlog < WLOG) { wlog[n_wlog].off = 0; wlog[n_wlog].k = k; wlog[n_wlog].g0 = wlog[n_wlog].g1 = -1.0f; n_wlog++; }
+}
+const void *alink_usb_port_keep(const alink_usb_pkt_t *p) { (void)p; return keep_copy; }
 void alink_usb_port_actuate(float hz, float trim, bool ff) { (void)trim; (void)ff; n_actuate++; vcxo = (hz / (float)fs - 1.0f) * 1e6f; }
 void alink_usb_port_park(void) { n_park++; vcxo = 0.0f; }
 float alink_usb_port_vcxo_ppm(void) { return vcxo; }
@@ -55,10 +68,11 @@ uint8_t alink_usb_port_apply(const link_apply_op_t *op) { (void)op; return LINK_
 void alink_usb_port_apply_result(uint8_t op, uint8_t r, uint32_t f) { (void)op; last_result = r; last_result_frame = f; n_results++; }
 void alink_usb_port_event(uint8_t st, uint8_t rs, uint32_t f) { (void)st; (void)rs; (void)f; n_events++; }
 void alink_usb_port_soft_mute(uint32_t s) { (void)s; n_mute++; }
-bool alink_usb_port_pulse(uint32_t f) { (void)f; return false; }
-void alink_usb_port_ring_target(void) {}
+static int n_pulse, n_ring_target;
+bool alink_usb_port_pulse(uint32_t f) { (void)f; n_pulse++; return true; }
+void alink_usb_port_ring_target(void) { n_ring_target++; }
 
-static void reset_counts(void) { n_actuate = n_park = n_events = n_writes = n_results = n_mute = 0; }
+static void reset_counts(void) { n_actuate = n_park = n_events = n_writes = n_results = n_mute = n_wlog = n_pulse = n_ring_target = 0; }
 
 // ---------------------------------------------------------------------------
 
@@ -157,11 +171,11 @@ static void test_config(void) {
     CHECK(!memcmp(o, def, 8), "defaults: mode 0, auto re-anchor, D 192");
     // 2 ms option at 48 kHz: block cap 49; span 448.
     alink_usb_limits(&us, 48000, 96, 49, 448);
-    CHECK(us.d_min == 153 && us.d_max == 399, "48 kHz limits %u..%u", us.d_min, us.d_max);
+    CHECK(us.d_min == 170 && us.d_max == 399, "48 kHz limits %u..%u", us.d_min, us.d_max);
     alink_usb_limits(&us, 96000, 192, 97, 448);
-    CHECK(us.d_min == 273 && us.d_max == 351, "96 kHz limits %u..%u", us.d_min, us.d_max);
+    CHECK(us.d_min == 324 && us.d_max == 351, "96 kHz limits %u..%u", us.d_min, us.d_max);
     alink_usb_limits(&us, 48000, 96, 49, 448);
-    uint8_t p[8] = { 2, 1, 0x80, 0, 0, 0, 0, 0 };          // D 128 < 153
+    uint8_t p[8] = { 2, 1, 0xa8, 0, 0, 0, 0, 0 };          // D 168 < 170
     CHECK(!alink_usb_set_config(&us, p), "mode 2 with D below d_min refused");
     p[0] = 1;
     CHECK(alink_usb_set_config(&us, p), "mode 1 takes any D");
@@ -357,7 +371,153 @@ static void test_apply_and_status(void) {
     uint16_t dmin, dmax;
     memcpy(&dmin, o + 26, 2);
     memcpy(&dmax, o + 28, 2);
-    CHECK(dmin == 153 && dmax == 399, "status limits");
+    CHECK(dmin == 170 && dmax == 399, "status limits");
+}
+
+// review usb1 F2: a SOF discontinuity (frame count and clock disagree between
+// two service passes) ends the timeline; merged SOFs whose clock agrees, and
+// RP2040 late entries, do not.
+static int disc_run(bool exact, uint32_t stall_frames, uint32_t late_us) {
+    alink_usb_t us;
+    alink_usb_init(&us);
+    us.mode = 1;
+    us.exact = exact;
+    memset(&alink_usb_tb, 0, sizeof(alink_usb_tb));
+    uint32_t t = 48000u, f = 0;
+    for (int i = 0; i < 3000; i++, f++) {
+        if (i == 2500) t += stall_frames * 48000u;      // the clock runs on, the frame number does not
+        uint32_t lat = (i == 2700) ? late_us * 48u : 0u;
+        now48 = t + lat;
+        now_us = now48 / 48u;
+        alink_usb_tb_sof(&alink_usb_tb, f & 0x7FF, now48, exact ? lat : UINT32_MAX);
+        alink_usb_service(&us, now_us / 1000u);
+        t += 48000u;
+    }
+    return (int)us.est.n[0];                    // reseeded after 2500 when flagged
+}
+
+static void test_discontinuity(void) {
+    CHECK(disc_run(true, 0, 0) < 2500, "RP2350 steady: no discontinuity");
+    CHECK(disc_run(true, 15, 0) >= 2500, "RP2350: a 15 ms stall with a frozen frame number reseeds");
+    CHECK(disc_run(true, 1, 0) >= 2500, "RP2350: a 1 ms stall with a frozen frame number reseeds");
+    CHECK(disc_run(false, 1, 0) >= 2500, "RP2040: a 1 ms frozen-frame stall reseeds");
+    CHECK(disc_run(false, 0, 230) < 2500, "RP2040: a 230 us late entry does not");
+}
+
+// A phase-locked engine on a fresh time base at bus frame 1000, D 192.
+static void locked_engine(alink_usb_t *us) {
+    alink_usb_init(us);
+    us->mode = 2;
+    us->d = 192;
+    alink_usb_limits(us, 48000, 96, 49, 448);
+    memset(&alink_usb_tb, 0, sizeof(alink_usb_tb));
+    alink_usb_tb.valid = alink_usb_tb.have_c = true;
+    alink_usb_tb.n = alink_usb_tb.n_c = 1000u;
+    alink_usb_tb.t = alink_usb_tb.t_c = 0;
+    now48 = 0;
+    us->tb_ok = true;
+    us->started = true;
+    us->ph.timeline = true;
+    us->ph.state = LINK_PHASE_LOCKED;
+    us->ph.next_w = 48ull * 1000u;
+    us->stream = true;
+}
+
+// review usb1 F1: the newest packet is held a frame; the packet before a gap
+// fades out, the one after it fades in; a stream starts with a fade in.
+static void test_fades(void) {
+    alink_usb_t us;
+    locked_engine(&us);
+    reset_counts();
+    uint8_t dummy[192] = { 0 };
+    alink_usb_pkt_t p = { 1000u, 48, dummy, sizeof dummy };
+    alink_usb_deliver(&us, &p);
+    CHECK(n_wlog == 0 && us.held, "the first packet is held");
+    p.frame = 1001u;
+    alink_usb_deliver(&us, &p);
+    CHECK(n_wlog >= 1 && wlog[0].k == 48 && wlog[0].g0 < 0.05f && wlog[0].g1 == 1.0f,
+          "a stream's first packet fades in (%u samples, %.3f..%.3f)", wlog[0].k, wlog[0].g0, wlog[0].g1);
+    p.frame = 1002u;
+    reset_counts();
+    alink_usb_deliver(&us, &p);
+    CHECK(n_wlog == 1 && wlog[0].g0 == 1.0f && wlog[0].g1 == 1.0f, "a contiguous packet is written as is");
+    // Frame 1003 lost: 1004 arrives.  1002 (held) fades out, silence, 1004 held.
+    reset_counts();
+    p.frame = 1004u;
+    alink_usb_deliver(&us, &p);
+    CHECK(n_wlog == 2 && wlog[0].g0 > 0.95f && wlog[0].g1 == 0.0f && wlog[1].g0 < 0.0f && wlog[1].k == 48,
+          "before a gap: fade out, then 48 samples of silence (writes %d)", n_wlog);
+    CHECK(us.gaps == 1 && us.missed == 48 && us.ev_reason == ALINK_USB_RS_GAP, "one GAP counted, 48 missed");
+    reset_counts();
+    p.frame = 1005u;
+    alink_usb_deliver(&us, &p);
+    CHECK(n_wlog == 1 && wlog[0].g0 < 0.05f && wlog[0].g1 == 1.0f, "after a gap: fade in");
+    // A packet both after and before a gap: half in, half out.
+    reset_counts();
+    p.frame = 1007u;                            // 1006 lost: 1005 (held, not after a gap) fades out
+    alink_usb_deliver(&us, &p);
+    reset_counts();
+    p.frame = 1009u;                            // 1008 lost: 1007 (after a gap, before one)
+    alink_usb_deliver(&us, &p);
+    CHECK(n_wlog == 3 && wlog[0].k == 24 && wlog[0].g0 < 0.05f && wlog[0].g1 == 1.0f && wlog[1].k == 24 &&
+          wlog[1].g0 > 0.95f && wlog[1].g1 == 0.0f, "between two gaps: 24 samples in, 24 out, then silence");
+    CHECK(us.gaps == 3, "three gaps (%u)", us.gaps);
+    // The hold flushes the held packet (faded out) when no packet follows.
+    reset_counts();
+    now48 = 48000u * 13u;                       // 4 frames on: lag > D - cap - 16
+    alink_usb_tb.n = 1013u;
+    hold(&us);
+    // 1009 came after a gap and a gap follows it: in, then out, then silence.
+    CHECK(n_wlog == 3 && wlog[0].g0 < 0.05f && wlog[1].g1 == 0.0f && wlog[2].g0 < 0.0f && !us.held,
+          "hold: the held packet fades out, then silence (writes %d)", n_wlog);
+    // Stream stopped (alt 0): the held packet fades out but is no GAP.
+    locked_engine(&us);
+    p.frame = 1000u;
+    alink_usb_deliver(&us, &p);
+    p.frame = 1001u;
+    alink_usb_deliver(&us, &p);
+    alink_usb_stream(&us, false);
+    reset_counts();
+    now48 = 48000u * 6u;
+    hold(&us);
+    CHECK(n_wlog >= 1 && wlog[0].g1 == 0.0f && us.gaps == 0, "stream stop: faded out, not a GAP");
+}
+
+// review usb1 F3 / F4 / F7.
+static void test_fixups(void) {
+    alink_usb_t us;
+    locked_engine(&us);
+    us.started = false;
+    us.rate_locked = true;
+    us.est.valid = true;
+    us.ticked = true;
+    us.ff_ppm = 40.0f;
+    vcxo = 40.5f;
+    CHECK(alink_usb_anchor_wanted(&us), "VCXO at the feed-forward: anchor");
+    vcxo = 30.0f;
+    CHECK(!alink_usb_anchor_wanted(&us), "VCXO 10 ppm away: no anchor yet (F3)");
+    // F4: leaving mode 2 re-applies the stock ring target; so does a stop.
+    reset_counts();
+    uint8_t c1[8] = { 1, 1, 192, 0, 0, 0, 0, 0 };
+    CHECK(alink_usb_set_config(&us, c1) && n_ring_target == 1, "mode 2 -> 1 restores the ring target");
+    reset_counts();
+    us.state = ALINK_USB_ST_RATE_LOCK;
+    alink_usb_stop(&us, ALINK_USB_RS_DISABLED);
+    CHECK(n_ring_target == 1, "stop restores the ring target");
+    // F7: STATUS bus frame from S; SYNC_PULSE armed only when queued.
+    locked_engine(&us);
+    now48 = 47999u;                             // just before the next SOF
+    uint64_t snow;
+    uint16_t bus;
+    CHECK(alink_usb_sample_now(&us, &snow, &bus) && bus == (uint16_t)((snow / 48u) & 0x7FFu), "bus frame of S");
+    reset_counts();
+    uint8_t sp[16] = { 0 };
+    uint32_t f = 1100u;
+    memcpy(sp, &f, 4);
+    sp[8] = LINK_OP_SYNC_PULSE;
+    sp[12] = 2;
+    for (int i = 0; i < 4; i++) CHECK(alink_usb_apply(&us, sp), "pulse %d queued", i);
+    CHECK(!alink_usb_apply(&us, sp) && n_pulse == 4, "a refused SYNC_PULSE arms nothing (%d)", n_pulse);
 }
 
 int main(void) {
@@ -367,6 +527,9 @@ int main(void) {
     test_mode0_stock();
     test_reject();
     test_apply_and_status();
+    test_discontinuity();
+    test_fades();
+    test_fixups();
     printf("test_alink_usb: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

@@ -24,7 +24,7 @@ def name(table, i):
 
 
 def status(b):
-    (st, ph, rc, fl, hppm, vppm, e, s, bus, dmin, dmax, fill, first, _r, age, shift, nsamp, anch, rean, miss,
+    (st, ph, rc, fl, hppm, vppm, e, s, bus, dmin, dmax, fill, first, gaps, age, shift, nsamp, anch, rean, miss,
      late) = struct.unpack("<BBBBfffQHHHHHHIiIIIII", b[:64])
     print(f"state {name(STATES, st)}, phase {name(PHASE, ph)}, rate {RATES.get(rc, 'other')}")
     print(f"flags: hw-timestamp {fl & 1}, stream {fl >> 1 & 1}, nominal-feedback {fl >> 2 & 1}, time-base {fl >> 3 & 1}")
@@ -34,7 +34,7 @@ def status(b):
         print("stream: none placed")
     else:
         print(f"stream: first bus frame {first}, age {age} frames, shift {shift:+d} samples, {nsamp} samples placed")
-    print(f"anchors {anch}, re-anchors {rean}, missed {miss} samples, late {late} samples")
+    print(f"anchors {anch}, re-anchors {rean}, gaps {gaps}, missed {miss} samples, late {late} samples")
     return dict(first=first, age=age, shift=shift, bus=bus, rate=rc)
 
 

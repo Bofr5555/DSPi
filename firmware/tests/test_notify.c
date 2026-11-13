@@ -182,6 +182,21 @@ int main(void) {
         notify_commit_pop_for(NOTIFY_CONSUMER_USB);
     }
 
+    // alink USB-direct event 0xE3 (WP USB1, review usb1 F7): 2.9.5's example
+    // byte for byte (seq aside): phase-locked, phase state 2, reason LOCKED,
+    // S low 32 = 0x04c4b400.
+    {
+        uint8_t buf[NOTIFY_MAX_PACKET];
+        notify_init();
+        notify_push_alink_usb(5, 2, 1, 0x04c4b400u);
+        CHECK(notify_peek_next_for(NOTIFY_CONSUMER_USB, buf, sizeof buf) == 12);
+        static const uint8_t e3[12] = { 2, 0xE3, 0, 0, 5, 2, 1, 0, 0x00, 0xb4, 0xc4, 0x04 };
+        buf[3] = 0;
+        CHECK(memcmp(buf, e3, 12) == 0);
+        notify_commit_pop_for(NOTIFY_CONSUMER_USB);
+        CHECK(NOTIFY_FEAT_ALINK_USB == (1u << 4));
+    }
+
     if (failures) { printf("test_notify: %d failure(s)\n", failures); return 1; }
     printf("test_notify: OK\n");
     return 0;

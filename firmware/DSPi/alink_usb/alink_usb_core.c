@@ -88,11 +88,11 @@ static void sync_ph(alink_usb_t *us) {
 void alink_usb_limits(alink_usb_t *us, uint32_t fs, uint32_t target, uint32_t cap, uint32_t span) {
     (void)target;
     uint32_t spf = fs / 1000u;
-    // The rings run D - lag samples ahead of the arrival, lag being how late
-    // a packet is processed after its SOF (up to a frame on the wire plus a
-    // main-loop pass).  The hold keeps lag <= D - cap - 16 by writing silence,
-    // so D must leave room for one and a half frames of lag above that.
-    uint32_t lo = spf + spf / 2u + cap + 2u * ALINK_USB_DECODE_MARGIN;
+    // The rings run D - lag samples ahead of the arrival.  The newest packet is
+    // held back a frame (so a gap can fade out), and a packet may come up to
+    // 1.2 frames after its SOF before the hold, at lag > D - cap - 16, decides
+    // it is lost: D >= 2.2 spf + cap + 16.
+    uint32_t lo = 2u * spf + spf / 5u + cap + ALINK_USB_DECODE_MARGIN;
     uint32_t hi = span > cap ? span - cap : 0;
     us->d_min = (uint16_t)(lo < 0xFFFFu ? lo : 0xFFFFu);
     us->d_max = (uint16_t)(hi < 0xFFFFu ? hi : 0xFFFFu);
@@ -113,6 +113,7 @@ uint32_t alink_usb_ring_target(alink_usb_t *us, uint32_t fs, uint32_t target, ui
 }
 
 static void timeline_end(alink_usb_t *us);
+static bool rate_ready(const alink_usb_t *us);
 
 bool alink_usb_set_config(alink_usb_t *us, const uint8_t p[ALINK_USB_CFG_LEN]) {
     uint8_t mode = p[0], flags = p[1];
@@ -126,6 +127,8 @@ bool alink_usb_set_config(alink_usb_t *us, const uint8_t p[ALINK_USB_CFG_LEN]) {
     us->flags = flags;
     us->d = d;
     sync_ph(us);
+    // Leaving mode 2: the stock ring target at once (review usb1 F4).
+    if (was == ALINK_USB_MODE_PHASE && mode != ALINK_USB_MODE_PHASE) alink_usb_port_ring_target();
     // A running timeline that the new values move: re-anchor (main loop).
     if ((us->started || us->prefilling) && (mode != was || d_changed)) {
         timeline_end(us);
@@ -195,8 +198,10 @@ bool alink_usb_sample_now(alink_usb_t *us, uint64_t *s, uint16_t *bus) {
     bool ok = arrival(us, (uint64_t)us->spf * nc, &frac);
     alink_usb_port_irq_restore(sv);
     if (!ok) return false;
+    (void)n;
     *s = (uint64_t)us->spf * nc + (uint64_t)(frac > 0.0f ? frac : 0.0f);
-    if (bus) *bus = (uint16_t)(n & 0x7FFu);
+    // The bus frame of S itself, so the two always agree (review usb1 F7).
+    if (bus) *bus = (uint16_t)((*s / us->spf) & 0x7FFu);
     return true;
 }
 
@@ -288,17 +293,36 @@ bool alink_usb_apply(alink_usb_t *us, const uint8_t p[LINK_APPLY_LEN]) {
         uint32_t n = delta >= 2048u - 64u ? n_now - (2048u - delta) : n_now + delta;
         op.frame = (uint64_t)us->spf * n + k;
     }
+    if (!link_apply_push(&us->aq, &op)) return false;
+    // One pending pulse: a later SYNC_PULSE moves the GPIO's frame (review usb1 F7).
     if (op.op == LINK_OP_SYNC_PULSE) (void)alink_usb_port_pulse((uint32_t)(op.frame / us->spf));
-    return link_apply_push(&us->aq, &op);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
 // Timeline writes
 // ---------------------------------------------------------------------------
 
-// n samples at next_w: the packet from `off`, or silence (p NULL).  Split
-// where an apply op is due (it acts on exactly its sample) and at the block cap.
-static void write_span(alink_usb_t *us, const alink_usb_pkt_t *p, uint32_t off, uint32_t n) {
+// Gain ramps of a packet write (review usb1 F1): a lost packet is never a hard
+// hole.  The packet before a gap fades out over its own samples, the packet
+// after it fades in; both act on the input samples, so the DSP's filters and
+// delays smooth the edge further.
+#define RAMP_NONE 0
+#define RAMP_IN   1
+#define RAMP_OUT  2
+
+// Gain at packet sample j of a ramp over [a, b).
+static float ramp_gain(int ramp, uint32_t a, uint32_t b, uint32_t j) {
+    float len = (float)(b - a);
+    if (ramp == RAMP_IN) return (float)(j - a + 1u) / len;
+    if (ramp == RAMP_OUT) return (float)(b - 1u - j) / len;
+    return 1.0f;
+}
+
+// n samples at next_w: the packet from `off` (with `ramp` over [off, off+n)),
+// or silence (p NULL).  Split where an apply op is due (it acts on exactly
+// its sample) and at the block cap.
+static void write_span(alink_usb_t *us, const alink_usb_pkt_t *p, uint32_t off, uint32_t n, int ramp) {
     uint32_t done = 0, cap = us->block_cap ? us->block_cap : us->spf;
     while (done < n) {
         uint64_t here = us->ph.next_w, at = link_apply_next(&us->aq);
@@ -309,8 +333,13 @@ static void write_span(alink_usb_t *us, const alink_usb_pkt_t *p, uint32_t off, 
         uint32_t k = n - done;
         if (k > cap) k = cap;
         if (at - here < k) k = (uint32_t)(at - here);
-        if (p) alink_usb_port_write_packet(p, off + done, k);
-        else alink_usb_port_write_silence(k);
+        if (p) {
+            uint32_t j = off + done;
+            alink_usb_port_write_packet(p, j, k, ramp_gain(ramp, off, off + n, j),
+                                        ramp_gain(ramp, off, off + n, j + k - 1u));
+        } else {
+            alink_usb_port_write_silence(k);
+        }
         link_phase_written(&us->ph, here, k);
         done += k;
     }
@@ -320,6 +349,8 @@ static void timeline_end(alink_usb_t *us) {
     us->started = false;
     us->prefilling = false;
     us->muted_gap = false;
+    us->held = false;
+    us->fade_in = false;
     us->pkt_off = 0;
     link_phase_drain(&us->ph);
 }
@@ -332,6 +363,48 @@ static void reanchor(alink_usb_t *us) {
     set_state(us, ALINK_USB_ST_ANCHORING, ALINK_USB_RS_REANCHOR);
 }
 
+// A gap follows the stream's audio: one GAP each (review usb1 F1).
+static void count_gap(alink_usb_t *us) {
+    if (!us->stream || !us->stream_seen) return;
+    us->gaps++;
+    us->ev_pending = true;
+    us->ev_reason = ALINK_USB_RS_GAP;
+}
+
+// Write the held packet (the newest placed one) at next_w; fade it out when a
+// gap follows, fade it in when it follows one.
+static void flush_held(alink_usb_t *us, bool gap_follows) {
+    if (!us->held) return;
+    us->held = false;
+    const alink_usb_pkt_t *h = &us->hp;
+    uint32_t n = h->samples, off = us->pkt_off;
+    uint64_t hs = (uint64_t)us->spf * h->frame + off;
+    // A whole-sample correction may have moved next_w since it was placed.
+    if (hs < us->ph.next_w) {
+        uint64_t k = us->ph.next_w - hs;
+        off = k < (uint64_t)(n - off) ? off + (uint32_t)k : n;
+    } else if (hs > us->ph.next_w && hs - us->ph.next_w < 4096u) {
+        write_span(us, NULL, 0, (uint32_t)(hs - us->ph.next_w), RAMP_NONE);
+    }
+    if (off >= n) return;
+    bool in = us->fade_in;
+    us->fade_in = false;
+    if (in && gap_follows && n - off >= 2u) {
+        uint32_t mid = off + (n - off) / 2u;
+        write_span(us, h, off, mid - off, RAMP_IN);
+        write_span(us, h, mid, n - mid, RAMP_OUT);
+    } else {
+        write_span(us, h, off, n - off, in ? RAMP_IN : gap_follows ? RAMP_OUT : RAMP_NONE);
+    }
+    if (gap_follows) {
+        us->fade_in = true;
+        count_gap(us);
+    }
+}
+
+// One packet.  The newest placed packet is held back one frame and written
+// when the next one arrives (or the hold decides that it will not): the
+// packet before a gap can then fade out.
 bool alink_usb_deliver(alink_usb_t *us, const alink_usb_pkt_t *p) {
     if (!us->started) return true;              // prefill: the outputs are stopped, muted; dropped
     uint32_t frame = p->frame;
@@ -342,6 +415,10 @@ bool alink_usb_deliver(alink_usb_t *us, const alink_usb_pkt_t *p) {
     us->last_frame = frame;
     uint32_t n = p->samples, off = 0, span = 448u;
     uint64_t s = (uint64_t)us->spf * frame;
+    if (us->held) {
+        uint64_t hend = (uint64_t)us->spf * us->hp.frame + us->hp.samples;
+        flush_held(us, s > hend);
+    }
     bool first = us->stream && !us->stream_seen;
     while (off < n) {
         int64_t gap = (int64_t)(s - us->ph.next_w);
@@ -364,10 +441,11 @@ bool alink_usb_deliver(alink_usb_t *us, const alink_usb_pkt_t *p) {
             // Silence up to the packet: idle timeline before a stream's first
             // packet, a missing packet after it.
             uint32_t k = (uint64_t)gap < 4096u ? (uint32_t)gap : 4096u;
-            write_span(us, NULL, 0, k);
+            write_span(us, NULL, 0, k, RAMP_NONE);
             if (!first && us->stream_seen) {
                 us->missed += k;
                 us->stream_shift += (int32_t)k;
+                us->fade_in = true;
             }
             continue;
         }
@@ -376,20 +454,17 @@ bool alink_usb_deliver(alink_usb_t *us, const alink_usb_pkt_t *p) {
             us->stream_first = (uint32_t)(s / us->spf);
             us->stream_shift = 0;
             us->stream_samples = 0;
-            us->muted_gap = true;
-            first = false;
+            us->fade_in = true;                 // the stream starts on silence: fade in
         }
-        if (us->muted_gap) {
-            // The stream (re)starts on silence: one packet muted, then the
-            // pipeline's 8 ms fade in.
-            alink_usb_port_soft_mute(us->spf);
-            us->muted_gap = false;
-        }
-        uint32_t k = n - off;
-        write_span(us, p, off, k);
-        us->stream_samples += k;
-        off += k;
-        s += k;
+        us->muted_gap = false;
+        // In place: hold it (its bytes copied by the port; the USB slot is reused).
+        us->hp = *p;
+        us->hp.frame = frame;
+        us->hp.data = alink_usb_port_keep(p);
+        us->pkt_off = off;
+        us->held = true;
+        us->stream_samples += n - off;
+        break;
     }
     return true;
 }
@@ -429,34 +504,37 @@ static void phase_act(alink_usb_t *us, int act, int32_t k) {
 
 static bool auto_reanchor(const alink_usb_t *us) { return (us->flags & ALINK_USB_FLAG_AUTO_REANCHOR) != 0; }
 
-// Keep the timeline running on silence while no packet comes: never let the
-// rings fall below D - (block cap + margin) behind the arrival.
+// Keep the timeline running while no packet comes: the held packet first
+// (faded out: the next one is late or lost), then silence, so the rings never
+// run more than D - (block cap + margin) behind the arrival.
 static void hold(alink_usb_t *us) {
-    float since;
-    uint32_t sv = alink_usb_port_irq_save();
-    bool ok = arrival(us, us->ph.next_w, &since);
-    alink_usb_port_irq_restore(sv);
-    if (!ok) return;
     float h = (float)us->d - (float)(us->block_cap + ALINK_USB_DECODE_MARGIN);
-    if (since <= h) return;
-    uint32_t k = (uint32_t)(since - h);
-    if (!k) return;
-    if (k > 4096u) {                            // the main loop stood still far too long
-        reanchor(us);
-        return;
-    }
-    write_span(us, NULL, 0, k);
-    if (us->stream && us->stream_seen) {
-        // A packet is missing while streaming: mute, fade back in.
-        us->missed += k;
-        us->stream_shift += (int32_t)k;
-        if (!us->muted_gap) {
-            us->gaps++;
-            us->ev_pending = true;
-            us->ev_reason = ALINK_USB_RS_GAP;
+    for (int pass = 0; pass < 2; pass++) {
+        float since;
+        uint32_t sv = alink_usb_port_irq_save();
+        bool ok = arrival(us, us->ph.next_w, &since);
+        alink_usb_port_irq_restore(sv);
+        if (!ok || since <= h) return;
+        if (pass == 0 && us->held) {
+            flush_held(us, true);
+            continue;
         }
-        us->muted_gap = true;
-        alink_usb_port_soft_mute(us->spf * ALINK_USB_GAP_MUTE_MS);
+        uint32_t k = (uint32_t)(since - h);
+        if (!k) return;
+        if (k > 4096u) {                        // the main loop stood still far too long
+            reanchor(us);
+            return;
+        }
+        write_span(us, NULL, 0, k, RAMP_NONE);
+        if (us->stream && us->stream_seen) {
+            // A longer loss: the stream is also muted, then fades back in.
+            us->missed += k;
+            us->stream_shift += (int32_t)k;
+            us->fade_in = true;
+            us->muted_gap = true;
+            alink_usb_port_soft_mute(us->spf * ALINK_USB_GAP_MUTE_MS);
+        }
+        return;
     }
 }
 
@@ -471,12 +549,15 @@ static bool rate_ready(const alink_usb_t *us) {
 }
 
 bool alink_usb_anchor_wanted(const alink_usb_t *us) {
-    return us->tb_ok && !us->rejected && us->rate_locked && !us->started && !us->prefilling &&
+    // The VCXO at the feed-forward now, not only once since the last reset: a
+    // re-anchor while they disagree fails at once and loops (review usb1 F3).
+    return us->tb_ok && !us->rejected && us->rate_locked && rate_ready(us) && !us->started && !us->prefilling &&
            alink_usb_phase_possible(us, us->fs);
 }
 
 void alink_usb_on_drain(alink_usb_t *us) {
     link_phase_drain(&us->ph);
+    us->held = false;
     us->prefilling = true;
     us->started = false;
     us->pkt_off = 0;
@@ -490,7 +571,7 @@ void alink_usb_on_drain(alink_usb_t *us) {
 
 static void prefill(alink_usb_t *us) {
     uint32_t room = alink_usb_port_room();
-    if (room) write_span(us, NULL, 0, room);
+    if (room) write_span(us, NULL, 0, room, RAMP_NONE);
 }
 
 float alink_usb_anchor_wait(alink_usb_t *us) {
@@ -506,6 +587,8 @@ float alink_usb_anchor_wait(alink_usb_t *us) {
 
 void alink_usb_on_enabled(alink_usb_t *us) {
     link_phase_started(&us->ph);
+    us->held = false;
+    us->fade_in = false;
     us->prefilling = false;
     us->started = true;
     us->anchors++;
@@ -534,6 +617,7 @@ void alink_usb_stop(alink_usb_t *us, uint8_t reason) {
     alink_usb_est_reset(&us->est);
     if (was) {
         alink_usb_port_park();
+        alink_usb_port_ring_target();           // the stock target (review usb1 F4)
         set_state(us, ALINK_USB_ST_OFF, reason);
     }
 }
@@ -554,20 +638,35 @@ void alink_usb_service(alink_usb_t *us, uint32_t now_ms) {
     // Time base.
     uint32_t sv = alink_usb_port_irq_save();
     bool valid = alink_usb_tb.valid, have_c = alink_usb_tb.have_c, long_gap = alink_usb_tb.long_gap;
-    uint32_t t = alink_usb_tb.t, n_c = alink_usb_tb.n_c, t_c = alink_usb_tb.t_c;
+    uint32_t t = alink_usb_tb.t, n_c = alink_usb_tb.n_c, t_c = alink_usb_tb.t_c, n = alink_usb_tb.n;
     alink_usb_tb.long_gap = false;
     uint32_t now = alink_usb_port_now48();
     alink_usb_port_irq_restore(sv);
     // Signed: the main loop reads whole microseconds, so a SOF stamped exactly
     // (RP2350) can be a few ticks "after" now.
     bool sof_ok = valid && (int32_t)(now - t) < (int32_t)(ALINK_USB_SOF_LOST_MS * ALINK_USB_T48_FRAME);
+    // A frame count and clock that disagree since the last pass (a SOF stall
+    // with the frame number frozen, a small frame jump) is a discontinuity,
+    // handled like a long gap: the timeline ends and the estimator reseeds,
+    // instead of a poisoned rate for 16 s (review usb1 F2).  The SOF times are
+    // exact on the RP2350 (100 us limit) and interrupt entries on the RP2040
+    // (0.5 ms, above the late entries).  Checked here, not in the ISR, to keep
+    // the RAM-resident hook as it was.
+    if (valid && us->seen_valid && n != us->seen_n) {
+        int64_t dev = (int64_t)(int32_t)(t - us->seen_t) - (int64_t)(uint32_t)(n - us->seen_n) * ALINK_USB_T48_FRAME;
+        int64_t lim = us->exact ? 4800 : 24000;
+        if (dev > lim || dev < -lim) long_gap = true;
+    }
+    us->seen_valid = valid;
+    us->seen_n = n;
+    us->seen_t = t;
     if (!sof_ok || long_gap) {
         if (us->tb_ok || us->state != ALINK_USB_ST_NO_SOF) {
             if (us->started || us->prefilling) alink_usb_cancel_all(us);
             timeline_end(us);
             us->tb_ok = false;
             us->ticked = false;
-    us->rate_locked = false;
+            us->rate_locked = false;
             alink_usb_est_reset(&us->est);
             set_state(us, ALINK_USB_ST_NO_SOF, us->state == ALINK_USB_ST_OFF ? ALINK_USB_RS_NONE : ALINK_USB_RS_SOF_LOST);
         }
@@ -585,7 +684,7 @@ void alink_usb_service(alink_usb_t *us, uint32_t now_ms) {
             timeline_end(us);
             us->rejected = true;
             us->ticked = false;
-    us->rate_locked = false;
+            us->rate_locked = false;
             alink_usb_port_park();
             set_state(us, ALINK_USB_ST_REJECTED, ALINK_USB_RS_HOST_RANGE);
         } else if (us->rejected && a < ALINK_USB_HOST_MAX_PPM - ALINK_USB_HOST_HYST_PPM) {
@@ -718,6 +817,7 @@ void alink_usb_get_status(alink_usb_t *us, uint8_t o[ALINK_USB_STATUS_LEN]) {
     } else {
         au_put16(o + 32, 0xFFFF);
     }
+    au_put16(o + 34, us->gaps);                // u16, wraps
     au_put32(o + 48, us->anchors);
     au_put32(o + 52, us->reanchors);
     au_put32(o + 56, us->missed);

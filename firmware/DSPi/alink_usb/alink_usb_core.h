@@ -55,7 +55,7 @@
 // EXT_ALINK_USB.flags (OUT and IN)
 #define ALINK_USB_FLAG_AUTO_REANCHOR 0x01u
 #define ALINK_USB_FLAGS_DEFAULT      ALINK_USB_FLAG_AUTO_REANCHOR
-#define ALINK_USB_D_DEFAULT          192u    // 4 ms at 48 kHz; 96 kHz needs >= 273
+#define ALINK_USB_D_DEFAULT          192u    // 4 ms at 48 kHz; 96 kHz needs 324..351
 
 // EXT_ALINK_USB.status_flags (IN only)
 #define ALINK_USB_SF_D_BELOW_MIN     0x01u   // mode 2: D below d_min (runs as mode 1)
@@ -232,7 +232,14 @@ typedef struct {
     bool     prefilling;                     // outputs drained, silence prefill (main.c)
     bool     started;                        // the outputs play our timeline
     bool     muted_gap;                      // a gap muted the stream; fade in on the next packet
-    uint32_t pkt_off;                        // samples of the head packet already taken
+    uint32_t pkt_off;                        // first sample of the held packet still to write
+    bool     held;                           // hp: the newest placed packet, written when the next arrives
+    bool     fade_in;                        // the next packet written fades in (after silence)
+    alink_usb_pkt_t hp;
+    // SOF discontinuity check (review usb1 F2), main loop: the pair seen last.
+    bool     exact;                          // SOF times from the PHY (RP2350): 100 us limit, else 0.5 ms
+    bool     seen_valid;
+    uint32_t seen_n, seen_t;
     uint32_t last_frame;                     // last packet frame (continuity for unstamped ones)
     // Stream (alt > 0) accounting, EXT_ALINK_USB_STATUS (U6)
     bool     stream;                         // alt > 0
@@ -254,8 +261,8 @@ void alink_usb_store(const alink_usb_t *us, uint8_t s[ALINK_USB_STORE_LEN]);
 void alink_usb_load(alink_usb_t *us, const uint8_t s[ALINK_USB_STORE_LEN]);   // implausible values: defaults
 
 // Limits for the latency option's block cap at rate fs; span = the rings'
-// writable span.  d_min = 1.5 spf + cap + 32, d_max = span - cap: 153..399
-// at 48 kHz and 273..351 at 96 kHz for every option USB runs (block cap 49 / 97).
+// writable span.  d_min = 2.2 spf + cap + 16, d_max = span - cap: 170..399
+// at 48 kHz and 324..351 at 96 kHz for every option USB runs (block cap 49 / 97).
 void alink_usb_limits(alink_usb_t *us, uint32_t fs, uint32_t target, uint32_t cap, uint32_t span);
 // Mode 2 at 48/96 kHz with D in range: the phase lock runs.
 bool alink_usb_phase_possible(const alink_usb_t *us, uint32_t fs);
@@ -318,7 +325,11 @@ void     alink_usb_port_irq_restore(uint32_t s);
 uint32_t alink_usb_port_fs(void);                       // audio_state.freq
 bool     alink_usb_port_play(float *fill);              // output ring fill (slot 0), fractional
 uint32_t alink_usb_port_room(void);                     // producer_block_bounds(): most samples per call now
-void     alink_usb_port_write_packet(const alink_usb_pkt_t *p, uint32_t off, uint32_t k);
+// Samples off..off+k-1 of the packet, the input gain ramping linearly from g0
+// (first) to g1 (last); 1, 1 = unchanged.
+void     alink_usb_port_write_packet(const alink_usb_pkt_t *p, uint32_t off, uint32_t k, float g0, float g1);
+// Copy the packet's bytes (the USB ring slot is reused) and return the copy.
+const void *alink_usb_port_keep(const alink_usb_pkt_t *p);
 void     alink_usb_port_write_silence(uint32_t k);
 // ff_trim: the feed-forward plus `trim` (input_servo_apply_trim); false: the
 // feed-forward plus the fill servo on slot 0 (input_servo_apply).
