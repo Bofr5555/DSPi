@@ -1,19 +1,19 @@
 /*
- * sender_tx.c - DSPi link sender (WP LK4): the link engine on core 1
+ * sender_tx.c - DSPi alink sender (WP LK4): the alink engine on core 1
  *
- * Owns every PIO state machine and DMA channel of the links:
+ * Owns every PIO state machine and DMA channel of the alinks:
  *
- *  - links 0-3 on PIO0 SM0-3, links 4-7 on PIO1 SM0-3, each running LK2's
- *    one-instruction link_tx_N for the class; the SYNC pin on PIO2 SM1 with
+ *  - alinks 0-3 on PIO0 SM0-3, alinks 4-7 on PIO1 SM0-3, each running LK2's
+ *    one-instruction alink_tx_N for the class; the SYNC pin on PIO2 SM1 with
  *    the same program, fed from a parallel ring, so its pulse edge sits on a
  *    comma's first bit; all of them started on one cycle with
  *    pio_enable_sm_multi_mask_in_sync() across the three blocks;
  *  - one DMA channel per state machine reading the same 16 KB word ring
  *    (ring-wrapped read address, endless transfer count: RP2350 only);
- *  - the encoder (sender_link.c) keeps the ring about 0.5 ms ahead of the
- *    DMA; a disabled link keeps its state machine running (so it stays in
+ *  - the encoder (sender_alink.c) keeps the ring about 0.5 ms ahead of the
+ *    DMA; a disabled alink keeps its state machine running (so it stays in
  *    step) and has its GPIO switched to a low SIO output;
- *  - fan-out mode: link_rx_N on PIO2 SM0 into a 32 KB ring, the fan-out core
+ *  - fan-out mode: alink_rx_N on PIO2 SM0 into a 32 KB ring, the fan-out core
  *    (sender_fanout.c), the alignment that puts each re-sent frame a fixed
  *    number of frames after it arrived, and the soft-VCXO servo that keeps
  *    that delay.
@@ -34,15 +34,15 @@
 #include "sender_fanout.h"
 #include "soft_vcxo.h"
 
-#include "link_rx_10.pio.h"
-#include "link_rx_20.pio.h"
-#include "link_rx_5.pio.h"
-#include "link_tx_10.pio.h"
-#include "link_tx_20.pio.h"
-#include "link_tx_5.pio.h"
+#include "alink_rx_10.pio.h"
+#include "alink_rx_20.pio.h"
+#include "alink_rx_5.pio.h"
+#include "alink_tx_10.pio.h"
+#include "alink_tx_20.pio.h"
+#include "alink_tx_5.pio.h"
 
-const uint8_t snd_link_pins[SND_MAX_LINKS] = SND_LINK_PIN_TABLE;
-static const uint8_t link_drive[SND_MAX_LINKS] = SND_LINK_DRIVE_TABLE;
+const uint8_t snd_alink_pins[SND_MAX_ALINKS] = SND_ALINK_PIN_TABLE;
+static const uint8_t alink_drive[SND_MAX_ALINKS] = SND_ALINK_DRIVE_TABLE;
 
 #define TX_RING_WORDS   4096u           // 16 KB: 8.5 ms at L1, 2.1 ms at L3
 #define TX_RING_BITS    14u             // log2 of the ring in bytes (DMA ring wrap)
@@ -75,12 +75,12 @@ typedef struct {
 
 static const prog_set_t progs[4] = {
     { 0 },
-    { 20, &link_tx_20_program, &link_rx_20_program, link_tx_20_program_get_default_config,
-      link_rx_20_program_get_default_config, link_rx_20_wrap_target },
-    { 10, &link_tx_10_program, &link_rx_10_program, link_tx_10_program_get_default_config,
-      link_rx_10_program_get_default_config, link_rx_10_wrap_target },
-    { 5, &link_tx_5_program, &link_rx_5_program, link_tx_5_program_get_default_config,
-      link_rx_5_program_get_default_config, link_rx_5_wrap_target },
+    { 20, &alink_tx_20_program, &alink_rx_20_program, alink_tx_20_program_get_default_config,
+      alink_rx_20_program_get_default_config, alink_rx_20_wrap_target },
+    { 10, &alink_tx_10_program, &alink_rx_10_program, alink_tx_10_program_get_default_config,
+      alink_rx_10_program_get_default_config, alink_rx_10_wrap_target },
+    { 5, &alink_tx_5_program, &alink_rx_5_program, alink_tx_5_program_get_default_config,
+      alink_rx_5_program_get_default_config, alink_rx_5_wrap_target },
 };
 
 static PIO const pios[3] = { pio0, pio1, pio2 };
@@ -91,7 +91,7 @@ static PIO const pios[3] = { pio0, pio1, pio2 };
 
 static struct {
     bool     inited;
-    int      dma_link[SND_MAX_LINKS];
+    int      dma_alink[SND_MAX_ALINKS];
     int      dma_sync, dma_rx;
     // Loaded TX program per block (class) and offset.
     uint8_t  tx_loaded[3];
@@ -125,8 +125,8 @@ uint32_t sender_sys_hz(void) {
 
 bool sender_pin_used(uint8_t pin, uint8_t ignore_sync) {
     if (pin == 0xFF) return false;
-    for (unsigned n = 0; n < SND_MAX_LINKS; n++) {
-        if (snd_link_pins[n] == pin || SND_TXDIS_PIN(n) == pin || SND_LOS_PIN(n) == pin) return true;
+    for (unsigned n = 0; n < SND_MAX_ALINKS; n++) {
+        if (snd_alink_pins[n] == pin || SND_TXDIS_PIN(n) == pin || SND_LOS_PIN(n) == pin) return true;
     }
     if (!ignore_sync && snd.cfg.sync_pin == pin) return true;
     if (snd.config[0]) {
@@ -154,17 +154,17 @@ static void cyccnt_enable(void) {
 // Ring positions
 // ---------------------------------------------------------------------------
 
-// Words the link DMA has read (absolute).  Link 0's channel stands for all:
-// every link SM runs on the same cycle from the same ring.
+// Words the alink DMA has read (absolute).  Alink 0's channel stands for all:
+// every alink SM runs on the same cycle from the same ring.
 static uint64_t tx_read_abs(void) {
-    uint32_t idx = (dma_hw->ch[eng.dma_link[0]].read_addr - (uint32_t)(uintptr_t)tx_ring) >> 2;
+    uint32_t idx = (dma_hw->ch[eng.dma_alink[0]].read_addr - (uint32_t)(uintptr_t)tx_ring) >> 2;
     if (idx < eng.tx_last) eng.tx_passes++;
     eng.tx_last = idx;
     return (uint64_t)eng.tx_passes * TX_RING_WORDS + idx;
 }
 
 // The bit on the wire now, within about a word: words read less those
-// still in link 0's TX FIFO, less half the word in its shift register.
+// still in alink 0's TX FIFO, less half the word in its shift register.
 static uint64_t tx_wire_bit(uint64_t read_words) {
     uint32_t lvl = pio_sm_get_tx_fifo_level(pio0, 0);
     uint64_t w = read_words > lvl + 1u ? read_words - lvl - 1u : 0;
@@ -184,16 +184,16 @@ static uint64_t rx_write_abs(void) {
 
 static void engine_init_once(void) {
     if (eng.inited) return;
-    for (unsigned n = 0; n < SND_MAX_LINKS; n++) {
+    for (unsigned n = 0; n < SND_MAX_ALINKS; n++) {
         pio_sm_claim(pios[n / 4u], n % 4u);
-        eng.dma_link[n] = dma_claim_unused_channel(true);
+        eng.dma_alink[n] = dma_claim_unused_channel(true);
     }
     pio_sm_claim(pio2, SYNC_SM);
     pio_sm_claim(pio2, RX_SM);
     eng.dma_sync = dma_claim_unused_channel(true);
     eng.dma_rx = dma_claim_unused_channel(true);
-    for (unsigned n = 0; n < SND_MAX_LINKS; n++) {
-        uint pin = snd_link_pins[n];
+    for (unsigned n = 0; n < SND_MAX_ALINKS; n++) {
+        uint pin = snd_alink_pins[n];
         gpio_init(pin);
         gpio_set_dir(pin, GPIO_OUT);
         gpio_put(pin, 0);
@@ -217,10 +217,10 @@ static void stop_all(void) {
     pio_set_sm_mask_enabled(pio0, 0xFu, false);
     pio_set_sm_mask_enabled(pio1, 0xFu, false);
     pio_set_sm_mask_enabled(pio2, (1u << SYNC_SM) | (1u << RX_SM), false);
-    for (unsigned n = 0; n < SND_MAX_LINKS; n++) dma_channel_abort((uint)eng.dma_link[n]);
+    for (unsigned n = 0; n < SND_MAX_ALINKS; n++) dma_channel_abort((uint)eng.dma_alink[n]);
     dma_channel_abort((uint)eng.dma_sync);
     dma_channel_abort((uint)eng.dma_rx);
-    for (unsigned n = 0; n < SND_MAX_LINKS; n++) {
+    for (unsigned n = 0; n < SND_MAX_ALINKS; n++) {
         pio_sm_clear_fifos(pios[n / 4u], n % 4u);
         pio_sm_restart(pios[n / 4u], n % 4u);
     }
@@ -263,16 +263,16 @@ static void config_tx_dma(int ch, const uint32_t *ring, PIO pio, uint sm) {
 // GPIO functions, TX_DISABLE levels and the SYNC pin, from snd.cfg.
 static void apply_pins(void) {
     uint32_t s = snd_lock_take();
-    uint16_t en = snd.cfg.link_enable, txdis = snd.cfg.txdis_mask;
+    uint16_t en = snd.cfg.alink_enable, txdis = snd.cfg.txdis_mask;
     uint8_t sync = snd.cfg.sync_pin;
     snd_lock_give(s);
-    for (unsigned n = 0; n < SND_MAX_LINKS; n++) {
-        uint pin = snd_link_pins[n];
+    for (unsigned n = 0; n < SND_MAX_ALINKS; n++) {
+        uint pin = snd_alink_pins[n];
         bool on = (en >> n) & 1u;
         if (on && !((eng.enable >> n) & 1u)) {
             pio_gpio_init(pios[n / 4u], pin);
-            gpio_set_drive_strength(pin, link_drive[n] >= 12 ? GPIO_DRIVE_STRENGTH_12MA :
-                                         link_drive[n] >= 8 ? GPIO_DRIVE_STRENGTH_8MA : GPIO_DRIVE_STRENGTH_4MA);
+            gpio_set_drive_strength(pin, alink_drive[n] >= 12 ? GPIO_DRIVE_STRENGTH_12MA :
+                                         alink_drive[n] >= 8 ? GPIO_DRIVE_STRENGTH_8MA : GPIO_DRIVE_STRENGTH_4MA);
             gpio_set_slew_rate(pin, GPIO_SLEW_RATE_FAST);
         } else if (!on && ((eng.enable >> n) & 1u)) {
             gpio_init(pin);
@@ -284,7 +284,7 @@ static void apply_pins(void) {
     }
     eng.enable = en;
     if (sync != eng.sync_pin) {
-        // The SYNC SM never stops (it would fall out of step with the links):
+        // The SYNC SM never stops (it would fall out of step with the alinks):
         // only its OUT base moves, and the pad's output enable is forced on,
         // since its pin direction was set for another pin before it started.
         if (eng.sync_pin != 0xFF) {
@@ -337,7 +337,7 @@ static struct {
     uint32_t start_us;
 } fo;
 
-static link_rx_t fo_scratch;
+static alink_rx_t fo_scratch;
 static uint32_t fo_snap[(10u * 140u * 68u + 31u) / 32u + 2u];
 
 static void rx_program(unsigned cls) {
@@ -378,7 +378,7 @@ static void rx_start(void) {
     memset(&fo, 0, sizeof(fo));
     snd_dectab_init(&fo.dec);
     fo.auto_cls = snd.config[2] == 0;
-    rx_program(fo.auto_cls ? LINK_CLASS_L1 : snd.config[2]);
+    rx_program(fo.auto_cls ? ALINK_CLASS_L1 : snd.config[2]);
     fo.tick_us = time_us_32();
 }
 
@@ -404,29 +404,29 @@ static void engine_restart(void) {
     unsigned cls = snd.cfg.cls;
     bool fanout = snd.config[0] != 0;
     // The stream continues its frame counter across a restart.
-    link_tx_t *tx = &snd.tx;
+    alink_tx_t *tx = &snd.tx;
     uint64_t first = tx->started ? tx->frame : 0;
     uint8_t flags = tx->flags;
     uint64_t af = tx->apply_frame;
     uint8_t aop = tx->apply_op, aarg = tx->apply_arg;
     int16_t aval = tx->apply_value;
-    link_tx_init(tx, cls, snd.cfg.rate, snd.cfg.channels, first, snd.sender_id);
+    alink_tx_init(tx, cls, snd.cfg.rate, snd.cfg.channels, first, snd.sender_id);
     tx->flags = flags;
     // A pending RATE is already in cfg (the layout above); another op keeps
     // its frame if a superframe can still carry it.
-    if (aop != LINK_OP_NONE && aop != LINK_OP_RATE) (void)link_tx_schedule(tx, af, aop, aarg, aval);
+    if (aop != ALINK_OP_NONE && aop != ALINK_OP_RATE) (void)alink_tx_schedule(tx, af, aop, aarg, aval);
     snd_lock_give(s);
 
     for (unsigned b = 0; b < 3; b++) load_tx_program(b, cls);
-    for (unsigned n = 0; n < SND_MAX_LINKS; n++)
-        config_tx_sm(pios[n / 4u], n % 4u, eng.tx_off[n / 4u], cls, snd_link_pins[n]);
+    for (unsigned n = 0; n < SND_MAX_ALINKS; n++)
+        config_tx_sm(pios[n / 4u], n % 4u, eng.tx_off[n / 4u], cls, snd_alink_pins[n]);
     // The SYNC SM reaches a pad only once apply_pins() gives it one.
     config_tx_sm(pio2, SYNC_SM, eng.tx_off[2], cls, eng.sync_pin != 0xFF ? eng.sync_pin : 0u);
 
     fill_idles();
     snd_sink_init(&sink, tx_ring, TX_RING_WORDS, sync_ring);
     snd_log_init(&flog, first);
-    uint32_t baud = link_class_baud(cls);
+    uint32_t baud = alink_class_baud(cls);
     eng.cls = (uint8_t)cls;
     eng.fanout = fanout;
     eng.pulse_bits = baud / 100000u;                         // 10 us
@@ -435,8 +435,8 @@ static void engine_restart(void) {
     eng.tx_last = 0;
     eng.tx_passes = 0;
 
-    for (unsigned n = 0; n < SND_MAX_LINKS; n++)
-        config_tx_dma(eng.dma_link[n], tx_ring, pios[n / 4u], n % 4u);
+    for (unsigned n = 0; n < SND_MAX_ALINKS; n++)
+        config_tx_dma(eng.dma_alink[n], tx_ring, pios[n / 4u], n % 4u);
     config_tx_dma(eng.dma_sync, sync_ring, pio2, SYNC_SM);
 
     snd.start_frame = first;
@@ -453,9 +453,9 @@ static void engine_restart(void) {
 
     // DMA first (it fills the FIFOs), then every SM on the same cycle.
     uint32_t dmask = 1u << eng.dma_sync;
-    for (unsigned n = 0; n < SND_MAX_LINKS; n++) dmask |= 1u << eng.dma_link[n];
+    for (unsigned n = 0; n < SND_MAX_ALINKS; n++) dmask |= 1u << eng.dma_alink[n];
     dma_start_channel_mask(dmask);
-    for (unsigned n = 0; n < SND_MAX_LINKS; n++)
+    for (unsigned n = 0; n < SND_MAX_ALINKS; n++)
         while (!pio_sm_is_tx_fifo_full(pios[n / 4u], n % 4u)) tight_loop_contents();
     while (!pio_sm_is_tx_fifo_full(pio2, SYNC_SM)) tight_loop_contents();
     pio0->fdebug = 0xFu << PIO_FDEBUG_TXSTALL_LSB;
@@ -475,9 +475,9 @@ static bool usb_ready(uint32_t fs) {
 }
 
 // Samples of the next frame (lock held; tx describes the frame).
-static void fill_samples(const link_tx_t *tx, int32_t *smp) {
+static void fill_samples(const alink_tx_t *tx, int32_t *smp) {
     unsigned c = tx->channels;
-    uint32_t fs = link_rate_hz(tx->rate);
+    uint32_t fs = alink_rate_hz(tx->rate);
     uint8_t tp = snd.cfg.test_pattern;
     memset(smp, 0, sizeof(int32_t) * c);
     if (tp == SND_TP_TONE) {
@@ -515,18 +515,18 @@ static void fill_samples(const link_tx_t *tx, int32_t *smp) {
 }
 
 static void encode_one(void) {
-    int32_t smp[LINK_MAX_CHANNELS];
+    int32_t smp[ALINK_MAX_CHANNELS];
     uint32_t c0 = cyccnt();
     uint32_t s = snd_lock_take();
-    link_tx_t *tx = &snd.tx;
+    alink_tx_t *tx = &snd.tx;
     uint64_t f = tx->frame;
-    uint32_t fs = link_rate_hz(tx->rate);
+    uint32_t fs = alink_rate_hz(tx->rate);
     fill_samples(tx, smp);
     uint8_t tp = snd.cfg.test_pattern;
-    tx->flags = (uint8_t)((tx->flags & ~(LINK_SF_FLAG_PRBS | LINK_SF_FLAG_USB_LIVE | LINK_SF_FLAG_MUTE)) |
-                          (tp == SND_TP_PRBS ? LINK_SF_FLAG_PRBS : 0) |
-                          (snd.usb_playing ? LINK_SF_FLAG_USB_LIVE : 0) |
-                          (snd.cfg.flags & 1u ? LINK_SF_FLAG_MUTE : 0));
+    tx->flags = (uint8_t)((tx->flags & ~(ALINK_SF_FLAG_PRBS | ALINK_SF_FLAG_USB_LIVE | ALINK_SF_FLAG_MUTE)) |
+                          (tp == SND_TP_PRBS ? ALINK_SF_FLAG_PRBS : 0) |
+                          (snd.usb_playing ? ALINK_SF_FLAG_USB_LIVE : 0) |
+                          (snd.cfg.flags & 1u ? ALINK_SF_FLAG_MUTE : 0));
     // SYNC: once a second (F mod Fs = 0) and at a SYNC_PULSE apply's frame.
     if (eng.pps_fs != fs) {
         eng.pps_fs = fs;
@@ -573,9 +573,9 @@ static void master_service(void) {
 // re-sent copy starts, plus the RX word, the TX FIFO and shift register (5
 // words) and 6 us of processing.  2 frames at 44.1/48 kHz, 2-3 at 96 kHz.
 static unsigned fanout_delay_frames(unsigned in_cls, unsigned out_cls, unsigned rate) {
-    uint32_t fs = link_rate_hz(rate);
-    uint64_t lat_ns = 5ull * 32u * 1000000000ull / link_class_baud(out_cls) +
-                      32ull * 1000000000ull / link_class_baud(in_cls) + 6000u;
+    uint32_t fs = alink_rate_hz(rate);
+    uint64_t lat_ns = 5ull * 32u * 1000000000ull / alink_class_baud(out_cls) +
+                      32ull * 1000000000ull / alink_class_baud(in_cls) + 6000u;
     uint64_t frame_ns = 1000000000ull / fs;
     unsigned k = (unsigned)((frame_ns + lat_ns + frame_ns - 1u) / frame_ns);
     return k < 2u ? 2u : k;
@@ -618,7 +618,7 @@ static void fo_rate_tick(uint64_t rx_bits) {
     uint32_t dt = now - fo.anchor_us[0];
     if (dt < 1000000u) return;
     double rate = (double)(rx_bits - fo.anchor_bits[0]) * 1e6 / (double)dt;
-    fo.ppm_ff = (float)((rate / (double)link_class_baud(fo.in_cls) - 1.0) * 1e6);
+    fo.ppm_ff = (float)((rate / (double)alink_class_baud(fo.in_cls) - 1.0) * 1e6);
     fo.ff_valid = fo.ppm_ff > -300.0f && fo.ppm_ff < 300.0f;
     fo.ff_fresh = fo.ff_valid;
 }
@@ -628,7 +628,7 @@ static void fo_servo_tick(void) {
     if (fo.phase == FO_RUN && fo.err_n) {
         // Delay error in frames: positive = the copy leaves late: run faster.
         float e = (float)((double)fo.err_sum / (double)fo.err_n) /
-                  (float)(10u * link_frame_symbols_min(eng.cls, fo.fo.rate));
+                  (float)(10u * alink_frame_symbols_min(eng.cls, fo.fo.rate));
         fo.err_frames = e;
         fo.integ += 0.1f * e;
         if (fo.integ > 50.0f) fo.integ = 50.0f;
@@ -659,7 +659,7 @@ static void fanout_service(void) {
         // Snapshot the newest `need` bits (word aligned) and acquire.
         uint64_t w1 = rx_bits / 32u, w0 = w1 - (need + 31u) / 32u;
         for (uint64_t w = w0; w < w1; w++) fo_snap[w - w0] = rx_ring[w & (RX_RING_WORDS - 1u)];
-        link_rx_stats_t keep = fo.fo.st;           // counters run across acquisitions
+        alink_rx_stats_t keep = fo.fo.st;          // counters run across acquisitions
         snd_fo_init(&fo.fo, fo.in_cls, eng.cls, &snd_tables, &fo.dec);
         fo.fo.st = keep;
         bool ok = snd_fo_acquire(&fo.fo, fo_snap, w0 * 32u, (uint32_t)((w1 - w0) * 32u), &fo_scratch);
@@ -697,12 +697,12 @@ static void fanout_service(void) {
         fo.overruns++;
     }
     while (fo.fo.state == SND_FO_LOCKED && snd_fo_need(&fo.fo) <= rx_bits) {
-        if (fo.phase == FO_SYNC && fo.ff_fresh && fo.fo.sf_valid && fo.fo.frame % LINK_SF_LEN == 0 &&
+        if (fo.phase == FO_SYNC && fo.ff_fresh && fo.fo.sf_valid && fo.fo.frame % ALINK_SF_LEN == 0 &&
             time_us_32() - fo.start_us > 1500000u) {
             // Put this frame where it belongs: delay_frames after its comma
             // arrived.  The idles before it fill the gap.
-            uint32_t fs = link_rate_hz(fo.fo.rate);
-            fo.delay_bits = (uint64_t)fo.delay_frames * link_class_baud(eng.cls) / fs;
+            uint32_t fs = alink_rate_hz(fo.fo.rate);
+            fo.delay_bits = (uint64_t)fo.delay_frames * alink_class_baud(eng.cls) / fs;
             int64_t t = snd_fo_target_bit(fo.fo.pos, rx_write_abs() * 32u, tx_wire_bit(tx_read_abs()),
                                           progs[fo.in_cls].n, progs[eng.cls].n, fo.delay_bits);
             int64_t now_bits = (int64_t)snd_sink_bits(&sink);
@@ -758,9 +758,9 @@ static void fanout_service(void) {
 // Status for core 0
 // ---------------------------------------------------------------------------
 
-// EXT_LINK_STATUS fields of the fan-out input (offsets 0-7, 16-51 less F).
+// EXT_ALINK_STATUS fields of the fan-out input (offsets 0-7, 16-51 less F).
 void sender_fanout_status(uint8_t *state, uint8_t *cls, uint8_t *rate, uint8_t *chans, uint8_t *hops,
-                          uint8_t *sender, uint8_t *sflags, link_rx_stats_t *st, float *phase_err,
+                          uint8_t *sender, uint8_t *sflags, alink_rx_stats_t *st, float *phase_err,
                           uint32_t *delay_frames, uint32_t *realigns, float *ppm_ff) {
     if (!eng.fanout) {
         *state = 0;
@@ -818,7 +818,7 @@ void sender_engine_core1(void) {
         if (!snd.run_cls) continue;
         if (eng.fanout) fanout_service();
         else master_service();
-        // FIFO stalls on the running link SMs (a stretched bit on the line).
+        // FIFO stalls on the running alink SMs (a stretched bit on the line).
         uint32_t st0 = pio0->fdebug & (0xFu << PIO_FDEBUG_TXSTALL_LSB);
         uint32_t st1 = pio1->fdebug & (0xFu << PIO_FDEBUG_TXSTALL_LSB);
         if (st0 | st1) {
@@ -827,7 +827,7 @@ void sender_engine_core1(void) {
             snd.tx_stall = snd.tx_stall + 1u;
         }
         uint16_t los = 0;
-        for (unsigned n = 0; n < SND_MAX_LINKS; n++)
+        for (unsigned n = 0; n < SND_MAX_ALINKS; n++)
             if (SND_LOS_PIN(n) != 0xFF && gpio_get(SND_LOS_PIN(n))) los |= (uint16_t)(1u << n);
         snd.los_mask = los;
         uint32_t dt = time_us_32() - t0;

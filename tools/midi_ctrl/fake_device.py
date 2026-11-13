@@ -16,8 +16,8 @@ exercise midi_ctrl.py, measure.py and soak.py without a device:
     after a SET, src MIDI), 0x50 status, 0xB0/0xB2 stats, 0xF0 bootloader, 0x00
     extension channel (EXT_LIST, pair map, core-voltage status, notify
     feature flags);
-  * optional link block 0x8000-0x800A and events 0xE1 / 0xE2
-    (FakeDevice(link="receiver" | "sender"), `--link` in pty mode); without
+  * optional alink block 0x8000-0x800A and events 0xE1 / 0xE2
+    (FakeDevice(alink="receiver" | "sender"), `--alink` in pty mode); without
     it the IDs are refused like on today's firmware;
   * optional BUSY / BULK_LOCKED injection.
 
@@ -47,15 +47,15 @@ NUM_OUTPUTS = 9                         # RP2350: 8 slots + PDM sub (EXT_IDENTIF
 PRESET_SLOTS = 10
 MAX_DELAY_SAMPLES = 2048                # RP2350 (config.h)
 
-# -- link block (extension_channel_spec.md 2.8) ------------------------------
-LINK_RX_IDS = (0x8000, 0x8001, 0x8002, 0x8003, 0x8004, 0x8005, 0x8006, 0x8008, 0x8009, 0x800A)
-LINK_TX_IDS = (0x8000, 0x8001, 0x8002, 0x8005, 0x8007, 0x8008, 0x8009, 0x800A)
-LINK_FEAT_RX = 0x23                     # PHASE_LOCK | APPLY_AT_FRAME | LOS_PIN
-LINK_FEAT_TX = 0x38                     # FAN_OUT | TEST_PATTERNS | LOS_PIN
+# -- alink block (extension_channel_spec.md 2.8) ------------------------------
+ALINK_RX_IDS = (0x8000, 0x8001, 0x8002, 0x8003, 0x8004, 0x8005, 0x8006, 0x8008, 0x8009, 0x800A)
+ALINK_TX_IDS = (0x8000, 0x8001, 0x8002, 0x8005, 0x8007, 0x8008, 0x8009, 0x800A)
+ALINK_FEAT_RX = 0x23                    # PHASE_LOCK | APPLY_AT_FRAME | LOS_PIN
+ALINK_FEAT_TX = 0x38                    # FAN_OUT | TEST_PATTERNS | LOS_PIN
 D_LOCAL_MIN, D_LOCAL_MAX = 112, 1024    # 1 ms latency option (SYS2 3.2)
 APPLY_QUEUE = 4
-# (class, rate code) -> C: a copy of link_max_channels() (link_protocol_spec.md 5.7, the only
-# capacity table); keep it in step with firmware/DSPi/link/link_codec.c.
+# (class, rate code) -> C: a copy of alink_max_channels() (alink_protocol_spec.md 5.7, the only
+# capacity table); keep it in step with firmware/DSPi/alink/alink_codec.c.
 MAX_CHANNELS = {(1, 0): 8, (2, 0): 19, (3, 0): 41, (1, 1): 8, (2, 1): 18, (3, 1): 38,
                 (1, 2): 3, (2, 2): 8, (3, 2): 18}
 SF_LEN = 32                             # frames per superframe
@@ -63,12 +63,12 @@ RATE_LEAD = 2400                        # frames of lead for a RATE the sender s
 OP_RATE = 6
 
 
-def link_pin_ok(p: int) -> bool:
+def alink_pin_ok(p: int) -> bool:
     return p == 0xFF or (p <= 28 and p not in (23, 24, 25))   # Pico 2 header GPIOs
 
 
-class FakeLink:
-    """Control-plane model of the link block: validation, state, counters.
+class FakeAlink:
+    """Control-plane model of the alink block: validation, state, counters.
 
     No audio and no timing: tests move the model with lock(), lose(),
     advance() and read the 0xE1 / 0xE2 notifications the device sends.
@@ -77,7 +77,7 @@ class FakeLink:
 
     def __init__(self, role: str):
         self.sender = role == "sender"
-        self.ids = LINK_TX_IDS if self.sender else LINK_RX_IDS
+        self.ids = ALINK_TX_IDS if self.sender else ALINK_RX_IDS
         self.config = bytearray([0, 0xFF, 0, 0xFF, 0xFF, 0xFF, 0x03, 0])
         self.slots = bytearray(range(8))
         self.mode, self.d_local, self.hops_offset, self.phase_state = 1, 128, 0, 0
@@ -106,7 +106,7 @@ class FakeLink:
         rx = self.config[1] if self.config[1] != 0xFF else (20 if self.sender else 0)
         return (struct.pack("<BBBBBBHBBH", self.role, 1, 0x07,
                             8 if self.sender else 1, 64, 0 if self.sender else 8, 0, rx, self.config[3], 0)
-                + struct.pack("<IHH", LINK_FEAT_TX if self.sender else LINK_FEAT_RX,
+                + struct.pack("<IHH", ALINK_FEAT_TX if self.sender else ALINK_FEAT_RX,
                               0 if self.sender else D_LOCAL_MIN, 0 if self.sender else D_LOCAL_MAX)
                 + bytes(12))
 
@@ -176,13 +176,13 @@ class FakeLink:
         if sub == 0x8002:
             enable, rx, cls, tx, los, txdis, flags, res = p
             pins = [x for x in (rx, tx, los, txdis) if x != 0xFF]
-            if (enable > 1 or cls > 3 or flags & ~0x03 or res or not all(map(link_pin_ok, (rx, tx, los, txdis)))
+            if (enable > 1 or cls > 3 or flags & ~0x03 or res or not all(map(alink_pin_ok, (rx, tx, los, txdis)))
                     or len(set(pins)) != len(pins) or (tx != 0xFF and self.sender)):
                 return False
             was = self.config[0]
             self.config[:] = p
             if was and not enable and self.state:
-                dev.link_event(0, 7)
+                dev.alink_event(0, 7)
             return True
         if sub == 0x8003:
             if any(x >= 64 and x != 0xFF for x in p):
@@ -197,7 +197,7 @@ class FakeLink:
             changed = (mode, d_local, hops_off) != (self.mode, self.d_local, self.hops_offset)
             self.mode, self.d_local, self.hops_offset = mode, d_local, hops_off
             if changed and self.state == 2 and self.phase_state == 2:
-                dev.link_event(2, 5)    # re-anchor on the new delay
+                dev.alink_event(2, 5)   # re-anchor on the new delay
             return True
         if sub == 0x8006:
             frame, op, arg, value = struct.unpack_from("<QBBh", p)
@@ -217,7 +217,7 @@ class FakeLink:
         if sub == 0x8007:
             mask, cls, chans, rate, test, smap, sync, txdis, _los, _alt, flags, res = struct.unpack("<HBBBBBBHHBBH", p)
             if (mask >> 8 or not 1 <= cls <= 3 or rate > 2 or not 1 <= chans <= MAX_CHANNELS[(cls, rate)]
-                    or test > 3 or smap or not link_pin_ok(sync) or txdis >> 8 or flags & ~1 or res):
+                    or test > 3 or smap or not alink_pin_ok(sync) or txdis >> 8 or flags & ~1 or res):
                 return False
             # As sender_vendor.c set_tx(): "a change" is against the last accepted
             # request (self.tx), not the stream's layout, so writing the stream's
@@ -241,7 +241,7 @@ class FakeLink:
             self.tx[10:13] = keep
             return True
         if sub == 0x8008:
-            # link_tx_schedule(): one pending apply, a full superframe of lead,
+            # alink_tx_schedule(): one pending apply, a full superframe of lead,
             # RATE on a superframe boundary with value 0 and a layout that fits.
             frame, op, arg, value, sysflags = struct.unpack_from("<QBBhB", p)
             if op > 8 or sysflags & ~1 or any(p[13:]):
@@ -303,7 +303,7 @@ def default_bulk() -> bytes:
 
 
 class FakeDevice:
-    def __init__(self, mfr: bytes = mc.MFR_DEV, bulk: bytes | None = None, link: str | None = None):
+    def __init__(self, mfr: bytes = mc.MFR_DEV, bulk: bytes | None = None, alink: str | None = None):
         self.mfr = mfr
         self.split = mc.SysexSplitter()
         self.out = bytearray()
@@ -320,7 +320,7 @@ class FakeDevice:
         self.pair_map = bytes(4)    # EXT_CROSSFEED_PAIR_MAP (normalization not modelled)
         self.identify_s = 0         # EXT_IDENTIFY blink time (no countdown modelled)
         self.identify_tone = mc.IDENTIFY_TONE_NONE
-        self.link = FakeLink(link) if link else None   # None: link IDs refused (today's firmware)
+        self.alink = FakeAlink(alink) if alink else None   # None: alink IDs refused (today's firmware)
 
     # -- output -----------------------------------------------------------
     def _emit(self, tag: int, frame: bytes) -> None:
@@ -344,9 +344,9 @@ class FakeDevice:
         self.notify(bytes([2, 0x03, 0, self.seq & 0xFF, src, 0, 0, 0]))
         self.seq += 1
 
-    def link_event(self, state: int, reason: int) -> None:
-        """Set the link state and send NOTIFY_EVT_LINK_STATE (0xE1)."""
-        ln = self.link
+    def alink_event(self, state: int, reason: int) -> None:
+        """Set the alink state and send NOTIFY_EVT_ALINK_STATE (0xE1)."""
+        ln = self.alink
         if state == 2 and ln.state != 2:
             ln.counters[0] += 1
             ln.cls, ln.rate, ln.chans, ln.hops = ln.cls or 1, 1, 8, 0
@@ -358,7 +358,7 @@ class FakeDevice:
         ln.phase_state = 2 if state == 2 and ln.mode == 1 else 0
         if state == 0:
             ln.cls, ln.rate, ln.chans = 0, 0xFF, 0
-        self.notify(bytes([2, mc.NOTIFY_EVT_LINK_STATE, 0, self.seq & 0xFF, state, ln.cls, reason, 0])
+        self.notify(bytes([2, mc.NOTIFY_EVT_ALINK_STATE, 0, self.seq & 0xFF, state, ln.cls, reason, 0])
                     + struct.pack("<I", ln.frame & 0xFFFFFFFF))
         self.seq += 1
 
@@ -501,12 +501,12 @@ class FakeDevice:
         # wrong direction or wrong OUT length -> ERROR (USB: STALL).
         set_len = {mc.EXT_CROSSFEED_PAIR_MAP: 4, mc.EXT_CORE_VREG: 2, mc.EXT_IDENTIFY: 4}
         if sub >= 0x8000:
-            return self._link_ext(tag, is_get, sub, payload, cap)
+            return self._alink_ext(tag, is_get, sub, payload, cap)
         if is_get:
             if sub == mc.EXT_LIST:
                 ids = (mc.EXT_CROSSFEED_PAIR_MAP, mc.EXT_CORE_VREG, mc.EXT_NOTIFY_FEATURES,
                        mc.EXT_IDENTIFY, mc.EXT_RESET_INFO, mc.EXT_FIRMWARE_FIXES) + \
-                    (self.link.ids if self.link else ())
+                    (self.alink.ids if self.alink else ())
                 data = struct.pack(f"<{len(ids)}H", *ids)
             elif sub == mc.EXT_CROSSFEED_PAIR_MAP:
                 data = self.pair_map
@@ -514,8 +514,8 @@ class FakeDevice:
                 data = bytes([0x0D, 0, 0x0D, 0]) + bytes(12)   # live/default 1.20 V
             elif sub == mc.EXT_NOTIFY_FEATURES:
                 feats = mc.NOTIFY_FEAT_BULK_SOURCE | mc.NOTIFY_FEAT_CLIP_EVENT
-                if self.link:
-                    feats |= mc.NOTIFY_FEAT_LINK_STATE | mc.NOTIFY_FEAT_APPLY_RESULT
+                if self.alink:
+                    feats |= mc.NOTIFY_FEAT_ALINK_STATE | mc.NOTIFY_FEAT_APPLY_RESULT
                 data = struct.pack("<I", feats)
             elif sub == mc.EXT_IDENTIFY:
                 # RP2350 A2 on a pico2 build; the hw_rev string as a board build sets it
@@ -543,10 +543,10 @@ class FakeDevice:
         return self._reply(tag, False, mc.ST_OK)
 
 
-    def _link_ext(self, tag: int, is_get: bool, sub: int, payload: bytes, cap: int) -> None:
-        # Link block: an ID the build does not list, the wrong direction or the
+    def _alink_ext(self, tag: int, is_get: bool, sub: int, payload: bytes, cap: int) -> None:
+        # Alink block: an ID the build does not list, the wrong direction or the
         # wrong OUT length is refused like any unknown sub-command.
-        ln = self.link
+        ln = self.alink
         if ln is None or sub not in ln.ids:
             return self._reply(tag, is_get, mc.ST_ERROR)
         if is_get:
@@ -616,15 +616,15 @@ def main() -> int:
     ap.add_argument("--mfr", default="7d")
     ap.add_argument("--notify-every", type=float, default=0.0,
                     help="push a GPIO PARAM_CHANGED notification every N s")
-    ap.add_argument("--link", choices=("receiver", "sender"),
-                    help="add the link block 0x8000+ (a receiver starts locked)")
+    ap.add_argument("--alink", choices=("receiver", "sender"),
+                    help="add the alink block 0x8000+ (a receiver starts locked)")
     args = ap.parse_args()
     if not args.pty:
         ap.error("only --pty mode is a standalone program; import FakeDevice otherwise")
-    dev = FakeDevice(bytes.fromhex(args.mfr), link=args.link)
-    if args.link == "receiver":
-        dev.link.config[0] = 1
-        dev.link_event(2, 1)
+    dev = FakeDevice(bytes.fromhex(args.mfr), alink=args.alink)
+    if args.alink == "receiver":
+        dev.alink.config[0] = 1
+        dev.alink_event(2, 1)
         dev.out.clear()
     serve_pty(dev, args.notify_every)
     return 0

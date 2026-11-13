@@ -16,10 +16,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "link_codec.h"
-#include "link_decoder.h"
+#include "alink_codec.h"
+#include "alink_decoder.h"
 #include "sender_fanout.h"
-#include "sender_link.h"
+#include "sender_alink.h"
 
 static int failures, checks;
 
@@ -60,17 +60,17 @@ typedef struct {
 
 static uint64_t build(unsigned cls, unsigned rate, unsigned c, uint64_t f0, unsigned nframes,
                       uint64_t rate_switch_at, unsigned new_rate, unsigned new_c, const damage_t *dm, unsigned ndm) {
-    link_tx_t tx;
-    link_tx_init(&tx, cls, rate, c, f0, 0x33);
+    alink_tx_t tx;
+    alink_tx_init(&tx, cls, rate, c, f0, 0x33);
     tx.hops = 2;
-    tx.flags = LINK_SF_FLAG_USB_LIVE;
+    tx.flags = ALINK_SF_FLAG_USB_LIVE;
     snd_sink_t s;
     snd_sink_init(&s, up_words, UP_WORDS, NULL);
-    int32_t smp[LINK_MAX_CHANNELS];
+    int32_t smp[ALINK_MAX_CHANNELS];
     for (unsigned i = 0; i < nframes; i++) {
         if (rate_switch_at && tx.frame == f0 + 100) {
             uint64_t at = rate_switch_at;
-            CHECK(link_tx_schedule(&tx, at, LINK_OP_RATE, (uint8_t)new_rate, (int16_t)new_c), "schedule RATE");
+            CHECK(alink_tx_schedule(&tx, at, ALINK_OP_RATE, (uint8_t)new_rate, (int16_t)new_c), "schedule RATE");
         }
         frame_bit[i] = snd_sink_bits(&s);
         for (unsigned ch = 0; ch < tx.channels; ch++) smp[ch] = sample_of(tx.frame, ch);
@@ -110,14 +110,14 @@ typedef struct {
     bool     seen;
 } down_t;
 
-static void down_cb(void *ctx, const link_rx_event_t *ev) {
+static void down_cb(void *ctx, const alink_rx_event_t *ev) {
     down_t *d = ctx;
     switch (ev->type) {
-    case LINK_RX_EV_LOCK: d->locks++; break;
-    case LINK_RX_EV_LOSS: d->losses++; break;
-    case LINK_RX_EV_SUPERFRAME: d->sfs++; d->hops = ev->sf->hops; d->cls = ev->sf->cls; break;
-    case LINK_RX_EV_SF_ERROR: d->sf_errors++; break;
-    case LINK_RX_EV_FRAME:
+    case ALINK_RX_EV_LOCK: d->locks++; break;
+    case ALINK_RX_EV_LOSS: d->losses++; break;
+    case ALINK_RX_EV_SUPERFRAME: d->sfs++; d->hops = ev->sf->hops; d->cls = ev->sf->cls; break;
+    case ALINK_RX_EV_SF_ERROR: d->sf_errors++; break;
+    case ALINK_RX_EV_FRAME:
         if (d->seen && ev->frame != d->last + 1) d->gaps++;
         if (!d->seen) d->first = ev->frame;
         d->seen = true;
@@ -127,10 +127,10 @@ static void down_cb(void *ctx, const link_rx_event_t *ev) {
         if (ev->flags) d->flagged++;
         // Bank failures of frames that arrived in place (a flywheel frame
         // during a loss decodes idles).
-        for (unsigned b = 0; b < link_bank_count(ev->channels) && !ev->flags; b++)
-            if (ev->bank_status[b] != LINK_BANK_OK) d->crc_banks++;
+        for (unsigned b = 0; b < alink_bank_count(ev->channels) && !ev->flags; b++)
+            if (ev->bank_status[b] != ALINK_BANK_OK) d->crc_banks++;
         for (unsigned ch = 0; ch < ev->channels; ch++)
-            if (ev->bank_status[ch / 8] == LINK_BANK_OK && ev->samples[ch] != sample_of(ev->frame, ch))
+            if (ev->bank_status[ch / 8] == ALINK_BANK_OK && ev->samples[ch] != sample_of(ev->frame, ch))
                 d->bad_samples++;
         break;
     default: break;
@@ -145,11 +145,11 @@ typedef struct {
     snd_fo_t fo;
     down_t down;
     unsigned acquisitions, starts, losses_fo;
-    link_rx_stats_t st;
+    alink_rx_stats_t st;
     uint32_t out_unfit;
 } run_t;
 
-static link_rx_t scratch, down_rx;
+static alink_rx_t scratch, down_rx;
 
 static void run(run_t *R, unsigned in_cls, unsigned out_cls, uint64_t in_bits) {
     memset(R, 0, sizeof(*R));
@@ -173,14 +173,14 @@ static void run(run_t *R, unsigned in_cls, unsigned out_cls, uint64_t in_bits) {
             }
         }
         if (snd_fo_need(&R->fo) > in_bits) break;
-        if (!R->fo.out_on && R->fo.sf_valid && R->fo.frame % LINK_SF_LEN == 0) {
+        if (!R->fo.out_on && R->fo.sf_valid && R->fo.frame % ALINK_SF_LEN == 0) {
             snd_put_idles(&s, 37);      // the engine's alignment gap
             snd_fo_start_output(&R->fo);
             R->starts++;
         }
         bool was_on = R->fo.out_on;
         unsigned res = snd_fo_frame(&R->fo, &ring, &s, NULL);
-        if (!R->fo.out_on && !was_on) snd_put_idles(&s, 10u * link_frame_symbols(out_cls, LINK_RATE_48K, 0));
+        if (!R->fo.out_on && !was_on) snd_put_idles(&s, 10u * alink_frame_symbols(out_cls, ALINK_RATE_48K, 0));
         if (res & SND_FO_R_LOSS) {
             R->losses_fo++;
             at = R->fo.pos;
@@ -189,8 +189,8 @@ static void run(run_t *R, unsigned in_cls, unsigned out_cls, uint64_t in_bits) {
     }
     R->st = R->fo.st;
     R->out_unfit = R->fo.out_unfit;
-    link_rx_init(&down_rx, out_cls, 0xFF, down_cb, &R->down);
-    link_rx_push(&down_rx, out_words, (size_t)(s.words * 32u));
+    alink_rx_init(&down_rx, out_cls, 0xFF, down_cb, &R->down);
+    alink_rx_push(&down_rx, out_words, (size_t)(s.words * 32u));
 }
 
 static void test_clean(unsigned in_cls, unsigned out_cls, unsigned rate, unsigned c, const char *what) {
@@ -217,13 +217,13 @@ static void test_rate_switch(void) {
     run_t R;
     // L2 48 kHz 16 ch -> RATE to 96 kHz with C 8 at frame 1024 + 32 * 40.
     uint64_t at = 1024 + 32 * 40;
-    uint64_t n = build(LINK_CLASS_L2, LINK_RATE_48K, 16, 1000, 4000, at, LINK_RATE_96K, 8, NULL, 0);
-    run(&R, LINK_CLASS_L2, LINK_CLASS_L2, n);
+    uint64_t n = build(ALINK_CLASS_L2, ALINK_RATE_48K, 16, 1000, 4000, at, ALINK_RATE_96K, 8, NULL, 0);
+    run(&R, ALINK_CLASS_L2, ALINK_CLASS_L2, n);
     down_t *d = &R.down;
     CHECK(d->locks == 1 && d->losses == 0 && d->gaps == 0 && d->bad_samples == 0 && d->sf_errors == 0,
           "RATE through the fan-out: clean (locks %u losses %u gaps %llu bad %u sferr %u)", d->locks, d->losses,
           (unsigned long long)d->gaps, d->bad_samples, d->sf_errors);
-    CHECK(down_rx.rate == LINK_RATE_96K && d->c_end == 8, "downstream ends at 96 kHz C 8 (%u, %u)", down_rx.rate,
+    CHECK(down_rx.rate == ALINK_RATE_96K && d->c_end == 8, "downstream ends at 96 kHz C 8 (%u, %u)", down_rx.rate,
           d->c_end);
     printf("fan-out RATE 48k C16 -> 96k C8 at %llu: downstream followed, %u frames, no loss\n",
            (unsigned long long)at, d->frames);
@@ -242,8 +242,8 @@ static void test_damage(void) {
         { 1, 1501, 3, 1 },
         { 1, 1502, 3, 1 },
     };
-    uint64_t n = build(LINK_CLASS_L1, LINK_RATE_48K, 8, 1000, 3000, 0, 0, 0, dm, sizeof(dm) / sizeof(dm[0]));
-    run(&R, LINK_CLASS_L1, LINK_CLASS_L1, n);
+    uint64_t n = build(ALINK_CLASS_L1, ALINK_RATE_48K, 8, 1000, 3000, 0, 0, 0, dm, sizeof(dm) / sizeof(dm[0]));
+    run(&R, ALINK_CLASS_L1, ALINK_CLASS_L1, n);
     down_t *d = &R.down;
     CHECK(R.st.crc16_errors == 1, "bank damage seen by the fan-out (%u)", R.st.crc16_errors);
     CHECK(R.st.crc8_errors == 1, "head damage seen by the fan-out (%u)", R.st.crc8_errors);
@@ -265,8 +265,8 @@ static void test_damage(void) {
 
 static void test_unfit(void) {
     run_t R;
-    uint64_t n = build(LINK_CLASS_L2, LINK_RATE_48K, 16, 1000, 600, 0, 0, 0, NULL, 0);
-    run(&R, LINK_CLASS_L2, LINK_CLASS_L1, n);
+    uint64_t n = build(ALINK_CLASS_L2, ALINK_RATE_48K, 16, 1000, 600, 0, 0, 0, NULL, 0);
+    run(&R, ALINK_CLASS_L2, ALINK_CLASS_L1, n);
     CHECK(R.out_unfit > 400 && R.down.locks == 0, "16 channels do not fit L1: idles only (%u unfit, %u locks)",
           R.out_unfit, R.down.locks);
 }
@@ -282,11 +282,11 @@ static void test_target_bit(void) {
 int main(void) {
     snd_tables_init(&T);
     snd_dectab_init(&D);
-    test_clean(LINK_CLASS_L1, LINK_CLASS_L1, LINK_RATE_48K, 8, "L1 -> L1 48k C8");
-    test_clean(LINK_CLASS_L3, LINK_CLASS_L1, LINK_RATE_48K, 8, "L3 -> L1 48k C8");
-    test_clean(LINK_CLASS_L1, LINK_CLASS_L2, LINK_RATE_44K1, 8, "L1 -> L2 44.1k C8");
-    test_clean(LINK_CLASS_L2, LINK_CLASS_L3, LINK_RATE_96K, 8, "L2 -> L3 96k C8");
-    test_clean(LINK_CLASS_L3, LINK_CLASS_L3, LINK_RATE_44K1, 41, "L3 -> L3 44.1k C41");
+    test_clean(ALINK_CLASS_L1, ALINK_CLASS_L1, ALINK_RATE_48K, 8, "L1 -> L1 48k C8");
+    test_clean(ALINK_CLASS_L3, ALINK_CLASS_L1, ALINK_RATE_48K, 8, "L3 -> L1 48k C8");
+    test_clean(ALINK_CLASS_L1, ALINK_CLASS_L2, ALINK_RATE_44K1, 8, "L1 -> L2 44.1k C8");
+    test_clean(ALINK_CLASS_L2, ALINK_CLASS_L3, ALINK_RATE_96K, 8, "L2 -> L3 96k C8");
+    test_clean(ALINK_CLASS_L3, ALINK_CLASS_L3, ALINK_RATE_44K1, 41, "L3 -> L3 44.1k C41");
     test_rate_switch();
     test_damage();
     test_unfit();

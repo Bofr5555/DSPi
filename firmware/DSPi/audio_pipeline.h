@@ -83,11 +83,11 @@ extern int32_t buf_l[192], buf_r[192];
 extern int32_t buf_out[NUM_OUTPUT_CHANNELS][192];
 #endif
 
-#if (defined(DSPI_LINK) && DSPI_LINK) || (defined(DSPI_ALINK_USB) && DSPI_ALINK_USB)
+#if (defined(DSPI_ALINK) && DSPI_ALINK) || (defined(DSPI_ALINK_USB) && DSPI_ALINK_USB)
 // -- WP LK6 --
-// Link apply op CLICK: the output that gets a one-sample impulse of
+// Alink apply op CLICK: the output that gets a one-sample impulse of
 // PIPELINE_CLICK_LEVEL (-20 dBFS) at sample 0 of the next processed block,
-// -1 for none.  link_input.c sets it
+// -1 for none.  alink_input.c sets it
 // just before the block that starts at the op's frame and clears it after;
 // each core injects into the outputs it finalizes, after delay and limiter.
 extern volatile int8_t pipeline_click_output;
@@ -96,7 +96,7 @@ static inline void pipeline_click_inject(float (*out)[192], int first, int last)
     int c = pipeline_click_output;
     if (c >= first && c <= last) out[c][0] = PIPELINE_CLICK_LEVEL;
 }
-// Slot ring position for the link phase servo: the fill in frames to the
+// Slot ring position for the alink phase servo: the fill in frames to the
 // reader's DMA word (fractional) and the frames played since the ring reset.
 // False when no valid reading exists.
 bool slot_ring_play_position(uint slot, float *fill, uint32_t *played);
@@ -112,7 +112,7 @@ float get_slot_consumer_fill_frac(uint slot);
 bool slot_fill_at_target(uint slot);
 
 // Output ring fill of `slot` in frames, 0 when the slot is not set up
-// (EXT_LINK_STATUS.fill_frames).
+// (EXT_ALINK_STATUS.fill_frames).
 uint32_t slot_ring_fill_frames(uint slot);
 // Delivery bounds for one stream-input call: returns the most frames it may
 // deliver and sets *min_frames to the fewest worth a call (the latency option's

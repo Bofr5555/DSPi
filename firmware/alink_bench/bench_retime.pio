@@ -1,0 +1,30 @@
+; bench_retime.pio; alink bench IMPAIR role: a re-timing pass-through (WP LK3)
+;
+; Not an alink program: it copies the input pin to the output pin once per SM
+; clock, so a stream passing through is re-timed to this board's clock with
+; a quantisation of one SM clock (clkdiv sys cycles) plus the 2-cycle input
+; synchroniser. A clock divider of d adds up to d sys cycles of edge jitter
+; (3.26 ns per cycle at 307.2 MHz), which is how the bench eats into the
+; receiver's edge window (+-29.2 / 13.0 / 6.5 ns, SYS2 2.7) on real wires.
+;
+; The CPU corrupts the stream by forcing the SM into one of two loops for a
+; timed burst (pio_sm_exec of a jmp to inv or low, then back to pass):
+;   inv  - output = NOT input: every bit in the burst is flipped
+;   low  - output held low: a dropout (no edges, no commas)
+; Both loops write the pin every other cycle; the pin holds its value in
+; between.
+;
+; Setup: in pins = the input GPIO (Schmitt on, synchroniser kept), out pins
+; = the output GPIO (count 1, pindir out), wrap target = wrap = pass.
+
+.program bench_retime
+.wrap_target
+public pass:
+    mov pins, pins
+.wrap
+public inv:
+    mov pins, ~pins
+    jmp inv
+public low:
+    mov pins, null
+    jmp low

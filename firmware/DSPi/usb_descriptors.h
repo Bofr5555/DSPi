@@ -36,7 +36,7 @@
 // (per-input EQ/metering, wire V16 / slot V21).
 // 0x0203 → 0x0204 adds RP2350 alt 6 (4ch / 24-bit / 48 kHz).
 #if defined(DSPI_ROLE_SENDER)
-// The link sender (WP LK4) is a different device with two more alts; its own
+// The alink sender (WP LK4) is a different device with two more alts; its own
 // value keeps Windows from reusing a DSPi's cached descriptors.
 #define USB_BCD_DEVICE  0x0280
 #elif defined(DSPI_USB_MIDI)
@@ -55,7 +55,7 @@
 #define AUDIO_OUT_ENDPOINT  0x01U
 #define AUDIO_IN_ENDPOINT   0x82U
 #if defined(DSPI_ROLE_SENDER)
-// The link sender's largest alt is 7: 6 ch x 3 B x 49 frames (48 + 1 jitter
+// The alink sender's largest alt is 7: 6 ch x 3 B x 49 frames (48 + 1 jitter
 // frame) = 882 B, rounded up to a 4-byte multiple (SYS2 4.1).  Alt 8 (4 ch
 // 16-bit 96 kHz) needs 97 x 8 = 776 B.
 #define AUDIO_EP_MAX_PKT    884U
@@ -206,7 +206,7 @@ extern const uint16_t usb_config_descriptor_len;
 // Alt-setting endpoint descriptor pointers — resolved at link time so the
 // UAC1 class driver can call usbd_edpt_iso_activate() without re-walking the
 // config on every SET_INTERFACE.  Indexed [alt-1]: alts 1/2 = stereo 16/24-bit;
-// RP2350 adds alts 3/4/5 = 4/6/8ch 16-bit and alt 6 = 4ch 24-bit; the link
+// RP2350 adds alts 3/4/5 = 4/6/8ch 16-bit and alt 6 = 4ch 24-bit; the alink
 // sender build (DSPI_ROLE_SENDER) adds alt 7 = 6ch 24-bit and alt 8 = 4ch
 // 16-bit 96 kHz.
 extern const uint8_t *const usb_audio_data_ep_desc[];

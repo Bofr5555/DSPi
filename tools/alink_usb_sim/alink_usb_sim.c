@@ -1,7 +1,7 @@
 // alink_usb_sim.c - system simulation of alink USB-direct units (WP USB1).
 //
 // One USB host and two units on its bus.  Each unit runs the real engine
-// (firmware/DSPi/alink_usb/alink_usb_core.c with link/link_phase.c) through the
+// (firmware/DSPi/alink_usb/alink_usb_core.c with alink/alink_phase.c) through the
 // same port functions the firmware supplies, and the main loop's anchor
 // handshake as main.c runs it.  Modelled: the host crystal (its SOF rate),
 // each unit's crystal and boot time, Start of Frame through a hub (fixed delay
@@ -25,7 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "link/link_phase.c"
+#include "alink/alink_phase.c"
 #include "alink_usb/alink_usb_core.c"
 
 #define NU      2
@@ -33,7 +33,7 @@
 #define FS      48000u
 
 alink_usb_tb_t alink_usb_tb;
-const link_apply_limits_t alink_usb_apply_limits = { 10, 9, 2048 };
+const alink_apply_limits_t alink_usb_apply_limits = { 10, 9, 2048 };
 
 static int checks, failures;
 #define CHECK(c, ...)                                                                                                \
@@ -99,6 +99,7 @@ typedef struct {
     double hold_until;          // the DAC mute hold before the anchor's drain, -1 none
     // stream
     bool streaming;
+    double last_pkt_t;          // true time of the last packet delivered (-1 none)
     // clicks
     uint64_t click_w;
     bool click_armed;
@@ -168,7 +169,7 @@ static void write_one(double c) {
 // the pipeline's soft mute: audio cut to silence without a fade-out, or
 // silence followed by audio without a fade-in.
 static bool playing(void) {
-    return cur->us.started && cur->us.stream && cur->us.stream_seen && cur->us.ph.state == LINK_PHASE_LOCKED &&
+    return cur->us.started && cur->us.stream && cur->us.stream_seen && cur->us.ph.state == ALINK_PHASE_LOCKED &&
            cur->W >= cur->mute_end_w;
 }
 void alink_usb_port_write_packet(const alink_usb_pkt_t *p, uint32_t off, uint32_t k, float g0, float g1) {
@@ -226,13 +227,13 @@ void alink_usb_port_park(void) {
     cur->vcxo = cur->last_cmd = 0;
 }
 float alink_usb_port_vcxo_ppm(void) { return (float)cur->vcxo; }
-uint8_t alink_usb_port_apply(const link_apply_op_t *op) {
-    if (op->op == LINK_OP_CLICK) {
+uint8_t alink_usb_port_apply(const alink_apply_op_t *op) {
+    if (op->op == ALINK_OP_CLICK) {
         cur->click_w = cur->W;          // the next sample written
         cur->click_armed = true;
-        return LINK_APPLY_APPLIED;
+        return ALINK_APPLY_APPLIED;
     }
-    return op->op == LINK_OP_SYNC_PULSE ? LINK_APPLY_REFUSED : LINK_APPLY_APPLIED;
+    return op->op == ALINK_OP_SYNC_PULSE ? ALINK_APPLY_REFUSED : ALINK_APPLY_APPLIED;
 }
 void alink_usb_port_apply_result(uint8_t op, uint8_t r, uint32_t f) { (void)op; (void)r; (void)f; }
 void alink_usb_port_event(uint8_t st, uint8_t rs, uint32_t f) {
@@ -247,6 +248,8 @@ void alink_usb_port_event(uint8_t st, uint8_t rs, uint32_t f) {
 }
 void alink_usb_port_soft_mute(uint32_t s) { cur->mute_end_w = cur->W + s; }   // refresh, never accumulate
 bool alink_usb_port_pulse(uint32_t f) { (void)f; return false; }
+// usb_audio_stream_active(): a packet within the 50 ms gap threshold.
+bool alink_usb_port_stream_active(void) { return cur->last_pkt_t >= 0.0 && T - cur->last_pkt_t <= 0.050; }
 void alink_usb_port_ring_target(void) { cur->target = alink_usb_ring_target(&cur->us, fs, fs / 500u, cap(), 448); }
 
 // --------------------------------------------------------------------------
@@ -273,6 +276,7 @@ static void unit_init(unit_t *u) {
     u->next_pass = u->boot_s;
     u->start_at = -1;
     u->hold_until = -1;
+    u->last_pkt_t = -1.0;
     unit_sel(u);
     alink_usb_limits(&u->us, fs, fs / 500u, cap(), 448);
     alink_usb_port_ring_target();
@@ -359,6 +363,7 @@ static void unit_complete(unit_t *u) {
 static void drain(unit_t *u) {
     while (u->rt != u->rh) {
         spkt_t *p = &u->ring[u->rt];
+        u->last_pkt_t = T;
         if (alink_usb_engaged(&u->us)) {
             alink_usb_pkt_t ap = { p->frame, p->n, p, 0 };
             alink_usb_deliver(&u->us, &ap);
@@ -607,7 +612,7 @@ static void run(const scen_t *s, res_t *r) {
                         uint8_t p[16] = { 0 };
                         uint32_t f = (uint32_t)click_frame;
                         memcpy(p, &f, 4);
-                        p[8] = LINK_OP_CLICK;
+                        p[8] = ALINK_OP_CLICK;
                         p[12] = 2;
                         if (!alink_usb_apply(&U[i].us, p)) printf("    click refused on unit %d\n", i);
                         unit_unsel();
@@ -1160,6 +1165,24 @@ int main(int argc, char **argv) {
                 CHECK(r.state[i] == ALINK_USB_ST_RATE_LOCK && fabs(r.vcxo[i] - r.ff[i]) < 1.0,
                       "H1: unit %d rate-locked, VCXO %.2f at the feed-forward %.2f (not pulled by an empty ring)", i,
                       r.vcxo[i], r.ff[i]);
+        }
+    }
+    {
+        // review usb1 N2: the alt stays set but no packet comes (a paused
+        // application, a host xrun): the fill servo must not pull the VCXO.
+        scen_t s = base("N2 mode 1, unit 1's stream stalls 25 s with the alt still set");
+        s.mode = ALINK_USB_MODE_RATE;
+        s.burst_at = 15.0;
+        s.burst_n = 1000000;
+        s.duration = 40.0;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            // Unit 0 keeps streaming (the fill servo trims it); unit 1, stalled,
+            // stays on the feed-forward instead of being pulled by its empty ring.
+            CHECK(r.state[0] == ALINK_USB_ST_RATE_LOCK, "N2: unit 0 (streaming) rate-locked");
+            CHECK(r.state[1] == ALINK_USB_ST_RATE_LOCK && fabs(r.vcxo[1] - r.ff[1]) < 1.0,
+                  "N2: unit 1 (stalled, alt set) rate-locked, VCXO %.2f at the feed-forward %.2f", r.vcxo[1], r.ff[1]);
         }
     }
     {

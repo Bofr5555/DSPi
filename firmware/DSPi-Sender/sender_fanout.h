@@ -1,15 +1,15 @@
 /*
- * sender_fanout.h - DSPi link sender (WP LK4): fan-out (slaved) mode core
+ * sender_fanout.h - DSPi alink sender (WP LK4): fan-out (slaved) mode core
  *
- * A fan-out is a sender slaved to a link input (SYS2 1.3): it re-sends the
- * stream it receives on all its link outputs, frame for frame, with the
+ * A fan-out is a sender slaved to an alink input (SYS2 1.3): it re-sends the
+ * stream it receives on all its alink outputs, frame for frame, with the
  * same F, payload and layout, the superframe's hop count + 1 and the class
  * of the outgoing line, re-encoded with its own running disparity and
- * padding (link_protocol_spec.md 7.2).  Until it holds a valid superframe it
+ * padding (alink_protocol_spec.md 7.2). Until it holds a valid superframe it
  * sends only D21.5 idles.
  *
  * This is the portable part: it follows the received frames in the raw bit
- * ring a link_rx_N program fills (LK1's reference receiver acquires the
+ * ring an alink_rx_N program fills (LK1's reference receiver acquires the
  * first lock, then a word-wise parser keeps up at line rate with the same
  * flywheel, slip and loss rules, spec 8.4-8.8) and writes the re-encoded
  * frames into the sender's word sink.  The engine (sender_tx.c) decides
@@ -35,9 +35,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "link_codec.h"
-#include "link_decoder.h"
-#include "sender_link.h"
+#include "alink_codec.h"
+#include "alink_decoder.h"
+#include "sender_alink.h"
 
 // 10-bit symbol -> data byte (bits 7..0) | SND_DEC_DATA, or 0 for a symbol
 // that is not a data code group (K codes and invalid symbols).
@@ -62,7 +62,7 @@ static inline uint32_t snd_ring_bits32(const snd_ring_t *r, uint64_t pos) {
     return (w0 << o) | (r->ring[(wi + 1u) & r->mask] >> (32u - o));
 }
 
-// States (EXT_LINK_STATUS.state on a sender, describing the input).
+// States (EXT_ALINK_STATUS.state on a sender, describing the input).
 #define SND_FO_OFF      0u
 #define SND_FO_SEARCH   1u      // no lock: acquire with the reference receiver
 #define SND_FO_LOCKED   2u
@@ -90,11 +90,11 @@ typedef struct {
     uint8_t  rate, channels;    // its layout
     unsigned fails;             // consecutive failed frames
     bool     sf_valid;          // a valid superframe has been received
-    link_sf_t sf;               // the last valid one
-    uint8_t  sf_bytes[LINK_SF_LEN];     // this superframe's bytes as received
+    alink_sf_t sf;              // the last valid one
+    uint8_t  sf_bytes[ALINK_SF_LEN];    // this superframe's bytes as received
     uint32_t sf_good;           // bit k: byte k arrived in a good head
     bool     sf_skip;           // joined this superframe late: not judged
-    uint8_t  last_sf[LINK_SF_LEN];      // the last valid superframe's bytes
+    uint8_t  last_sf[ALINK_SF_LEN];     // the last valid superframe's bytes
     // A RATE carried by the last valid superframe (spec 6.5, 8.5).
     bool     rate_pending;
     uint64_t rate_at;
@@ -105,12 +105,12 @@ typedef struct {
     unsigned out_rd;
     uint16_t out_crc;           // CRC-16 over this superframe's re-sent bytes 0..29
     bool     out_taint;         // a re-sent byte was a substitute
-    uint8_t  out_sf[LINK_SF_LEN];
+    uint8_t  out_sf[ALINK_SF_LEN];
     uint32_t out_frames;        // frames re-sent
     uint32_t out_unfit;         // frames whose layout does not fit the output class (sent as idles)
 
-    // Counters (link_protocol_spec.md 8.9; EXT_LINK_STATUS / DIAG on a sender).
-    link_rx_stats_t st;
+    // Counters (alink_protocol_spec.md 8.9; EXT_ALINK_STATUS / DIAG on a sender).
+    alink_rx_stats_t st;
 } snd_fo_t;
 
 void snd_fo_init(snd_fo_t *f, unsigned in_cls, unsigned out_cls, const snd_tables_t *t,
@@ -124,7 +124,7 @@ uint32_t snd_fo_acquire_bits(unsigned in_cls);
 // bits) with LK1's reference receiver: true when it locked, with the input
 // state set to the first locked frame that started at a comma with a good
 // head.  rx is scratch.  Keeps the counters.
-bool snd_fo_acquire(snd_fo_t *f, const uint32_t *words, uint64_t first_bit, uint32_t nbits, link_rx_t *rx);
+bool snd_fo_acquire(snd_fo_t *f, const uint32_t *words, uint64_t first_bit, uint32_t nbits, alink_rx_t *rx);
 
 // Move the input state forward to the first frame whose comma is at or after
 // bit `from` (the snapshot is older than the ring's oldest data once the
@@ -138,7 +138,7 @@ uint64_t snd_fo_need(const snd_fo_t *f);
 
 // Frame bits of frame F at the given class and rate.
 static inline unsigned snd_fo_frame_bits(unsigned cls, unsigned rate, uint64_t frame) {
-    return 10u * link_frame_symbols(cls, rate, frame);
+    return 10u * alink_frame_symbols(cls, rate, frame);
 }
 
 // Parse the current frame from the ring and, when out_on, re-send it into s

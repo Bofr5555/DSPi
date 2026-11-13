@@ -40,7 +40,7 @@
 #include "pico/audio_i2s_multi.h"
 #include "adat_output.h"
 #include "adat_input.h"
-#include "link_input.h"
+#include "alink_input.h"
 #if DSPI_ALINK_USB
 #include "alink_usb.h"
 #endif
@@ -347,9 +347,9 @@ static bool i2s_prefilling = false;
 // prepare_pipeline_reset(). Driven by the main-loop ADAT block (RP2350).
 static bool adat_prefilling = false;
 
-// Link input prefill (WP LK5): the same lock-gated handshake as ADAT slave.
-#if DSPI_LINK
-static bool link_prefilling = false;
+// Alink input prefill (WP LK5): the same lock-gated handshake as ADAT slave.
+#if DSPI_ALINK
+static bool alink_prefilling = false;
 #endif
 
 // Input receiver exclusivity: at most one receiver may run, and only the one
@@ -374,10 +374,10 @@ static void stop_foreign_input_receivers(uint8_t keep) {
         adat_prefilling = false;
     }
 #endif
-#if DSPI_LINK
-    if (keep != INPUT_SOURCE_LINK && link_input_is_running()) {
-        link_input_stop();
-        link_prefilling = false;
+#if DSPI_ALINK
+    if (keep != INPUT_SOURCE_ALINK && alink_input_is_running()) {
+        alink_input_stop();
+        alink_prefilling = false;
     }
 #endif
 #if DSPI_ALINK_USB
@@ -1005,10 +1005,10 @@ bool pipeline_producer_is_streaming(void) {
     if (active_input_source == INPUT_SOURCE_ADAT &&
         adat_input_get_state() == ADAT_INPUT_LOCKED) return true;
 #endif
-#if DSPI_LINK
-    if (active_input_source == INPUT_SOURCE_LINK &&
-        (link_input_get_state() == LINK_INPUT_LOCKED ||
-         link_input_get_state() == LINK_INPUT_HOLDOVER)) return true;   // holdover delivers silence
+#if DSPI_ALINK
+    if (active_input_source == INPUT_SOURCE_ALINK &&
+        (alink_input_get_state() == ALINK_INPUT_LOCKED ||
+         alink_input_get_state() == ALINK_INPUT_HOLDOVER)) return true; // holdover delivers silence
 #endif
     // The generator's idle pump counts only when it would actually run:
     // siggen_pump() refuses while a source change or type switch is in
@@ -1063,9 +1063,9 @@ static void pipeline_service_producer(bool lock_gated) {
     } else if (active_input_source == INPUT_SOURCE_ADAT) {
         adat_input_poll();
 #endif
-#if DSPI_LINK
-    } else if (active_input_source == INPUT_SOURCE_LINK) {
-        link_input_poll();
+#if DSPI_ALINK
+    } else if (active_input_source == INPUT_SOURCE_ALINK) {
+        alink_input_poll();
 #endif
     } else if (active_input_source == INPUT_SOURCE_I2S) {
         if (!lock_gated || i2s_clock_mode != I2S_CLOCK_MODE_SLAVE ||
@@ -1469,7 +1469,7 @@ static void complete_pipeline_reset(void) {
           (active_input_source == INPUT_SOURCE_I2S ||
            input_source_is_spdif(active_input_source) ||
            active_input_source == INPUT_SOURCE_ADAT ||
-           (active_input_source == INPUT_SOURCE_LINK && link_config[LINK_CFG_ENABLE])))) {
+           (active_input_source == INPUT_SOURCE_ALINK && alink_config[ALINK_CFG_ENABLE])))) {
         dac_hw_mute_release();
     }
 
@@ -1783,11 +1783,11 @@ void core0_init() {
     adat_output_init();
     adat_input_init();
 #endif
-#if DSPI_LINK
-    link_input_init();
+#if DSPI_ALINK
+    alink_input_init();
 #endif
 #if DSPI_ALINK_USB
-    alink_usb_fw_init();         // WP USB1; EXT_ALINK_USB is loaded with the link block below
+    alink_usb_fw_init();         // WP USB1; EXT_ALINK_USB is loaded with the alink block below
 #endif
 
     // Initialize feedback controller and nominal rate
@@ -1798,11 +1798,11 @@ void core0_init() {
     // Load preset from flash.  Always selects a preset (factory defaults if
     // the target slot is empty).  Migrates legacy data on first boot.
     preset_boot_load();
-    // Link receiver configuration: device-global, outside the presets (V26
+    // Alink receiver configuration: device-global, outside the presets (V26
     // directory block, saved by REQ_SAVE_OUTPUT_CONFIG).
-    preset_load_link_config();
-#if DSPI_LINK
-    link_input_load_phase();    // WP LK6: EXT_LINK_PHASE from the same block
+    preset_load_alink_config();
+#if DSPI_ALINK
+    alink_input_load_phase();   // WP LK6: EXT_ALINK_PHASE from the same block
 #endif
     output_latency_request(preset_get_output_latency());
     output_latency_apply(48000u, active_input_source);
@@ -1961,13 +1961,13 @@ void core0_init() {
         adat_input_start();
     }
 #endif
-#if DSPI_LINK
-    else if (active_input_source == INPUT_SOURCE_LINK && link_config[LINK_CFG_ENABLE]) {
-        // Boot into LINK: outputs stay muted until the receiver has detected
-        // the class, scanned the trim and locked; the main-loop LINK block owns
+#if DSPI_ALINK
+    else if (active_input_source == INPUT_SOURCE_ALINK && alink_config[ALINK_CFG_ENABLE]) {
+        // Boot into ALINK: outputs stay muted until the receiver has detected
+        // the class, scanned the trim and locked; the main-loop ALINK block owns
         // drain/prefill/enable.  The stream's rate is applied after lock.
         prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
-        link_input_start();
+        alink_input_start();
     }
 #endif
 
@@ -2099,40 +2099,40 @@ static void input_service_handshakes(void) {
         }
     }
 #endif
-#if DSPI_LINK
-    // Link input (WP LK5).  ADAT slave's flow: once the receiver is locked
+#if DSPI_ALINK
+    // Alink input (WP LK5). ADAT slave's flow: once the receiver is locked
     // (class, trim, superframe), a rate the pipeline does not run yet arms a
     // deferred rate change; at the right rate, drain, prefill from live input
     // and start in sync.  Every loss (and a RATE switch in the stream) mutes
     // and goes round again.
-    else if (active_input_source == INPUT_SOURCE_LINK) {
-        LinkInputState ln_state = link_input_get_state();
-        if (link_input_take_loss()) {
-            link_prefilling = false;
+    else if (active_input_source == INPUT_SOURCE_ALINK) {
+        AlinkInputState ln_state = alink_input_get_state();
+        if (alink_input_take_loss()) {
+            alink_prefilling = false;
             if (!preset_loading) {
                 prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
                 pipeline_reset_cpu_metering();
             }
         }
-        if (ln_state == LINK_INPUT_LOCKED && preset_loading && !link_prefilling
+        if (ln_state == ALINK_INPUT_LOCKED && preset_loading && !alink_prefilling
                 && dac_hw_mute_hold_elapsed()) {
             // WP LK6: phase-locked, the drain waits for the VCXO pull-in.
-            if (!link_input_check_rate_change() && link_input_rate_ready()) {
+            if (!alink_input_check_rate_change() && alink_input_rate_ready()) {
                 drain_and_disable_outputs();
                 preset_loading = false;
                 preset_mute_counter = 0;
-                link_prefilling = true;
-                link_input_discard_queued();   // prefill starts from live input
-                link_input_on_drain();         // WP LK6: phase-locked prefill target
+                alink_prefilling = true;
+                alink_input_discard_queued();  // prefill starts from live input
+                alink_input_on_drain();        // WP LK6: phase-locked prefill target
             }
         }
         // WP LK6: phase-locked, the outputs start when the delay is reached
-        // (link_input_anchor_ready() waits in place for the last few frames).
-        if (link_prefilling && ln_state == LINK_INPUT_LOCKED && slot_fill_at_target(0) &&
-                link_input_anchor_ready()) {
+        // (alink_input_anchor_ready() waits in place for the last few frames).
+        if (alink_prefilling && ln_state == ALINK_INPUT_LOCKED && slot_fill_at_target(0) &&
+                alink_input_anchor_ready()) {
             enable_outputs_in_sync();
-            link_input_on_enabled();
-            link_prefilling = false;
+            alink_input_on_enabled();
+            alink_prefilling = false;
             dac_hw_mute_release();
         }
     }
@@ -2253,9 +2253,9 @@ static void input_service_servos(void) {
         adat_input_update_clock_servo();   // slave mode + LOCKED only
     }
 #endif
-#if DSPI_LINK
-    else if (active_input_source == INPUT_SOURCE_LINK) {
-        link_input_update_clock_servo();   // LOCKED at the stream's rate only
+#if DSPI_ALINK
+    else if (active_input_source == INPUT_SOURCE_ALINK) {
+        alink_input_update_clock_servo();  // LOCKED at the stream's rate only
     }
 #endif
     else if (active_input_source == INPUT_SOURCE_I2S &&
@@ -2311,8 +2311,8 @@ int main(void) {
         // usbd_edpt_xfer from within a control-transfer DATA stage.
         LOOP_PROF(LP_NOTIFY);
         notify_clip_service(to_ms_since_boot(get_absolute_time()));
-#if DSPI_LINK
-        link_input_event_service(to_ms_since_boot(get_absolute_time()));
+#if DSPI_ALINK
+        alink_input_event_service(to_ms_since_boot(get_absolute_time()));
 #endif
         usb_notify_tick();
 
@@ -2881,7 +2881,7 @@ int main(void) {
             // before the receiver has even re-locked).  USB/SPDIF restart here.
             perform_rate_change(r, active_input_source == INPUT_SOURCE_I2S ||
                                    active_input_source == INPUT_SOURCE_ADAT ||
-                                   active_input_source == INPUT_SOURCE_LINK);
+                                   active_input_source == INPUT_SOURCE_ALINK);
         }
 
         // Handle loudness table recomputation
@@ -3660,7 +3660,7 @@ int main(void) {
                     perform_rate_change(target_rate,
                                         new_source == INPUT_SOURCE_I2S ||
                                         new_source == INPUT_SOURCE_ADAT ||
-                                        new_source == INPUT_SOURCE_LINK ||
+                                        new_source == INPUT_SOURCE_ALINK ||
                                         input_source_is_spdif(new_source));
                     dsp_update_delay_samples((float)target_rate);
 
@@ -3710,10 +3710,10 @@ int main(void) {
                     pipeline_reset_cpu_metering();
                 }
 #endif
-#if DSPI_LINK
-                else if (old_source == INPUT_SOURCE_LINK) {
-                    link_input_stop();
-                    link_prefilling = false;
+#if DSPI_ALINK
+                else if (old_source == INPUT_SOURCE_ALINK) {
+                    alink_input_stop();
+                    alink_prefilling = false;
                     // The servo is parked by the stop; USB gets its retained rate back
                     // (mirrors the ADAT branch).
                     if (new_source == INPUT_SOURCE_USB) {
@@ -3823,13 +3823,13 @@ int main(void) {
                     // ADAT block owns drain/prefill/enable + the mute release.
                 }
 #endif
-#if DSPI_LINK
-                else if (new_source == INPUT_SOURCE_LINK) {
+#if DSPI_ALINK
+                else if (new_source == INPUT_SOURCE_ALINK) {
                     // The stream owns the rate (applied after lock).  With
-                    // EXT_LINK_CONFIG.enable 0 nothing starts and LINK plays
+                    // EXT_ALINK_CONFIG.enable 0 nothing starts and ALINK plays
                     // silence; complete the reset so the outputs run on it.
-                    link_input_start();
-                    if (!link_config[LINK_CFG_ENABLE]) complete_pipeline_reset();
+                    alink_input_start();
+                    if (!alink_config[ALINK_CFG_ENABLE]) complete_pipeline_reset();
                 }
 #endif
                 else {
@@ -3915,22 +3915,22 @@ int main(void) {
 #endif
         }
 
-#if DSPI_LINK
-        // Handle deferred link input restart (EXT_LINK_CONFIG changed the pin,
-        // the class or enable while LINK is the source).
-        if (link_input_restart_pending) {
-            link_input_restart_pending = false;
-            if (active_input_source == INPUT_SOURCE_LINK && pipeline_reset_ready()) {
-                if (link_input_is_running()) {
+#if DSPI_ALINK
+        // Handle deferred alink input restart (EXT_ALINK_CONFIG changed the pin,
+        // the class or enable while ALINK is the source).
+        if (alink_input_restart_pending) {
+            alink_input_restart_pending = false;
+            if (active_input_source == INPUT_SOURCE_ALINK && pipeline_reset_ready()) {
+                if (alink_input_is_running()) {
                     pipeline_settle_to_silence();
-                    link_input_stop();
-                    link_prefilling = false;
+                    alink_input_stop();
+                    alink_prefilling = false;
                 }
                 prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
-                link_input_start();
-                if (!link_config[LINK_CFG_ENABLE]) complete_pipeline_reset();
-            } else if (active_input_source == INPUT_SOURCE_LINK) {
-                link_input_restart_pending = true;   // retry once a reset is allowed
+                alink_input_start();
+                if (!alink_config[ALINK_CFG_ENABLE]) complete_pipeline_reset();
+            } else if (active_input_source == INPUT_SOURCE_ALINK) {
+                alink_input_restart_pending = true;  // retry once a reset is allowed
             }
         }
 #endif

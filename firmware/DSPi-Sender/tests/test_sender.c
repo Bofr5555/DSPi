@@ -1,7 +1,7 @@
 /*
- * test_sender.c - host tests for the link sender core (WP LK4)
+ * test_sender.c - host tests for the alink sender core (WP LK4)
  *
- *  1. snd_frame() == LK1's link_tx_frame(), bit for bit, at every class,
+ *  1. snd_frame() == LK1's alink_tx_frame(), bit for bit, at every class,
  *     rate and a spread of C, from F = 0, mid-superframe and above 2^40,
  *     with audio and PRBS payloads, flag changes, applies, and RATE ops
  *     that shrink and grow C (the layout switches mid-stream).
@@ -9,12 +9,12 @@
  *     2400 frames ahead, value = the new C, refused while an apply is
  *     pending; a stream with such a switch decoded by LK1's reference
  *     receiver, which follows it with no loss and the right samples.
- *  3. EXT_LINK_TX and EXT_LINK_CTRL_MSG byte layouts and refusals
+ *  3. EXT_ALINK_TX and EXT_ALINK_CTRL_MSG byte layouts and refusals
  *     (extension_channel_spec.md 2.8.8, 2.8.9, the fake device's rules).
  *  4. The SYNC ring pulse, the frame start log, the idle-only pattern and
  *     the tone.
  *  5. Encoder speed on this host (an indication only; the firmware measures
- *     its own cycles per frame, EXT_LINK_DIAG).
+ *     its own cycles per frame, EXT_ALINK_DIAG).
  */
 
 #define _POSIX_C_SOURCE 199309L
@@ -25,9 +25,9 @@
 #include <string.h>
 #include <time.h>
 
-#include "link_codec.h"
-#include "link_decoder.h"
-#include "sender_link.h"
+#include "alink_codec.h"
+#include "alink_decoder.h"
+#include "sender_alink.h"
 
 static int failures, checks;
 
@@ -70,35 +70,35 @@ typedef struct {
 // Run both encoders over nframes with the same events; true if identical.
 static bool run_pair(unsigned cls, unsigned rate, unsigned c, uint64_t first, bool prbs,
                      const sched_t *ev, unsigned nev, unsigned nframes, const char *label) {
-    link_tx_t a, b;
-    if (!link_tx_init(&a, cls, rate, c, first, 0x42) || !link_tx_init(&b, cls, rate, c, first, 0x42)) {
+    alink_tx_t a, b;
+    if (!alink_tx_init(&a, cls, rate, c, first, 0x42) || !alink_tx_init(&b, cls, rate, c, first, 0x42)) {
         CHECK(0, "%s: init", label);
         return false;
     }
-    a.flags = b.flags = (uint8_t)((prbs ? LINK_SF_FLAG_PRBS : 0) | LINK_SF_FLAG_USB_LIVE);
-    link_bitw_t w;
-    link_bitw_init(&w, ref_words, RING_WORDS);
+    a.flags = b.flags = (uint8_t)((prbs ? ALINK_SF_FLAG_PRBS : 0) | ALINK_SF_FLAG_USB_LIVE);
+    alink_bitw_t w;
+    alink_bitw_init(&w, ref_words, RING_WORDS);
     snd_sink_t s;
     snd_sink_init(&s, snd_words, RING_WORDS, NULL);
-    int32_t samples[LINK_MAX_CHANNELS];
+    int32_t samples[ALINK_MAX_CHANNELS];
     for (unsigned i = 0; i < nframes; i++) {
         for (unsigned k = 0; k < nev; k++) {
             if (ev[k].when == a.frame) {
                 bool ra, rb;
                 if (ev[k].op == 0xFF) {          // a flags change: mute + PRBS toggle
-                    a.flags ^= LINK_SF_FLAG_MUTE | LINK_SF_FLAG_PRBS;
-                    b.flags ^= LINK_SF_FLAG_MUTE | LINK_SF_FLAG_PRBS;
+                    a.flags ^= ALINK_SF_FLAG_MUTE | ALINK_SF_FLAG_PRBS;
+                    b.flags ^= ALINK_SF_FLAG_MUTE | ALINK_SF_FLAG_PRBS;
                     continue;
                 }
-                ra = link_tx_schedule(&a, ev[k].at, ev[k].op, ev[k].arg, ev[k].value);
-                rb = link_tx_schedule(&b, ev[k].at, ev[k].op, ev[k].arg, ev[k].value);
+                ra = alink_tx_schedule(&a, ev[k].at, ev[k].op, ev[k].arg, ev[k].value);
+                rb = alink_tx_schedule(&b, ev[k].at, ev[k].op, ev[k].arg, ev[k].value);
                 CHECK(ra == rb, "%s: schedule result differs", label);
             }
         }
         CHECK(a.channels == b.channels && a.rate == b.rate, "%s: layout differs at %llu", label,
               (unsigned long long)a.frame);
         for (unsigned ch = 0; ch < a.channels; ch++) samples[ch] = s24(rnd());
-        if (!link_tx_frame(&a, samples, &w)) {
+        if (!alink_tx_frame(&a, samples, &w)) {
             CHECK(0, "%s: reference buffer full", label);
             return false;
         }
@@ -118,7 +118,7 @@ static bool run_pair(unsigned cls, unsigned rate, unsigned c, uint64_t first, bo
     }
     CHECK(same, "%s: %llu vs %llu bits", label, (unsigned long long)nbits, (unsigned long long)w.nbits);
     CHECK(a.frame == b.frame && a.rd == b.rd && a.apply_op == b.apply_op && a.channels == b.channels &&
-          a.rate == b.rate && !memcmp(a.sf, b.sf, LINK_SF_LEN), "%s: end state differs", label);
+          a.rate == b.rate && !memcmp(a.sf, b.sf, ALINK_SF_LEN), "%s: end state differs", label);
     return same;
 }
 
@@ -127,7 +127,7 @@ static void test_identity(void) {
     static const uint64_t starts[] = { 0, 17, (1ull << 40) + 5 };
     for (unsigned cls = 1; cls <= 3; cls++) {
         for (unsigned rate = 0; rate <= 2; rate++) {
-            unsigned cap = link_max_channels(cls, rate);
+            unsigned cap = alink_max_channels(cls, rate);
             unsigned cs[] = { 1, 2, 8, 9, 16, cap };
             for (unsigned ci = 0; ci < sizeof(cs) / sizeof(cs[0]); ci++) {
                 unsigned c = cs[ci];
@@ -142,13 +142,13 @@ static void test_identity(void) {
                         // A MASTER_VOLUME, a flags change, then a RATE that
                         // shrinks or grows C (where the new rate allows it).
                         unsigned nrate = (rate + 1u) % 3u;
-                        unsigned ncap = link_max_channels(cls, nrate);
+                        unsigned ncap = alink_max_channels(cls, nrate);
                         unsigned nc = c + 3u <= ncap ? c + 3u : (ncap < c ? ncap : c);
                         sched_t ev[] = {
-                            { sf1 + 64u, LINK_OP_MASTER_VOLUME, 0, -2000, f0 + 1u },
+                            { sf1 + 64u, ALINK_OP_MASTER_VOLUME, 0, -2000, f0 + 1u },
                             { 0, 0xFF, 0, 0, sf1 + 70u },
-                            { sf1 + 160u, LINK_OP_RATE, (uint8_t)nrate, (int16_t)(nc != c ? nc : 0), sf1 + 100u },
-                            { sf1 + 300u, LINK_OP_SYNC_PULSE, 0, 0, sf1 + 200u },
+                            { sf1 + 160u, ALINK_OP_RATE, (uint8_t)nrate, (int16_t)(nc != c ? nc : 0), sf1 + 100u },
+                            { sf1 + 300u, ALINK_OP_SYNC_PULSE, 0, 0, sf1 + 200u },
                         };
                         streams++;
                         if (run_pair(cls, rate, c, f0, prbs, ev, 4, 420, label)) ok++;
@@ -157,7 +157,7 @@ static void test_identity(void) {
             }
         }
     }
-    printf("snd_frame == link_tx_frame: %u of %u streams of 420 frames (applies, flags, RATE)\n", ok, streams);
+    printf("snd_frame == alink_tx_frame: %u of %u streams of 420 frames (applies, flags, RATE)\n", ok, streams);
 }
 
 // ---------------------------------------------------------------------------
@@ -176,11 +176,11 @@ static int32_t sample_of(uint64_t f, unsigned ch) {
     return s24((uint32_t)(f * 2654435761u) ^ (ch * 0x9E3779B9u));
 }
 
-static void rx_cb(void *ctx, const link_rx_event_t *ev) {
+static void rx_cb(void *ctx, const alink_rx_event_t *ev) {
     rxlog_t *l = ctx;
-    if (ev->type == LINK_RX_EV_LOCK) l->locks++;
-    if (ev->type == LINK_RX_EV_LOSS) l->losses++;
-    if (ev->type != LINK_RX_EV_FRAME) return;
+    if (ev->type == ALINK_RX_EV_LOCK) l->locks++;
+    if (ev->type == ALINK_RX_EV_LOSS) l->losses++;
+    if (ev->type != ALINK_RX_EV_FRAME) return;
     if (!l->frames) { l->first_frame = ev->frame; l->c0 = ev->channels; }
     if (ev->channels != l->c0 && !l->switch_frame) { l->switch_frame = ev->frame; l->c1 = ev->channels; }
     l->frames++;
@@ -192,52 +192,52 @@ static void rx_cb(void *ctx, const link_rx_event_t *ev) {
 }
 
 static void test_schedule(void) {
-    link_tx_t tx;
+    alink_tx_t tx;
     uint64_t at;
     // L2 48 kHz, 16 channels, at F = 1000.
-    CHECK(link_tx_init(&tx, LINK_CLASS_L2, LINK_RATE_48K, 16, 1000, 1), "init");
-    CHECK(snd_schedule_layout(&tx, LINK_RATE_96K, 8, &at), "48->96 with C 16->8");
+    CHECK(alink_tx_init(&tx, ALINK_CLASS_L2, ALINK_RATE_48K, 16, 1000, 1), "init");
+    CHECK(snd_schedule_layout(&tx, ALINK_RATE_96K, 8, &at), "48->96 with C 16->8");
     CHECK(at % 32 == 0 && at >= 1000 + SND_RATE_LEAD && at < 1000 + SND_RATE_LEAD + 32,
           "target %llu: first boundary >= 2400 ahead", (unsigned long long)at);
-    CHECK(tx.apply_op == LINK_OP_RATE && tx.apply_arg == LINK_RATE_96K && tx.apply_value == 8, "RATE value = new C");
-    CHECK(!snd_schedule_layout(&tx, LINK_RATE_48K, 16, &at), "refused while an apply is pending");
-    CHECK(!link_tx_schedule(&tx, at + 640, LINK_OP_MUTE, 0, 0), "CTRL_MSG refused while pending too");
+    CHECK(tx.apply_op == ALINK_OP_RATE && tx.apply_arg == ALINK_RATE_96K && tx.apply_value == 8, "RATE value = new C");
+    CHECK(!snd_schedule_layout(&tx, ALINK_RATE_48K, 16, &at), "refused while an apply is pending");
+    CHECK(!alink_tx_schedule(&tx, at + 640, ALINK_OP_MUTE, 0, 0), "CTRL_MSG refused while pending too");
 
-    CHECK(link_tx_init(&tx, LINK_CLASS_L2, LINK_RATE_48K, 16, 1000, 1), "init");
-    CHECK(snd_schedule_layout(&tx, LINK_RATE_44K1, 16, &at) && tx.apply_value == 0, "rate only: value 0");
-    CHECK(link_tx_init(&tx, LINK_CLASS_L2, LINK_RATE_48K, 16, 1000, 1), "init");
-    CHECK(snd_schedule_layout(&tx, LINK_RATE_48K, 12, &at) && tx.apply_value == 12 && tx.apply_arg == LINK_RATE_48K,
+    CHECK(alink_tx_init(&tx, ALINK_CLASS_L2, ALINK_RATE_48K, 16, 1000, 1), "init");
+    CHECK(snd_schedule_layout(&tx, ALINK_RATE_44K1, 16, &at) && tx.apply_value == 0, "rate only: value 0");
+    CHECK(alink_tx_init(&tx, ALINK_CLASS_L2, ALINK_RATE_48K, 16, 1000, 1), "init");
+    CHECK(snd_schedule_layout(&tx, ALINK_RATE_48K, 12, &at) && tx.apply_value == 12 && tx.apply_arg == ALINK_RATE_48K,
           "C only: same rate code, value 12");
-    CHECK(link_tx_init(&tx, LINK_CLASS_L1, LINK_RATE_48K, 8, 1000, 1), "init");
-    CHECK(!snd_schedule_layout(&tx, LINK_RATE_96K, 8, &at) && tx.apply_op == LINK_OP_NONE,
+    CHECK(alink_tx_init(&tx, ALINK_CLASS_L1, ALINK_RATE_48K, 8, 1000, 1), "init");
+    CHECK(!snd_schedule_layout(&tx, ALINK_RATE_96K, 8, &at) && tx.apply_op == ALINK_OP_NONE,
           "L1 96 kHz cannot carry 8 channels: refused, nothing scheduled");
-    CHECK(snd_schedule_layout(&tx, LINK_RATE_96K, 3, &at), "L1 96 kHz with C 3 fits");
+    CHECK(snd_schedule_layout(&tx, ALINK_RATE_96K, 3, &at), "L1 96 kHz with C 3 fits");
     // Exactly on a boundary: F = 1024 -> 1024 + 2400.
-    CHECK(link_tx_init(&tx, LINK_CLASS_L1, LINK_RATE_48K, 8, 1024, 1), "init");
-    CHECK(snd_schedule_layout(&tx, LINK_RATE_44K1, 8, &at) && at == 1024 + SND_RATE_LEAD, "boundary start");
+    CHECK(alink_tx_init(&tx, ALINK_CLASS_L1, ALINK_RATE_48K, 8, 1024, 1), "init");
+    CHECK(snd_schedule_layout(&tx, ALINK_RATE_44K1, 8, &at) && at == 1024 + SND_RATE_LEAD, "boundary start");
 
-    // CTRL_MSG lead rule (link_tx_schedule): at least next boundary + 32.
-    CHECK(link_tx_init(&tx, LINK_CLASS_L1, LINK_RATE_48K, 8, 1000, 1), "init");
-    CHECK(!link_tx_schedule(&tx, 1024 + 31, LINK_OP_MUTE, 0, 0), "lead 1024+31 refused");
-    CHECK(link_tx_schedule(&tx, 1024 + 32, LINK_OP_MUTE, 0, 0), "lead 1024+32 accepted");
+    // CTRL_MSG lead rule (alink_tx_schedule): at least next boundary + 32.
+    CHECK(alink_tx_init(&tx, ALINK_CLASS_L1, ALINK_RATE_48K, 8, 1000, 1), "init");
+    CHECK(!alink_tx_schedule(&tx, 1024 + 31, ALINK_OP_MUTE, 0, 0), "lead 1024+31 refused");
+    CHECK(alink_tx_schedule(&tx, 1024 + 32, ALINK_OP_MUTE, 0, 0), "lead 1024+32 accepted");
 
     // A stream through the switch, decoded by the reference receiver.
     static const unsigned cases[][5] = {
         // cls, rate, C, new rate, new C
-        { LINK_CLASS_L2, LINK_RATE_48K, 16, LINK_RATE_96K, 8 },
-        { LINK_CLASS_L1, LINK_RATE_96K, 3, LINK_RATE_48K, 8 },
-        { LINK_CLASS_L3, LINK_RATE_48K, 32, LINK_RATE_44K1, 41 },
-        { LINK_CLASS_L1, LINK_RATE_44K1, 8, LINK_RATE_48K, 6 },
+        { ALINK_CLASS_L2, ALINK_RATE_48K, 16, ALINK_RATE_96K, 8 },
+        { ALINK_CLASS_L1, ALINK_RATE_96K, 3, ALINK_RATE_48K, 8 },
+        { ALINK_CLASS_L3, ALINK_RATE_48K, 32, ALINK_RATE_44K1, 41 },
+        { ALINK_CLASS_L1, ALINK_RATE_44K1, 8, ALINK_RATE_48K, 6 },
     };
     for (unsigned k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
         const unsigned *cs = cases[k];
-        static link_rx_t rx;
+        static alink_rx_t rx;
         rxlog_t log = {0};
-        link_rx_init(&rx, cs[0], 0xFF, rx_cb, &log);
-        CHECK(link_tx_init(&tx, cs[0], cs[1], cs[2], 77, 9), "init");
+        alink_rx_init(&rx, cs[0], 0xFF, rx_cb, &log);
+        CHECK(alink_tx_init(&tx, cs[0], cs[1], cs[2], 77, 9), "init");
         snd_sink_t s;
         snd_sink_init(&s, snd_words, RING_WORDS, NULL);
-        int32_t smp[LINK_MAX_CHANNELS];
+        int32_t smp[ALINK_MAX_CHANNELS];
         uint64_t target = 0;
         uint64_t done_bits = 0;
         for (unsigned i = 0; i < 2900; i++) {
@@ -252,9 +252,9 @@ static void test_schedule(void) {
                 if (wi + 32u > RING_WORDS) {
                     uint32_t tmp[32];
                     for (unsigned j = 0; j < 32; j++) tmp[j] = snd_words[(wi + j) & s.mask];
-                    link_rx_push(&rx, tmp, 1024);
+                    alink_rx_push(&rx, tmp, 1024);
                 } else {
-                    link_rx_push(&rx, snd_words + wi, 1024);
+                    alink_rx_push(&rx, snd_words + wi, 1024);
                 }
                 done_bits += 1024u;
             }
@@ -274,7 +274,7 @@ static void test_schedule(void) {
 }
 
 // ---------------------------------------------------------------------------
-// 3. EXT_LINK_TX and EXT_LINK_CTRL_MSG
+// 3. EXT_ALINK_TX and EXT_ALINK_CTRL_MSG
 // ---------------------------------------------------------------------------
 
 static void test_layouts(void) {
@@ -301,9 +301,9 @@ static void test_layouts(void) {
         memcpy(q, p, 16);
         q[bad[i].off] = bad[i].v;
         int e = snd_txcfg_parse(q, 8, &d);
-        CHECK(e == bad[i].err, "EXT_LINK_TX %s: refused with %d (got %d)", bad[i].what, bad[i].err, e);
+        CHECK(e == bad[i].err, "EXT_ALINK_TX %s: refused with %d (got %d)", bad[i].what, bad[i].err, e);
     }
-    // Capacity from link_max_channels: L3 96 kHz 18, L2 44.1 kHz 19.
+    // Capacity from alink_max_channels: L3 96 kHz 18, L2 44.1 kHz 19.
     memcpy(q, p, 16); q[2] = 3; q[4] = 2; q[3] = 18;
     CHECK(snd_txcfg_parse(q, 8, &d) == 0, "L3 96 kHz C 18 accepted");
     q[3] = 19;
@@ -311,21 +311,21 @@ static void test_layouts(void) {
     memcpy(q, p, 16); q[2] = 2; q[4] = 0; q[3] = 19;
     CHECK(snd_txcfg_parse(q, 8, &d) == 0, "L2 44.1 kHz C 19 accepted");
     memcpy(q, p, 16); q[0] = 0xFF; q[7] = 21; q[13] = 1;
-    CHECK(snd_txcfg_parse(q, 8, &d) == 0 && d.link_enable == 0xFF && d.sync_pin == 21 && d.flags == 1,
-          "8 links, sync GP21, mute");
+    CHECK(snd_txcfg_parse(q, 8, &d) == 0 && d.alink_enable == 0xFF && d.sync_pin == 21 && d.flags == 1,
+          "8 alinks, sync GP21, mute");
 
     // CTRL_MSG OUT.
     snd_ctrl_t m;
     uint8_t o[16] = {0};
     uint64_t f = 1002400;
     for (int i = 0; i < 8; i++) o[i] = (uint8_t)(f >> (8 * i));
-    o[8] = LINK_OP_MASTER_VOLUME; o[10] = 0x30; o[11] = 0xF8;   // -2000
+    o[8] = ALINK_OP_MASTER_VOLUME; o[10] = 0x30; o[11] = 0xF8;  // -2000
     CHECK(snd_ctrl_parse(o, &m) == 0 && m.frame == f && m.value == -2000, "MASTER_VOLUME -20 dB");
     o[11] = 0xCE; o[10] = 0x00;                                 // -12800
     CHECK(snd_ctrl_parse(o, &m) == 0, "-128 dB accepted");
     o[10] = 0xFF; o[11] = 0xCD;                                 // -12801
     CHECK(snd_ctrl_parse(o, &m) == 5, "-128.01 dB refused");
-    memset(o + 8, 0, 8); o[8] = LINK_OP_RATE; o[9] = 2;
+    memset(o + 8, 0, 8); o[8] = ALINK_OP_RATE; o[9] = 2;
     for (int i = 0; i < 8; i++) o[i] = (uint8_t)(1024 >> (8 * i));
     CHECK(snd_ctrl_parse(o, &m) == 0, "RATE 96 kHz at 1024");
     o[0] = 1;
@@ -342,25 +342,25 @@ static void test_layouts(void) {
     CHECK(snd_ctrl_parse(o, &m) == 2, "system_flags bit 1 refused");
     o[12] = 0; o[15] = 1;
     CHECK(snd_ctrl_parse(o, &m) == 3, "reserved byte refused");
-    o[15] = 0; o[8] = LINK_OP_OUT_DELAY; o[9] = 9;
+    o[15] = 0; o[8] = ALINK_OP_OUT_DELAY; o[9] = 9;
     CHECK(snd_ctrl_parse(o, &m) == 5, "OUT_DELAY output 9 refused");
     o[9] = 8; o[10] = 0xFF; o[11] = 0x07;
     CHECK(snd_ctrl_parse(o, &m) == 0, "OUT_DELAY output 8, 2047 samples");
     o[10] = 0; o[11] = 0x08;
     CHECK(snd_ctrl_parse(o, &m) == 5, "OUT_DELAY 2048 refused");
-    memset(o + 8, 0, 8); o[8] = LINK_OP_PRESET_LOAD; o[9] = 10;
+    memset(o + 8, 0, 8); o[8] = ALINK_OP_PRESET_LOAD; o[9] = 10;
     CHECK(snd_ctrl_parse(o, &m) == 5, "PRESET_LOAD slot 10 refused");
-    o[8] = LINK_OP_CLICK; o[9] = 3;
+    o[8] = ALINK_OP_CLICK; o[9] = 3;
     CHECK(snd_ctrl_parse(o, &m) == 0, "CLICK output 3");
-    o[8] = LINK_OP_SYNC_PULSE; o[9] = 1;
+    o[8] = ALINK_OP_SYNC_PULSE; o[9] = 1;
     CHECK(snd_ctrl_parse(o, &m) == 5, "SYNC_PULSE arg 1 refused");
 
     // CTRL_MSG IN: shows a pending apply at once, 0 after it ends.
-    link_tx_t tx;
+    alink_tx_t tx;
     uint8_t in[24];
-    CHECK(link_tx_init(&tx, LINK_CLASS_L1, LINK_RATE_48K, 8, 990, 0x5A), "init");
-    tx.flags = LINK_SF_FLAG_USB_LIVE;
-    CHECK(link_tx_schedule(&tx, 1056, LINK_OP_UNMUTE, 0, 0), "UNMUTE at 1056");
+    CHECK(alink_tx_init(&tx, ALINK_CLASS_L1, ALINK_RATE_48K, 8, 990, 0x5A), "init");
+    tx.flags = ALINK_SF_FLAG_USB_LIVE;
+    CHECK(alink_tx_schedule(&tx, 1056, ALINK_OP_UNMUTE, 0, 0), "UNMUTE at 1056");
     snd_ctrl_pack_in(&tx, 990, in);
     static const uint8_t want[24] = { 0x0C, 1, 8, 1, 0, 0x5A, 0, 0, 0x20, 0x04, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0,
                                       0xC0, 0x03, 0, 0 };
@@ -382,8 +382,8 @@ static void test_sync_log_idle_tone(void) {
     snd_sink_t s;
     memset(sync_words, 0, sizeof(sync_words));
     snd_sink_init(&s, snd_words, 1024, sync_words);
-    link_tx_t tx;
-    CHECK(link_tx_init(&tx, LINK_CLASS_L1, LINK_RATE_44K1, 8, 0, 1), "init");
+    alink_tx_t tx;
+    CHECK(alink_tx_init(&tx, ALINK_CLASS_L1, ALINK_RATE_44K1, 8, 0, 1), "init");
     int32_t z[8] = {0};
     uint64_t from = 0, to = 0;
     snd_log_t log;
@@ -407,7 +407,7 @@ static void test_sync_log_idle_tone(void) {
     // The comma of frame 13 starts at `from`.
     uint32_t w = (snd_words[(from / 32u) & s.mask] << (from & 31u)) |
                  (snd_words[(from / 32u + 1u) & s.mask] >> (32u - (from & 31u)));
-    CHECK(link_sym_is_comma((uint16_t)(w >> 22)), "the pulse starts on frame 13's comma");
+    CHECK(alink_sym_is_comma((uint16_t)(w >> 22)), "the pulse starts on frame 13's comma");
 
     // Log: the frame on the wire for a given read position.
     CHECK(snd_log_wire(&log, from) == 13 && snd_log_wire(&log, from + 1) == 13, "wire frame 13 at its start");
@@ -415,11 +415,11 @@ static void test_sync_log_idle_tone(void) {
     CHECK(snd_log_wire(&log, snd_sink_bits(&s)) == 39, "last frame");
 
     // Idle-only: alternating bits, encoder state as for real frames.
-    link_tx_t a, b;
-    link_tx_init(&a, LINK_CLASS_L2, LINK_RATE_48K, 16, 30, 1);
-    link_tx_init(&b, LINK_CLASS_L2, LINK_RATE_48K, 16, 30, 1);
-    link_tx_schedule(&a, 128, LINK_OP_RATE, LINK_RATE_96K, 8);
-    link_tx_schedule(&b, 128, LINK_OP_RATE, LINK_RATE_96K, 8);
+    alink_tx_t a, b;
+    alink_tx_init(&a, ALINK_CLASS_L2, ALINK_RATE_48K, 16, 30, 1);
+    alink_tx_init(&b, ALINK_CLASS_L2, ALINK_RATE_48K, 16, 30, 1);
+    alink_tx_schedule(&a, 128, ALINK_OP_RATE, ALINK_RATE_96K, 8);
+    alink_tx_schedule(&b, 128, ALINK_OP_RATE, ALINK_RATE_96K, 8);
     snd_sink_t s2;
     snd_sink_init(&s2, sync_words, RING_WORDS, NULL);
     snd_sink_init(&s, snd_words, RING_WORDS, NULL);
@@ -437,7 +437,7 @@ static void test_sync_log_idle_tone(void) {
     // Tone: 1 kHz at -20 dBFS.
     snd_tone_t tone = {0};
     for (unsigned r = 0; r < 3; r++) {
-        uint32_t fs = link_rate_hz(r);
+        uint32_t fs = alink_rate_hz(r);
         snd_tone_set_rate(&tone, fs);
         tone.phase = 0;
         double sum = 0, peak = 0, ref = 0;
@@ -471,9 +471,9 @@ static void test_speed(void) {
     };
     printf("host encode time per frame (this machine; indicative only):\n");
     for (unsigned k = 0; k < sizeof(cfg) / sizeof(cfg[0]); k++) {
-        link_tx_t a, b;
-        link_tx_init(&a, cfg[k][0], cfg[k][1], cfg[k][2], 0, 1);
-        link_tx_init(&b, cfg[k][0], cfg[k][1], cfg[k][2], 0, 1);
+        alink_tx_t a, b;
+        alink_tx_init(&a, cfg[k][0], cfg[k][1], cfg[k][2], 0, 1);
+        alink_tx_init(&b, cfg[k][0], cfg[k][1], cfg[k][2], 0, 1);
         snd_sink_t s;
         snd_sink_init(&s, snd_words, RING_WORDS, NULL);
         int32_t smp[64];
@@ -482,15 +482,15 @@ static void test_speed(void) {
         double t0 = now_s();
         for (unsigned i = 0; i < n; i++) snd_frame(&a, &T, smp, &s, NULL);
         double t1 = now_s();
-        link_bitw_t w;
+        alink_bitw_t w;
         unsigned m = 2000;
         double t2 = now_s();
         for (unsigned i = 0; i < m; i++) {
-            if (i % 100 == 0) link_bitw_init(&w, ref_words, RING_WORDS);
-            link_tx_frame(&b, smp, &w);
+            if (i % 100 == 0) alink_bitw_init(&w, ref_words, RING_WORDS);
+            alink_tx_frame(&b, smp, &w);
         }
         double t3 = now_s();
-        printf("  L%u %s C%-2u: snd_frame %6.0f ns, link_tx_frame %7.0f ns (x%.0f)\n", cfg[k][0],
+        printf("  L%u %s C%-2u: snd_frame %6.0f ns, alink_tx_frame %7.0f ns (x%.0f)\n", cfg[k][0],
                cfg[k][1] == 0 ? "44.1" : cfg[k][1] == 1 ? "48  " : "96  ", cfg[k][2],
                (t1 - t0) / n * 1e9, (t3 - t2) / m * 1e9, ((t3 - t2) / m) / ((t1 - t0) / n));
     }

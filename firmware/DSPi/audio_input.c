@@ -108,19 +108,19 @@ volatile bool adat_clock_mode_change_pending = false;
 volatile uint8_t pending_adat_clock_mode = ADAT_CLOCK_MODE_MASTER;
 volatile bool adat_input_restart_pending = false;
 
-// Link receiver configuration (audio_input.h; acted on by link_input.c).
-uint8_t link_config[LINK_CFG_LEN] = { 0, 0xFF, 0, 0xFF, 0xFF, 0xFF, 0x03, 0 };
-uint8_t link_slots[LINK_SLOTS_LEN] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+// Alink receiver configuration (audio_input.h; acted on by alink_input.c).
+uint8_t alink_config[ALINK_CFG_LEN] = { 0, 0xFF, 0, 0xFF, 0xFF, 0xFF, 0x03, 0 };
+uint8_t alink_slots[ALINK_SLOTS_LEN] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
-uint8_t link_phase_store[LINK_PHASE_STORE_LEN] = { 1, 128, 0, 0, 0 };
+uint8_t alink_phase_store[ALINK_PHASE_STORE_LEN] = { 1, 128, 0, 0, 0 };
 
-void link_phase_store_defaults(uint8_t p[LINK_PHASE_STORE_LEN]) {
-    static const uint8_t d[LINK_PHASE_STORE_LEN] = { 1, 128, 0, 0, 0 };
-    memcpy(p, d, LINK_PHASE_STORE_LEN);
+void alink_phase_store_defaults(uint8_t p[ALINK_PHASE_STORE_LEN]) {
+    static const uint8_t d[ALINK_PHASE_STORE_LEN] = { 1, 128, 0, 0, 0 };
+    memcpy(p, d, ALINK_PHASE_STORE_LEN);
 }
 
-void link_config_defaults(uint8_t cfg[LINK_CFG_LEN], uint8_t slots[LINK_SLOTS_LEN]) {
-    static const uint8_t c[LINK_CFG_LEN] = { 0, 0xFF, 0, 0xFF, 0xFF, 0xFF, 0x03, 0 };
-    memcpy(cfg, c, LINK_CFG_LEN);
-    for (uint8_t i = 0; i < LINK_SLOTS_LEN; i++) slots[i] = i;
+void alink_config_defaults(uint8_t cfg[ALINK_CFG_LEN], uint8_t slots[ALINK_SLOTS_LEN]) {
+    static const uint8_t c[ALINK_CFG_LEN] = { 0, 0xFF, 0, 0xFF, 0xFF, 0xFF, 0x03, 0 };
+    memcpy(cfg, c, ALINK_CFG_LEN);
+    for (uint8_t i = 0; i < ALINK_SLOTS_LEN; i++) slots[i] = i;
 }

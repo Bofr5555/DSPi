@@ -8,13 +8,13 @@ A DSPi on the USB input normally runs from its own crystal and tells the host, t
 endpoint, how fast to send. As an alink USB-direct unit it does the opposite: it locks its soft VCXO to the host's
 Start of Frame (SOF), which every device on the bus sees at the same instant, and in phase mode it plays every USB
 sample a fixed D samples after the sample arrived. Units on one host then play sample-aligned, exactly like phase-locked
-audio-link receivers (`link_receiver.md` section 8), with the USB bus as the link.
+audio-link receivers (`alink_receiver.md` section 8), with the USB bus as the alink.
 
 | Item of USBL1 section 5 | Where | RP2040 | RP2350 |
 |---|---|---|---|
 | U1 SOF-locked clock (`EXT_ALINK_USB` mode 1) | `alink_usb_core.c` service, `input_servo` | yes | yes |
 | U3 USB-frame time base | `alink_usb_core.h` (`alink_usb_tb_*`), `alink_usb.c` SOF hook, `usb_audio.c` stamp hook | ISR entry time (1-4 us) | `SOF_TIMESTAMP_RAW - _LAST` against the 1 us timer |
-| U4 phase lock over USB (mode 2) | `alink_usb_core.c`, `link/link_phase.c`, the anchor in `main.c` | yes | yes |
+| U4 phase lock over USB (mode 2) | `alink_usb_core.c`, `alink/alink_phase.c`, the anchor in `main.c` | yes | yes |
 | U5 apply at frame on the USB time base | `EXT_APPLY_AT_FRAME` time base 1/2 | yes, except CLICK | yes |
 | U5 SYNC_PULSE GPIO at that SOF | bench builds `-DDSPI_ALINK_USB_GPIO=<pin>` | yes | yes |
 | U6 start-offset report | `EXT_ALINK_USB_STATUS` 32-47 | yes | yes |
@@ -34,7 +34,9 @@ RP2350-only: CLICK (the RP2040's fixed-point pipeline has no click injection) an
   exactly nominal feedback and, while a stream plays, the fill servo (the S/PDIF slave's) holds the fill. With no
   stream (alt 0: the ring is empty) the VCXO stays on the feed-forward alone: the fill term would pull it off by the
   empty ring's error (hardware finding H1, round 3: -16 ppm under the default 4 ms option, 2 ppm per buffer plus the
-  second slope beyond 2 buffers). All units of a host then run at the host's rate.
+  second slope beyond 2 buffers). The same holds while a stream is stalled with the alt still set (a paused
+  application, a host xrun): the fill servo runs only while packets arrive (`usb_audio_stream_active()`, review usb1
+  N2). All units of a host then run at the host's rate.
 - **Mode 2 (phase lock)**: mode 1, then the anchor (section 3) and the timeline. Needs 48 or 96 kHz and
   `d_min <= D <= d_max` (170..399 at 48 kHz, 324..351 at 96 kHz for every latency option USB offers); otherwise it
   runs as mode 1 and says why (`status_flags`, event reason `CONFIG`). The anchor needs no stream: it prefills with
@@ -125,12 +127,12 @@ switch, rate change), and a time-base jump (SOF lost for 50 ms or a gap over 1 s
 makes the next pull-in immediate, so it re-anchors about 2.1 s after the bus returns).
 
 The servo, once per 75 ms: `input_servo_apply_trim(host rate, PI(e))` with `e = F_arr - (next_w - fill) - D` and the
-link's gains (`LINK_PHASE_KP_PPM` etc., `link_phase_servo()`). D is in samples, so the link's thresholds (0.5 to verify,
+alink's gains (`ALINK_PHASE_KP_PPM` etc., `alink_phase_servo()`). D is in samples, so the alink's thresholds (0.5 to verify,
 2 to re-anchor) are samples here.
 
 ## 4. Apply at frame, CLICK, SYNC_PULSE
 
-The link's queue (`link_apply_*`), fed by `EXT_APPLY_AT_FRAME` with time base 1 (S) or 2 (bus frame + sample, next
+The alink's queue (`alink_apply_*`), fed by `EXT_APPLY_AT_FRAME` with time base 1 (S) or 2 (bus frame + sample, next
 occurrence). Ops run as the timeline reaches their sample, on packets and on silence alike; a packet is split so the op
 acts on exactly its sample. CLICK is -20 dBFS, refused on a muted unit (user mute or the host's UAC mute) and on the RP2040.
 SYNC_PULSE drives the bench GPIO high for one frame at the op's SOF (it fires D before the sample is heard).
@@ -159,6 +161,6 @@ RAM). Figures per build: WP USB1 report.
   +300, -400 ppm and with exact timestamps, `EXT_ALINK_USB` validation and refusals, persistence, limits, ring target,
   mode 0 inert, host rejection at +290 (accepted), +300 and -400 ppm, the bus-frame time base, the queue, `CANCEL_ALL`
   and the status layout.
-- `tools/alink_usb_sim/run.sh`: two units on one host with the real engine and link_phase code, modelled SOF and hub
+- `tools/alink_usb_sim/run.sh`: two units on one host with the real engine and alink_phase code, modelled SOF and hub
   jitter, ISR latency, packet completion and re-arm, main-loop passes, USB ring, VCXO, rings and asynchronous feedback.
   Scenarios and figures in the WP USB1 report and `usb_direct_bench.md` section 5.

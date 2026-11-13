@@ -278,8 +278,8 @@ uint8_t __not_in_flash_func(active_input_channel_count)(void) {
     else if (active_input_source == INPUT_SOURCE_I2S)
         n = i2s_input_channels;
     else if (active_input_source == INPUT_SOURCE_ADAT ||
-             active_input_source == INPUT_SOURCE_LINK)
-        n = 8;                            // ADAT, and the link's 8 slots (EXT_LINK_SLOTS)
+             active_input_source == INPUT_SOURCE_ALINK)
+        n = 8;                            // ADAT, and the alink's 8 slots (EXT_ALINK_SLOTS)
     else
         n = NUM_STEREO_INPUTS;            // S/PDIF (and any future stereo source)
     if (n > NUM_INPUT_CHANNELS) n = NUM_INPUT_CHANNELS;
@@ -726,7 +726,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // convert to S24 in place first, so ADAT always sees converted
         // samples; otherwise fuse convert+interleave and skip the in-place
         // pass.  Then S/PDIF pair 0.
-#if DSPI_LINK || DSPI_ALINK_USB
+#if DSPI_ALINK || DSPI_ALINK_USB
         pipeline_click_inject(buf_out, 0, CORE1_EQ_FIRST_OUTPUT - 1);
 #endif
         if (finalize_s24) {
@@ -867,7 +867,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // Finalize outputs 0-7 (see output_s24.h).  ADAT active: convert to
         // S24 in place first, so ADAT always sees converted samples; otherwise
         // fuse convert+interleave per pair and skip the in-place pass.
-#if DSPI_LINK || DSPI_ALINK_USB
+#if DSPI_ALINK || DSPI_ALINK_USB
         pipeline_click_inject(buf_out, 0, NUM_SPDIF_INSTANCES * 2 - 1);
 #endif
         if (finalize_s24) {
@@ -1804,10 +1804,10 @@ bool get_slot_consumer_fill_frames(uint slot, uint32_t *frames) {
     return slot_ring_fill(slot, frames);
 }
 
-#if DSPI_LINK || DSPI_ALINK_USB
+#if DSPI_ALINK || DSPI_ALINK_USB
 volatile int8_t pipeline_click_output = -1;
 
-// Flash: the link servo reads it once per tick, the anchor a few times.
+// Flash: the alink servo reads it once per tick, the anchor a few times.
 bool slot_ring_play_position(uint slot, float *fill, uint32_t *played) {
     if (output_type_switch_in_progress) return false;
     uint32_t wr, frames, rem, wpf;

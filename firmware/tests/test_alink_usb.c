@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "link/link_phase.c"
+#include "alink/alink_phase.c"
 #include "alink_usb/alink_usb_core.c"
 
 static int failures, checks;
@@ -31,7 +31,7 @@ static int failures, checks;
 // ---------------------------------------------------------------------------
 
 alink_usb_tb_t alink_usb_tb;
-const link_apply_limits_t alink_usb_apply_limits = { 10, 9, 2048 };
+const alink_apply_limits_t alink_usb_apply_limits = { 10, 9, 2048 };
 static uint32_t now48, now_us, fs = 48000;
 static int n_actuate, n_park, n_events, n_writes, n_results, n_mute;
 static float vcxo;
@@ -65,13 +65,15 @@ static int n_ff_only, n_fill_servo;
 void alink_usb_port_actuate(float hz, float trim, bool ff) { (void)trim; if (ff) n_ff_only++; else n_fill_servo++; n_actuate++; vcxo = (hz / (float)fs - 1.0f) * 1e6f; }
 void alink_usb_port_park(void) { n_park++; vcxo = 0.0f; }
 float alink_usb_port_vcxo_ppm(void) { return vcxo; }
-uint8_t alink_usb_port_apply(const link_apply_op_t *op) { (void)op; return LINK_APPLY_APPLIED; }
+uint8_t alink_usb_port_apply(const alink_apply_op_t *op) { (void)op; return ALINK_APPLY_APPLIED; }
 void alink_usb_port_apply_result(uint8_t op, uint8_t r, uint32_t f) { (void)op; last_result = r; last_result_frame = f; n_results++; }
 void alink_usb_port_event(uint8_t st, uint8_t rs, uint32_t f) { (void)st; (void)rs; (void)f; n_events++; }
 void alink_usb_port_soft_mute(uint32_t s) { (void)s; n_mute++; }
 static int n_pulse, n_ring_target;
 bool alink_usb_port_pulse(uint32_t f) { (void)f; n_pulse++; return true; }
 void alink_usb_port_ring_target(void) { n_ring_target++; }
+static bool pkts_active = true;
+bool alink_usb_port_stream_active(void) { return pkts_active; }
 
 static void reset_counts(void) { n_actuate = n_park = n_events = n_writes = n_results = n_mute = n_wlog = n_pulse = n_ring_target = 0; }
 
@@ -234,7 +236,7 @@ static void test_mode0_stock(void) {
     CHECK(!alink_usb_nominal_feedback(&us) && !alink_usb_engaged(&us) && us.state == ALINK_USB_ST_OFF,
           "mode 0: asynchronous feedback, packets on the stock path, state off");
     uint8_t ap[16] = { 0 };
-    ap[8] = LINK_OP_MUTE;
+    ap[8] = ALINK_OP_MUTE;
     ap[12] = 1;
     CHECK(!alink_usb_apply(&us, ap), "mode 0: apply refused");
     // Mode 1 then 0: the stop parks the VCXO and reports DISABLED.
@@ -289,13 +291,13 @@ static void test_apply_and_status(void) {
     us.tb_ok = true;
     us.started = true;
     us.ph.timeline = true;
-    us.ph.state = LINK_PHASE_LOCKED;
+    us.ph.state = ALINK_PHASE_LOCKED;
     us.ph.next_w = 48ull * alink_usb_tb.n;
     // Bus frame 1100, sample 5: 100 frames ahead.
     uint8_t p[16] = { 0 };
     uint32_t f = 1100u | 5u << 16;
     memcpy(p, &f, 4);
-    p[8] = LINK_OP_MASTER_VOLUME;
+    p[8] = ALINK_OP_MASTER_VOLUME;
     p[10] = 0x30; p[11] = 0xf8;                          // -2000 = -20 dB
     p[12] = 2;
     CHECK(alink_usb_apply(&us, p), "bus-frame op accepted");
@@ -305,7 +307,7 @@ static void test_apply_and_status(void) {
     // Bus frame 990: 10 frames ago, inside the 64-frame window: past, kept (runs late).
     f = 990u;
     memcpy(p, &f, 4);
-    p[8] = LINK_OP_MUTE; p[10] = p[11] = 0;
+    p[8] = ALINK_OP_MUTE; p[10] = p[11] = 0;
     CHECK(alink_usb_apply(&us, p) && us.aq.q[0].frame == 48ull * (2u * 2048u + 990u), "a past bus frame maps behind");
     // Sample offset beyond the frame, unknown time base, reserved bytes: refused.
     f = 1200u | 48u << 16;
@@ -322,28 +324,28 @@ static void test_apply_and_status(void) {
     p[13] = 1;
     CHECK(!alink_usb_apply(&us, p), "reserved byte refused");
     p[13] = 0;
-    p[8] = LINK_OP_RATE;
+    p[8] = ALINK_OP_RATE;
     CHECK(!alink_usb_apply(&us, p), "RATE refused");
     // Time base 1: S directly.
     uint64_t s = 48ull * (2u * 2048u + 1050u);
     memcpy(p, &s, 8);
-    p[8] = LINK_OP_CLICK; p[9] = 2;
+    p[8] = ALINK_OP_CLICK; p[9] = 2;
     CHECK(alink_usb_apply(&us, p) && us.aq.n == 3, "S op accepted");
-    p[8] = LINK_OP_MUTE; p[9] = 0;
+    p[8] = ALINK_OP_MUTE; p[9] = 0;
     CHECK(alink_usb_apply(&us, p) && us.aq.n == 4, "4th op");
     CHECK(!alink_usb_apply(&us, p), "a full queue refuses");
     reset_counts();
     uint8_t c[16] = { 0 };
     c[12] = 1;
-    CHECK(alink_usb_apply(&us, c) && us.aq.n == 0 && n_results == 4 && last_result == LINK_APPLY_CANCELLED,
+    CHECK(alink_usb_apply(&us, c) && us.aq.n == 0 && n_results == 4 && last_result == ALINK_APPLY_CANCELLED,
           "CANCEL_ALL reports each op cancelled");
     // Not phase-locked: refused.
-    us.ph.state = LINK_PHASE_ANCHORING;
+    us.ph.state = ALINK_PHASE_ANCHORING;
     memcpy(p, &s, 8);
     CHECK(!alink_usb_apply(&us, p), "anchoring: refused");
 
     // Status layout.
-    us.ph.state = LINK_PHASE_LOCKED;
+    us.ph.state = ALINK_PHASE_LOCKED;
     us.state = ALINK_USB_ST_PHASE_LOCK;
     us.est.valid = true;
     us.est.ppm = 12.5f;
@@ -365,7 +367,7 @@ static void test_apply_and_status(void) {
     int32_t shift;
     memcpy(&age, o + 36, 4);
     memcpy(&shift, o + 40, 4);
-    CHECK(o[0] == ALINK_USB_ST_PHASE_LOCK && o[1] == LINK_PHASE_LOCKED && o[2] == 1 && (o[3] & 0x0A) == 0x0A,
+    CHECK(o[0] == ALINK_USB_ST_PHASE_LOCK && o[1] == ALINK_PHASE_LOCKED && o[2] == 1 && (o[3] & 0x0A) == 0x0A,
           "status head %u %u %u %02x", o[0], o[1], o[2], o[3]);
     CHECK(hp == 12.5f && snow == 48ull * (2u * 2048u + 1000u) && bus == 1000, "status S %llu bus %u",
           (unsigned long long)snow, bus);
@@ -420,7 +422,7 @@ static void locked_engine(alink_usb_t *us) {
     us->tb_ok = true;
     us->started = true;
     us->ph.timeline = true;
-    us->ph.state = LINK_PHASE_LOCKED;
+    us->ph.state = ALINK_PHASE_LOCKED;
     us->ph.next_w = 48ull * 1000u;
     us->stream = true;
 }
@@ -516,7 +518,7 @@ static void test_fixups(void) {
     uint8_t sp[16] = { 0 };
     uint32_t f = 1100u;
     memcpy(sp, &f, 4);
-    sp[8] = LINK_OP_SYNC_PULSE;
+    sp[8] = ALINK_OP_SYNC_PULSE;
     sp[12] = 2;
     for (int i = 0; i < 4; i++) CHECK(alink_usb_apply(&us, sp), "pulse %d queued", i);
     CHECK(!alink_usb_apply(&us, sp) && n_pulse == 4, "a refused SYNC_PULSE arms nothing (%d)", n_pulse);
@@ -547,6 +549,15 @@ static void test_round3(void) {
     n_ff_only = n_fill_servo = 0;
     run_mode1(&us, true, 6000, 7000);
     CHECK(n_fill_servo > 0 && n_ff_only == 0, "mode 1 with a stream: the fill servo (fill %d)", n_fill_servo);
+    // N2: the alt still set but no packets (a stalled stream): feed-forward only.
+    n_ff_only = n_fill_servo = 0;
+    pkts_active = false;
+    run_mode1(&us, true, 7000, 8000);
+    CHECK(n_fill_servo == 0 && n_ff_only > 0, "N2: stalled stream, alt set: feed-forward only (fill %d)", n_fill_servo);
+    pkts_active = true;
+    n_ff_only = n_fill_servo = 0;
+    run_mode1(&us, true, 8000, 9000);
+    CHECK(n_fill_servo > 0 && n_ff_only == 0, "N2: packets again: the fill servo (fill %d)", n_fill_servo);
 
     // R3: a GAP right before alt 0 is taken back; one long before stays.
     locked_engine(&us);
@@ -562,6 +573,23 @@ static void test_round3(void) {
     alink_usb_tb.n = 1008u;                     // alt 0 three frames later
     alink_usb_stream(&us, false);
     CHECK(us.gaps == 0 && us.missed == 0, "a normal stop is no GAP (gaps %u, missed %u)", us.gaps, us.missed);
+    CHECK(!us.ev_pending && us.ev_reason == ALINK_USB_RS_NONE,
+          "N1: a taken-back GAP that was all there was leaves no event pending (no 0xE3 with reason NONE)");
+    // N1: a state change pending before the GAP still goes out, reason as before.
+    locked_engine(&us);
+    p.frame = 1000u;
+    alink_usb_deliver(&us, &p);
+    p.frame = 1001u;
+    alink_usb_deliver(&us, &p);
+    us.ev_pending = true;                       // e.g. a state change not yet sent (rate limit)
+    us.ev_reason = ALINK_USB_RS_NONE;
+    now48 = 48000u * 5u;
+    alink_usb_tb.n = 1005u;
+    hold(&us);
+    alink_usb_tb.n = 1008u;
+    alink_usb_stream(&us, false);
+    CHECK(us.ev_pending && us.ev_reason == ALINK_USB_RS_NONE, "N1: an earlier pending event stays pending (reason %u)",
+          us.ev_reason);
     locked_engine(&us);
     p.frame = 1000u;
     alink_usb_deliver(&us, &p);

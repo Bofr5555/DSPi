@@ -71,10 +71,10 @@ void alink_usb_init(alink_usb_t *us) {
     us->spf = 48u;
     us->block_cap = 48u;
     us->last_frame = ALINK_USB_FRAME_NONE;
-    link_phase_init(&us->ph);
+    alink_phase_init(&us->ph);
     us->ph.mode = 0;
     us->ph.d_local = us->d;
-    link_apply_init(&us->aq);
+    alink_apply_init(&us->aq);
 }
 
 static void sync_ph(alink_usb_t *us) {
@@ -111,7 +111,7 @@ uint32_t alink_usb_ring_target(alink_usb_t *us, uint32_t fs, uint32_t target, ui
     // or without a time base (review usb1 R5).
     if (!alink_usb_phase_possible(us, fs) || us->rejected || !us->tb_ok) return target;
     // D less the block cap and the margin: the hold threshold at the start.
-    return link_phase_prefill(&us->ph, target, cap, span);
+    return alink_phase_prefill(&us->ph, target, cap, span);
 }
 
 static void timeline_end(alink_usb_t *us);
@@ -137,6 +137,7 @@ bool alink_usb_set_config(alink_usb_t *us, const uint8_t p[ALINK_USB_CFG_LEN]) {
         us->reanchors++;
         us->ev_pending = true;
         us->ev_reason = ALINK_USB_RS_REANCHOR;
+        us->ev_gap_last = false;
     }
     return true;
 }
@@ -220,10 +221,12 @@ static void set_state(alink_usb_t *us, uint8_t st, uint8_t reason) {
     if (st != us->state) {
         us->state = st;
         us->ev_pending = true;
+        us->ev_gap_last = false;
     }
     if (reason != ALINK_USB_RS_NONE) {
         us->ev_reason = reason;
         us->ev_pending = true;
+        us->ev_gap_last = false;
     }
 }
 
@@ -236,6 +239,7 @@ static void event_service(alink_usb_t *us, uint32_t now_ms) {
     us->ev_state = us->state;
     us->ev_pending = false;
     us->ev_reason = ALINK_USB_RS_NONE;
+    us->ev_gap_last = false;
     us->ev_last_ms = now_ms;
     us->ev_once = true;
 }
@@ -245,43 +249,43 @@ static void event_service(alink_usb_t *us, uint32_t now_ms) {
 // ---------------------------------------------------------------------------
 
 static void apply_report(alink_usb_t *us, uint8_t op, uint8_t result, uint64_t s) {
-    link_apply_done(&us->aq, op, result, s);
+    alink_apply_done(&us->aq, op, result, s);
     alink_usb_port_apply_result(op, result, alink_usb_bus_form(us, s));
 }
 
 static void apply_run(alink_usb_t *us, bool late) {
-    link_apply_op_t op;
-    link_apply_pop(&us->aq, &op);
+    alink_apply_op_t op;
+    alink_apply_pop(&us->aq, &op);
     uint8_t r = alink_usb_port_apply(&op);
-    if (late && r == LINK_APPLY_APPLIED) r = LINK_APPLY_LATE;
-    if (op.op == LINK_OP_SYNC_PULSE && r != LINK_APPLY_REFUSED) us->sync_pulses++;
+    if (late && r == ALINK_APPLY_APPLIED) r = ALINK_APPLY_LATE;
+    if (op.op == ALINK_OP_SYNC_PULSE && r != ALINK_APPLY_REFUSED) us->sync_pulses++;
     apply_report(us, op.op, r, op.frame);
 }
 
 void alink_usb_cancel_all(alink_usb_t *us) {
     while (us->aq.n) {
-        link_apply_op_t op;
-        link_apply_pop(&us->aq, &op);
-        apply_report(us, op.op, LINK_APPLY_CANCELLED, op.frame);
+        alink_apply_op_t op;
+        alink_apply_pop(&us->aq, &op);
+        apply_report(us, op.op, ALINK_APPLY_CANCELLED, op.frame);
     }
 }
 
-bool alink_usb_apply(alink_usb_t *us, const uint8_t p[LINK_APPLY_LEN]) {
-    uint8_t q[LINK_APPLY_LEN];
-    memcpy(q, p, LINK_APPLY_LEN);
+bool alink_usb_apply(alink_usb_t *us, const uint8_t p[ALINK_APPLY_LEN]) {
+    uint8_t q[ALINK_APPLY_LEN];
+    memcpy(q, p, ALINK_APPLY_LEN);
     uint8_t tb = q[12];
     q[12] = 0;
-    // The limits of link_apply_args_ok(); the firmware's values (presets,
-    // outputs, delay) are the same on the link.
-    link_apply_op_t op;
-    if (!link_apply_parse(&alink_usb_apply_limits, q, &op)) return false;
-    if (op.op == LINK_APPLY_CANCEL_ALL) {
+    // The limits of alink_apply_args_ok(); the firmware's values (presets,
+    // outputs, delay) are the same on the alink.
+    alink_apply_op_t op;
+    if (!alink_apply_parse(&alink_usb_apply_limits, q, &op)) return false;
+    if (op.op == ALINK_APPLY_CANCEL_ALL) {
         if (tb > 2u) return false;
         alink_usb_cancel_all(us);
         return true;
     }
     if (tb != 1u && tb != 2u) return false;
-    if (!us->started || us->ph.state == LINK_PHASE_ANCHORING) return false;      // no timeline, no S
+    if (!us->started || us->ph.state == ALINK_PHASE_ANCHORING) return false;     // no timeline, no S
     uint64_t now;
     if (!alink_usb_sample_now(us, &now, NULL)) return false;
     if (tb == 2u) {
@@ -295,9 +299,9 @@ bool alink_usb_apply(alink_usb_t *us, const uint8_t p[LINK_APPLY_LEN]) {
         uint32_t n = delta >= 2048u - 64u ? n_now - (2048u - delta) : n_now + delta;
         op.frame = (uint64_t)us->spf * n + k;
     }
-    if (!link_apply_push(&us->aq, &op)) return false;
+    if (!alink_apply_push(&us->aq, &op)) return false;
     // One pending pulse: a later SYNC_PULSE moves the GPIO's frame (review usb1 F7).
-    if (op.op == LINK_OP_SYNC_PULSE) (void)alink_usb_port_pulse((uint32_t)(op.frame / us->spf));
+    if (op.op == ALINK_OP_SYNC_PULSE) (void)alink_usb_port_pulse((uint32_t)(op.frame / us->spf));
     return true;
 }
 
@@ -327,7 +331,7 @@ static float ramp_gain(int ramp, uint32_t a, uint32_t b, uint32_t j) {
 static void write_span(alink_usb_t *us, const alink_usb_pkt_t *p, uint32_t off, uint32_t n, int ramp) {
     uint32_t done = 0, cap = us->block_cap ? us->block_cap : us->spf;
     while (done < n) {
-        uint64_t here = us->ph.next_w, at = link_apply_next(&us->aq);
+        uint64_t here = us->ph.next_w, at = alink_apply_next(&us->aq);
         if (at <= here) {
             apply_run(us, at < here);
             continue;
@@ -342,7 +346,7 @@ static void write_span(alink_usb_t *us, const alink_usb_pkt_t *p, uint32_t off, 
         } else {
             alink_usb_port_write_silence(k);
         }
-        link_phase_written(&us->ph, here, k);
+        alink_phase_written(&us->ph, here, k);
         done += k;
     }
 }
@@ -354,7 +358,7 @@ static void timeline_end(alink_usb_t *us) {
     us->held = false;
     us->fade_in = false;
     us->pkt_off = 0;
-    link_phase_drain(&us->ph);
+    alink_phase_drain(&us->ph);
 }
 
 static void reanchor(alink_usb_t *us) {
@@ -373,6 +377,9 @@ static void count_gap(alink_usb_t *us) {
     us->gap_missed0 = us->missed;
     us->gap_recent = true;
     us->gaps++;
+    us->ev_gap_pending0 = us->ev_pending;
+    us->ev_gap_reason0 = us->ev_reason;
+    us->ev_gap_last = true;
     us->ev_pending = true;
     us->ev_reason = ALINK_USB_RS_GAP;
 }
@@ -428,7 +435,7 @@ bool alink_usb_deliver(alink_usb_t *us, const alink_usb_pkt_t *p) {
     bool first = us->stream && !us->stream_seen;
     while (off < n) {
         int64_t gap = (int64_t)(s - us->ph.next_w);
-        if (!link_phase_gap_ok(gap, span)) {
+        if (!alink_phase_gap_ok(gap, span)) {
             // Another time base (a bus reset, a wrong stamp far off): start over.
             reanchor(us);
             return true;
@@ -486,14 +493,14 @@ static bool phase_error(alink_usb_t *us, float *e) {
     bool ok = alink_usb_port_play(&fill) && arrival(us, us->ph.next_w, &since);
     alink_usb_port_irq_restore(sv);
     if (!ok) return false;
-    *e = link_phase_error(&us->ph, since, fill);
+    *e = alink_phase_error(&us->ph, since, fill);
     return true;
 }
 
 static void phase_act(alink_usb_t *us, int act, int32_t k) {
-    if (act == LINK_PHASE_ACT_REANCHOR) {
+    if (act == ALINK_PHASE_ACT_REANCHOR) {
         reanchor(us);
-    } else if (act == LINK_PHASE_ACT_CORRECT) {
+    } else if (act == ALINK_PHASE_ACT_CORRECT) {
         if (k > 0) {
             us->ph.next_w += (uint32_t)k;       // skip: those samples never reach the rings
         } else {
@@ -562,7 +569,7 @@ bool alink_usb_anchor_wanted(const alink_usb_t *us) {
 }
 
 void alink_usb_on_drain(alink_usb_t *us) {
-    link_phase_drain(&us->ph);
+    alink_phase_drain(&us->ph);
     us->held = false;
     us->prefilling = true;
     us->started = false;
@@ -571,7 +578,7 @@ void alink_usb_on_drain(alink_usb_t *us) {
     uint64_t s;
     if (!alink_usb_sample_now(us, &s, NULL)) s = 0;
     us->ph.next_w = s;                          // the first silence written sets `first`
-    us->ph.state = LINK_PHASE_ANCHORING;
+    us->ph.state = ALINK_PHASE_ANCHORING;
     set_state(us, ALINK_USB_ST_ANCHORING, ALINK_USB_RS_NONE);
 }
 
@@ -588,11 +595,11 @@ float alink_usb_anchor_wait(alink_usb_t *us) {
     bool ok = arrival(us, us->ph.first, &since);
     alink_usb_port_irq_restore(sv);
     if (!ok) return 1e9f;
-    return link_phase_anchor_wait(&us->ph, since);
+    return alink_phase_anchor_wait(&us->ph, since);
 }
 
 void alink_usb_on_enabled(alink_usb_t *us) {
-    link_phase_started(&us->ph);
+    alink_phase_started(&us->ph);
     us->held = false;
     us->fade_in = false;
     us->prefilling = false;
@@ -613,7 +620,16 @@ void alink_usb_stream(alink_usb_t *us, bool on) {
         // GAP: take the count and its silence back (review usb1 R3).
         us->gaps--;
         us->missed = us->gap_missed0;
-        if (us->ev_reason == ALINK_USB_RS_GAP) us->ev_reason = ALINK_USB_RS_NONE;
+        if (us->ev_gap_last) {
+            // Nothing else changed since that GAP: the event is as before it, so
+            // a GAP that was all there was to send sends nothing (no 0xE3 with
+            // reason NONE and no state change, spec 2.9.5; review usb1 N1).
+            us->ev_pending = us->ev_gap_pending0;
+            us->ev_reason = us->ev_gap_reason0;
+            us->ev_gap_last = false;
+        } else if (us->ev_reason == ALINK_USB_RS_GAP) {
+            us->ev_reason = ALINK_USB_RS_NONE;
+        }
     }
     us->gap_recent = false;
     if (on && us->held) {
@@ -746,21 +762,24 @@ void alink_usb_service(alink_usb_t *us, uint32_t now_ms) {
         if (us->started) {
             float e;
             if (phase_error(us, &e)) {
-                int act = LINK_PHASE_ACT_NONE;
+                int act = ALINK_PHASE_ACT_NONE;
                 int32_t k = 0;
-                if (us->ph.state != LINK_PHASE_ANCHORING) {
-                    act = link_phase_check(&us->ph, e, auto_reanchor(us), &k);
+                if (us->ph.state != ALINK_PHASE_ANCHORING) {
+                    act = alink_phase_check(&us->ph, e, auto_reanchor(us), &k);
                     phase_act(us, act, k);
                 }
-                if (act == LINK_PHASE_ACT_REANCHOR) link_phase_pi_reset(&us->ph.pi);
-                else if (us->ph.state == LINK_PHASE_LOCKED || us->ph.state == LINK_PHASE_PENDING)
-                    trim = link_phase_servo(&us->ph, e);
+                if (act == ALINK_PHASE_ACT_REANCHOR) alink_phase_pi_reset(&us->ph.pi);
+                else if (us->ph.state == ALINK_PHASE_LOCKED || us->ph.state == ALINK_PHASE_PENDING)
+                    trim = alink_phase_servo(&us->ph, e);
             }
-        } else if (us->rate_locked && !us->prefilling && us->stream) {
+        } else if (us->rate_locked && !us->prefilling && us->stream && alink_usb_port_stream_active()) {
             // The fill servo only while a stream fills the rings: with none
             // (alt 0) the ring sits empty and the fill term would pull the VCXO
             // off the feed-forward by -10..-20 ppm, and in mode 2 keep
             // rate_ready() false so the anchor never comes (hardware H1/H2).
+            // Gated on packets arriving, not only on the alt: a stream stalled
+            // with the alt still set (a paused application, a host xrun) empties
+            // the ring the same way (review usb1 N2).
             ff_only = false;
         }
         alink_usb_port_actuate(hz, trim, ff_only);
@@ -776,16 +795,16 @@ void alink_usb_service(alink_usb_t *us, uint32_t now_ms) {
         alink_usb_port_soft_mute(mute);
         set_state(us, ALINK_USB_ST_ANCHORING, ALINK_USB_RS_NONE);
     } else if (us->started) {
-        if (us->ph.state == LINK_PHASE_ANCHORING) {
+        if (us->ph.state == ALINK_PHASE_ANCHORING) {
             float e;
             if (phase_error(us, &e)) {
                 int32_t k = 0;
-                int act = link_phase_check(&us->ph, e, auto_reanchor(us), &k);
+                int act = alink_phase_check(&us->ph, e, auto_reanchor(us), &k);
                 phase_act(us, act, k);
             }
         }
         if (us->started) hold(us);
-        if (us->started && us->ph.state == LINK_PHASE_ANCHORING) {
+        if (us->started && us->ph.state == ALINK_PHASE_ANCHORING) {
             alink_usb_port_soft_mute(mute);
             set_state(us, ALINK_USB_ST_ANCHORING, ALINK_USB_RS_NONE);
         } else if (us->started && us->state != ALINK_USB_ST_PHASE_LOCK) {
@@ -812,7 +831,7 @@ void alink_usb_service(alink_usb_t *us, uint32_t now_ms) {
 void alink_usb_get_status(alink_usb_t *us, uint8_t o[ALINK_USB_STATUS_LEN]) {
     memset(o, 0, ALINK_USB_STATUS_LEN);
     o[0] = us->state;
-    o[1] = us->started || us->prefilling ? us->ph.state : LINK_PHASE_FREE;
+    o[1] = us->started || us->prefilling ? us->ph.state : ALINK_PHASE_FREE;
     o[2] = us->fs == 44100u ? 0 : us->fs == 48000u ? 1 : us->fs == 96000u ? 2 : 0xFF;
     uint8_t f = 0;
 #if defined(ALINK_USB_HW_TIMESTAMP) && ALINK_USB_HW_TIMESTAMP
@@ -824,7 +843,7 @@ void alink_usb_get_status(alink_usb_t *us, uint8_t o[ALINK_USB_STATUS_LEN]) {
     o[3] = f;
     au_putf(o + 4, us->est.valid ? us->est.ppm : 0.0f);
     au_putf(o + 8, alink_usb_port_vcxo_ppm());
-    au_putf(o + 12, us->started && (us->ph.state == LINK_PHASE_LOCKED || us->ph.state == LINK_PHASE_PENDING) &&
+    au_putf(o + 12, us->started && (us->ph.state == ALINK_PHASE_LOCKED || us->ph.state == ALINK_PHASE_PENDING) &&
                          us->ph.e_valid ? us->ph.e : 0.0f);
     uint64_t s = 0;
     uint16_t bus = 0;

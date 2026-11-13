@@ -1,15 +1,15 @@
 /*
- * sender_main.c - DSPi link sender (WP LK4): boot and the core 0 loop
+ * sender_main.c - DSPi alink sender (WP LK4): boot and the core 0 loop
  *
- * SYS2 section 4: a Pico 2 as a USB sound card driving link outputs.  Boot:
+ * SYS2 section 4: a Pico 2 as a USB sound card driving alink outputs. Boot:
  * 307.2 MHz from the crystal (the class dividers 20 / 10 / 5 and the 48 kHz
  * frame of 6400 cycles are exact there), core at 1.20 V, the soft VCXO
- * parked (it moves only in fan-out mode), the link engine on core 1, USB on
+ * parked (it moves only in fan-out mode), the alink engine on core 1, USB on
  * core 0.  The sender sends from power-up (frames of zero samples until USB
- * audio plays, spec 7.1); which links send is EXT_LINK_TX.link_enable.
+ * audio plays, spec 7.1); which alinks send is EXT_ALINK_TX.alink_enable.
  *
- * Bench build (DSPI_SENDER_BENCH=ON): link 0 (GP2) enabled with the PRBS-7
- * test pattern and the SYNC pulse on GP21 from boot, so a link bench RX
+ * Bench build (DSPI_SENDER_BENCH=ON): alink 0 (GP2) enabled with the PRBS-7
+ * test pattern and the SYNC pulse on GP21 from boot, so an alink bench RX
  * board (LK3) checks it with no host software on the sender's side.
  */
 
@@ -33,7 +33,7 @@ snd_tables_t snd_tables;
 void sender_defaults(void) {
     snd_txcfg_default(&snd.cfg);
 #ifdef DSPI_SENDER_BENCH
-    snd.cfg.link_enable = 0x0001;
+    snd.cfg.alink_enable = 0x0001;
     snd.cfg.test_pattern = SND_TP_PRBS;
     snd.cfg.sync_pin = 21;
 #endif
@@ -43,8 +43,8 @@ void sender_defaults(void) {
 }
 
 static void led_service(void) {
-    // On: links running.  Fast blink: playing USB audio.  Slow blink: fan-out
-    // re-sending.  Off: links stopped.
+    // On: alinks running. Fast blink: playing USB audio.  Slow blink: fan-out
+    // re-sending.  Off: alinks stopped.
     uint32_t ms = to_ms_since_boot(get_absolute_time());
     bool on;
     if (snd.engine == SND_ENG_OFF) on = false;
@@ -78,7 +78,7 @@ int main(void) {
     sender_defaults();
     sender_store_load();
 
-    snd.restart_req = 1;                // core 1 starts the links
+    snd.restart_req = 1;                // core 1 starts the alinks
     multicore_launch_core1(sender_engine_core1);
     sender_usb_init();
 

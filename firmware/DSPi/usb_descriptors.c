@@ -25,7 +25,7 @@ static const char *const string_table[] = {
     "",                    // 0 — placeholder; langid returned separately
     "GitHub.com/WeebLabs", // 1 — manufacturer
 #ifdef DSPI_ROLE_SENDER
-    "DSPi Link Sender",    // 2 — product (sender build, WP LK4)
+    "DSPi Audio Link Sender", // 2 — product (sender build, WP LK4)
 #else
     "Weeb Labs DSPi",      // 2 — product
 #endif
@@ -149,7 +149,7 @@ static const tusb_desc_device_t device_descriptor = {
 // is 11 bytes (N + 1×3).  Block = std(9)+general(7)+fmt(11)+OUT(9)+CS(7)+FB(9).
 #define AS_MULTICH_ALT_LEN  (9 + 7 + 11 + 9 + 7 + 9)
 #ifdef DSPI_ROLE_SENDER
-// The link sender (WP LK4, SYS2 4.1) adds alt 7 = 6ch 24-bit 48 kHz and
+// The alink sender (WP LK4, SYS2 4.1) adds alt 7 = 6ch 24-bit 48 kHz and
 // alt 8 = 4ch 16-bit 96 kHz, the largest Full Speed allows.
 #define NUM_MULTICH_ALTS    6
 #else

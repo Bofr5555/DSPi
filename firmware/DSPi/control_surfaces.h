@@ -110,7 +110,7 @@
  * See Documentation/Features/tube_preamp_spec.md.
  *
  * Caps v20 appends the output limiter nouns (74-78: LIMITER, _THRESHOLD,
- * _RELEASE, _LINK, _GR), all targeting an output, and the CS_UNIT_MS_LOG
+ * _RELEASE, _ALINK, _GR), all targeting an output, and the CS_UNIT_MS_LOG
  * unit the release noun needs.  No structure sizes change.
  * See Documentation/Features/output_limiter_spec.md.
  *

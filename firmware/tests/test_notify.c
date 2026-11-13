@@ -163,12 +163,12 @@ int main(void) {
         CHECK((NOTIFY_FEATURES & NOTIFY_FEAT_CLIP_EVENT) != 0);
     }
 
-    // Link events (WP LK6, review lk6 F7): 0xE1 and 0xE2 share a serialiser;
+    // Alink events (WP LK6, review lk6 F7): 0xE1 and 0xE2 share a serialiser;
     // 2.8.12's examples byte for byte (seq aside).
     {
         uint8_t buf[NOTIFY_MAX_PACKET];
         notify_init();
-        notify_push_link_state(2, 1, 1, 1000000u);
+        notify_push_alink_state(2, 1, 1, 1000000u);
         notify_push_apply_result(4, 0, 1002400u);
         CHECK(notify_peek_next_for(NOTIFY_CONSUMER_USB, buf, sizeof buf) == 12);
         static const uint8_t e1[12] = { 2, 0xE1, 0, 0, 2, 1, 1, 0, 0x40, 0x42, 0x0f, 0x00 };

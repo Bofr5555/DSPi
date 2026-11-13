@@ -1,8 +1,8 @@
 /*
- * sender_fanout.c - DSPi link sender (WP LK4): fan-out (slaved) mode core
+ * sender_fanout.c - DSPi alink sender (WP LK4): fan-out (slaved) mode core
  *
  * See sender_fanout.h.  The input rules are those of LK1's reference
- * receiver (link_protocol_spec.md 8.4-8.8): the comma is checked where the
+ * receiver (alink_protocol_spec.md 8.4-8.8): the comma is checked where the
  * frame length puts it, then 1 and 2 bits either side (a slip, re-aligned
  * without loss); a frame with no comma is decoded anyway (a flywheel
  * frame); a missing comma, a bad head or an HDR mismatch fails the frame,
@@ -18,7 +18,7 @@ void snd_dectab_init(snd_dectab_t *d) {
     for (unsigned s = 0; s < 1024; s++) {
         uint8_t b;
         bool k;
-        unsigned m = link_8b10b_decode((uint16_t)s, &b, &k);
+        unsigned m = alink_8b10b_decode((uint16_t)s, &b, &k);
         d->dec[s] = (m && !k) ? (uint16_t)(SND_DEC_DATA | b) : 0;
     }
 }
@@ -34,7 +34,7 @@ void snd_fo_init(snd_fo_t *f, unsigned in_cls, unsigned out_cls, const snd_table
 }
 
 uint32_t snd_fo_acquire_bits(unsigned in_cls) {
-    return 10u * link_frame_symbols_max(in_cls, LINK_RATE_44K1) * 68u;
+    return 10u * alink_frame_symbols_max(in_cls, ALINK_RATE_44K1) * 68u;
 }
 
 // ---------------------------------------------------------------------------
@@ -43,22 +43,22 @@ uint32_t snd_fo_acquire_bits(unsigned in_cls) {
 
 typedef struct {
     snd_fo_t *f;
-    link_rx_t *rx;
+    alink_rx_t *rx;
     uint64_t first_bit;
     bool done;
 } acq_t;
 
-static void acq_cb(void *ctx, const link_rx_event_t *ev) {
+static void acq_cb(void *ctx, const alink_rx_event_t *ev) {
     acq_t *a = ctx;
-    if (a->done || ev->type != LINK_RX_EV_FRAME || ev->flags) return;
-    const link_rx_t *rx = a->rx;
+    if (a->done || ev->type != ALINK_RX_EV_FRAME || ev->flags) return;
+    const alink_rx_t *rx = a->rx;
     // A RATE in flight: wait until it has happened, the layout is then plain.
     if (rx->apply_pending) return;
     uint64_t at = rx->p - 10u - rx->base;   // this frame's comma, still in the buffer
     uint16_t sym = 0;
     for (unsigned i = 0; i < 10u; i++, at++)
         sym = (uint16_t)((sym << 1) | ((rx->buf[at >> 5] >> (31u - (unsigned)(at & 31u))) & 1u));
-    if (!link_sym_is_comma(sym)) return;
+    if (!alink_sym_is_comma(sym)) return;
     snd_fo_t *f = a->f;
     f->pos = a->first_bit + rx->p - 10u;
     f->frame = ev->frame;
@@ -66,16 +66,16 @@ static void acq_cb(void *ctx, const link_rx_event_t *ev) {
     f->channels = ev->channels;
     f->sf = rx->sf;
     f->sf_valid = true;
-    link_sf_pack(&rx->sf, f->last_sf);
+    alink_sf_pack(&rx->sf, f->last_sf);
     a->done = true;
 }
 
-bool snd_fo_acquire(snd_fo_t *f, const uint32_t *words, uint64_t first_bit, uint32_t nbits, link_rx_t *rx) {
+bool snd_fo_acquire(snd_fo_t *f, const uint32_t *words, uint64_t first_bit, uint32_t nbits, alink_rx_t *rx) {
     acq_t a = { .f = f, .rx = rx, .first_bit = first_bit, .done = false };
-    link_rx_init(rx, f->in_cls, 0x01, acq_cb, &a);
+    alink_rx_init(rx, f->in_cls, 0x01, acq_cb, &a);
     for (uint32_t at = 0; at < nbits && !a.done; at += 1024u) {
         uint32_t n = nbits - at < 1024u ? nbits - at : 1024u;
-        link_rx_push(rx, words + at / 32u, n);
+        alink_rx_push(rx, words + at / 32u, n);
     }
     if (!a.done) return false;
     f->state = SND_FO_LOCKED;
@@ -86,7 +86,7 @@ bool snd_fo_acquire(snd_fo_t *f, const uint32_t *words, uint64_t first_bit, uint
     f->st.lock_count++;
     // The superframe in progress started before this frame: its bytes are
     // incomplete until the next boundary, which is not an error.
-    f->sf_skip = f->frame % LINK_SF_LEN != 0;
+    f->sf_skip = f->frame % ALINK_SF_LEN != 0;
     return true;
 }
 
@@ -97,7 +97,7 @@ bool snd_fo_project(snd_fo_t *f, uint64_t from) {
         f->frame++;
     }
     f->sf_good = 0;
-    f->sf_skip = f->frame % LINK_SF_LEN != 0;
+    f->sf_skip = f->frame % ALINK_SF_LEN != 0;
     return true;
 }
 
@@ -113,7 +113,7 @@ void snd_fo_start_output(snd_fo_t *f) {
 // One frame
 // ---------------------------------------------------------------------------
 
-#define BANKS_MAX LINK_MAX_BANKS
+#define BANKS_MAX ALINK_MAX_BANKS
 
 static void lose(snd_fo_t *f) {
     f->state = SND_FO_SEARCH;
@@ -187,11 +187,11 @@ unsigned snd_fo_frame(snd_fo_t *f, const snd_ring_t *r, snd_sink_t *s, snd_log_t
     // Comma: in place, else 1 or 2 bits off (a slip), else a flywheel frame.
     uint64_t p = f->pos;
     uint32_t po = (uint32_t)(p - base);
-    if (!link_sym_is_comma((uint16_t)(fw_bits32(fw, po) >> 22))) {
+    if (!alink_sym_is_comma((uint16_t)(fw_bits32(fw, po) >> 22))) {
         static const int8_t off[4] = { -1, 1, -2, 2 };
         int found = 0;
         for (unsigned i = 0; i < 4 && !found; i++)
-            if (link_sym_is_comma((uint16_t)(fw_bits32(fw, po + (uint32_t)(int32_t)off[i]) >> 22)))
+            if (alink_sym_is_comma((uint16_t)(fw_bits32(fw, po + (uint32_t)(int32_t)off[i]) >> 22)))
                 found = off[i];
         if (found) {
             p += (uint64_t)(int64_t)found;
@@ -218,7 +218,7 @@ unsigned snd_fo_frame(snd_fo_t *f, const snd_ring_t *r, snd_sink_t *s, snd_log_t
         f->st.counter_errors++;
     }
     if (res & (SND_FO_R_COMMA | SND_FO_R_HEAD | SND_FO_R_COUNTER)) {
-        if (++f->fails >= LINK_RX_FAIL_LIMIT) {
+        if (++f->fails >= ALINK_RX_FAIL_LIMIT) {
             lose(f);
             return res | SND_FO_R_LOSS;
         }
@@ -227,7 +227,7 @@ unsigned snd_fo_frame(snd_fo_t *f, const snd_ring_t *r, snd_sink_t *s, snd_log_t
     }
     f->st.frames++;
 
-    unsigned k = (unsigned)(f->frame % LINK_SF_LEN);
+    unsigned k = (unsigned)(f->frame % ALINK_SF_LEN);
     if (k == 0) {
         f->sf_good = 0;
         f->sf_skip = false;
@@ -238,13 +238,13 @@ unsigned snd_fo_frame(snd_fo_t *f, const snd_ring_t *r, snd_sink_t *s, snd_log_t
     }
 
     // Banks: data bytes and their CRC bytes as received.
-    unsigned c = f->channels, nb = link_bank_count(c);
-    uint8_t bytes[3u * LINK_MAX_CHANNELS + 2u * BANKS_MAX];
+    unsigned c = f->channels, nb = alink_bank_count(c);
+    uint8_t bytes[3u * ALINK_MAX_CHANNELS + 2u * BANKS_MAX];
     uint8_t bad[BANKS_MAX];
     uint32_t q = po + 40u;
     unsigned o = 0;
     for (unsigned b = 0; b < nb; b++) {
-        unsigned n = 3u * link_bank_channels(c, b) + 2u, start = o;
+        unsigned n = 3u * alink_bank_channels(c, b) + 2u, start = o;
         bad[b] = 0;
         for (unsigned i = 0; i < n;) {
             uint32_t v = fw_bits32(fw, q);
@@ -273,23 +273,23 @@ unsigned snd_fo_frame(snd_fo_t *f, const snd_ring_t *r, snd_sink_t *s, snd_log_t
     }
 
     // Superframe completion.
-    if (k == LINK_SF_LEN - 1u && !f->sf_skip) {
-        int err = LINK_RX_SF_INCOMPLETE;
-        link_sf_t v;
+    if (k == ALINK_SF_LEN - 1u && !f->sf_skip) {
+        int err = ALINK_RX_SF_INCOMPLETE;
+        alink_sf_t v;
         if (f->sf_good == 0xFFFFFFFFu) {
-            err = link_sf_unpack(f->sf_bytes, &v);
-            if (err == LINK_SF_OK && v.cls != f->in_cls) err = LINK_RX_SF_CLASS;
-            if (err == LINK_SF_OK && (v.rate != f->rate || v.channels != f->channels)) err = LINK_SF_ERR_LAYOUT;
+            err = alink_sf_unpack(f->sf_bytes, &v);
+            if (err == ALINK_SF_OK && v.cls != f->in_cls) err = ALINK_RX_SF_CLASS;
+            if (err == ALINK_SF_OK && (v.rate != f->rate || v.channels != f->channels)) err = ALINK_SF_ERR_LAYOUT;
         }
-        if (err == LINK_SF_OK) {
-            if (v.frame != (f->frame & ~(uint64_t)(LINK_SF_LEN - 1u))) {
+        if (err == ALINK_SF_OK) {
+            if (v.frame != (f->frame & ~(uint64_t)(ALINK_SF_LEN - 1u))) {
                 f->st.counter_errors++;
-                f->frame = v.frame + (LINK_SF_LEN - 1u);    // a valid superframe corrects F
+                f->frame = v.frame + (ALINK_SF_LEN - 1u);   // a valid superframe corrects F
             }
             f->sf = v;
             f->sf_valid = true;
-            memcpy(f->last_sf, f->sf_bytes, LINK_SF_LEN);
-            f->rate_pending = v.apply_op == LINK_OP_RATE && v.apply_frame > f->frame;
+            memcpy(f->last_sf, f->sf_bytes, ALINK_SF_LEN);
+            f->rate_pending = v.apply_op == ALINK_OP_RATE && v.apply_frame > f->frame;
             if (f->rate_pending) {
                 f->rate_at = v.apply_frame;
                 f->rate_new = v.apply_arg;
@@ -304,9 +304,9 @@ unsigned snd_fo_frame(snd_fo_t *f, const snd_ring_t *r, snd_sink_t *s, snd_log_t
 
     // Re-send.
     if (f->out_on) {
-        unsigned osym = link_frame_symbols(f->out_cls, f->rate, f->frame);
+        unsigned osym = alink_frame_symbols(f->out_cls, f->rate, f->frame);
         if (log) snd_log_push(log, f->frame, snd_sink_bits(s));
-        if (link_layout_symbols(c) > osym) {
+        if (alink_layout_symbols(c) > osym) {
             f->out_unfit++;
             snd_put_idles(s, 10u * osym);
         } else {
@@ -326,7 +326,7 @@ unsigned snd_fo_frame(snd_fo_t *f, const snd_ring_t *r, snd_sink_t *s, snd_log_t
             }
             for (; i < o; i++) PUT(ENC(bytes[i]), 10);
             SND_W_END(s);
-            snd_put_idles(s, 10u * (osym - link_layout_symbols(c)));
+            snd_put_idles(s, 10u * (osym - alink_layout_symbols(c)));
             f->out_rd = rd;
             f->out_frames++;
         }

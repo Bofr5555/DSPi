@@ -1,0 +1,44 @@
+; alink_rx_5.pio; DSPi audio link NRZ receiver, class L3, 61.44 MBd (SYS2 2.6)
+;
+; 5 sys cycles per line bit at clock divider 1.0. Same contract as
+; alink_rx_20.pio (one emitted level per line bit, re-anchor on every edge,
+; constant emits), but unrolled so the line is polled on every cycle except
+; the emit: there is no room for a counter loop in 5 cycles.
+;
+; Bit grid, cycles relative to an emit (both paths):
+;   0 emit | 1, 2, 3, 4 poll | 5 emit
+; The poll at 4 decides the bit emitted at 5 (the effective sampling
+; instant); nominal edges sit at +1.5, between the polls at 1 and 2:
+; re-phase quantisation 1 cycle (3.3 ns), edge window +-2 cycles (+-6.5 ns).
+; A rise takes `jmp pin` + hi_entry, a fall the not-taken `jmp pin` + its
+; exit jump; both carry ENTRY_DELAY 1 and reach the next emit 3 cycles after
+; the poll that saw the edge. The trim range is +-1.
+;
+; Setup: as alink_rx_20.pio. DMA drains one word per 160 cycles.
+
+.program alink_rx_5
+.define ENTRY_DELAY 1
+
+.wrap_target
+public lo_emit:                 ; line LOW: emit 0, poll 4 times for a rise
+    in null, 1
+    jmp pin hi_entry
+    jmp pin hi_entry
+    jmp pin hi_entry
+    jmp pin hi_entry
+.wrap
+public hi_entry:
+    jmp hi_emit [ENTRY_DELAY]   ; rose at the previous cycle
+public hi_emit:                 ; line HIGH: emit 1, poll 4 times for a fall
+    in osr, 1
+    jmp pin hi_p2
+    jmp lo_emit [ENTRY_DELAY]   ; fell
+hi_p2:
+    jmp pin hi_p3
+    jmp lo_emit [ENTRY_DELAY]
+hi_p3:
+    jmp pin hi_p4
+    jmp lo_emit [ENTRY_DELAY]
+hi_p4:
+    jmp pin hi_emit
+    jmp lo_emit [ENTRY_DELAY]

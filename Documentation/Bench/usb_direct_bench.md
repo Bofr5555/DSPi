@@ -18,7 +18,7 @@ RP2040 (section 5).
 | Host | the PC (any xHCI) |
 | Scope | two channels, 100 MHz or more, for E0 |
 | Audio interface | two line inputs on one clock, 48 kHz 24-bit, for E2/E3 |
-| Tools | `tools/midi_ctrl/run.sh` (both images have the USB MIDI control channel, so each unit is addressed by its own rawmidi node), `tools/link/run.sh skew_xcorr.py`, `tools/alink_usb/alink_usb_status.py` (standard library; run with `python3 -I`) |
+| Tools | `tools/midi_ctrl/run.sh` (both images have the USB MIDI control channel, so each unit is addressed by its own rawmidi node), `tools/alink/run.sh skew_xcorr.py`, `tools/alink_usb/alink_usb_status.py` (standard library; run with `python3 -I`) |
 
 **Safety.** No audio is needed for E0. For E2/E3: CLICK is a one-sample impulse at **-20 dBFS after** the volume
 control; a muted unit plays none (it reports `refused`), so keep any programme quiet by its level, not by muting.
@@ -75,8 +75,8 @@ The interrupt jitter does not enter the phase lock: the RP2350 takes the SOF ins
 3. PipeWire combine sink to both units (`pactl load-module module-combine-sink sink_name=both slaves=<A>,<B>`), pink
    noise through the guarded player at 80 % or less, record A left and B right (`arecord -D hw:<card> -f S24_3LE -c 2
    -r 48000 e2.wav`) for 1 hour.
-4. `tools/link/run.sh skew_xcorr.py /work/rec/e2.wav --calib /work/rec/calib.wav` (calibration as in
-   `link_phase_bench.md` section 3).
+4. `tools/alink/run.sh skew_xcorr.py /work/rec/e2.wav --calib /work/rec/calib.wav` (calibration as in
+   `alink_phase_bench.md` section 3).
 
 Expected: the skew is **constant within the session** (per-minute values within a few us: both run at the host's rate,
 so nothing drifts and PipeWire's combine sink stops resampling) but **arbitrary**: anything up to milliseconds, and
@@ -108,7 +108,7 @@ M $A get 0x00 --wvalue 0x8006                    # 00 07 00 00 <S> ...: CLICK ap
 ```
 
 (Output 0 is the first output; on a K340 pick the output of the DAC test point you record.) Repeat 20 times (one click
-per run), then `tools/link/run.sh skew_xcorr.py /work/rec/clicks.wav --mode click --calib /work/rec/calib.wav`.
+per run), then `tools/alink/run.sh skew_xcorr.py /work/rec/clicks.wav --mode click --calib /work/rec/calib.wav`.
 
 | Measurement | Expected | Pass |
 |---|---|---|
