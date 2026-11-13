@@ -537,7 +537,8 @@ A unit whose input source is USB can run as an alink USB-direct unit: it locks i
 
 - Every device on one host sees the same 1 ms SOF with the same 11-bit frame number (the *bus frame*). The unit counts SOFs into a 32-bit frame count **N** with `N mod 2048 = bus frame`. Units started at different times count from different origins, always by multiples of 2048.
 - The **sample index** is `S = spf * N + k`, `spf` = samples per frame (48 at 48 kHz, 96 at 96 kHz), k = 0..spf-1. The host's packet in frame N carries `S = spf*N .. spf*N + spf - 1`. The sample *arriving now* is `F_arr = spf * (N + time since the SOF of N / 1 ms)`. Equal S means the same bus instant on every unit; only the bus frame (N mod 2048) is comparable between units without a read.
-- The SOF instant is taken from the RP2350's `SOF_TIMESTAMP_RAW - SOF_TIMESTAMP_LAST` (the PHY's 21 ns, read against the 1 us timer) or from the RP2040's interrupt entry (about 1-4 us). Each OUT packet is stamped with its frame in the interrupt that completes it.
+- The SOF instant is taken from the RP2350's `SOF_TIMESTAMP_RAW - SOF_TIMESTAMP_LAST` (the PHY's 21 ns, read against the 1 us timer) or from the RP2040's interrupt entry (about 1-4 us). Each OUT packet is stamped with its frame in the interrupt that completes it: a completion seen less than 100 us after the latest SOF belongs to the frame before. **Limitation, both chips:** the PHY timestamps the SOF, not the packet, so a completion whose interrupt is held off more than 100 us past the next SOF (flash writes, long interrupt-off sections) is stamped one frame late; the packet is then treated as late (its samples dropped, faded) and the frame before it as lost. Such hold-offs come with operations that re-anchor anyway; in steady state it is rare (the review's simulation: at most a few per 400 hold-offs of 400 us).
+- A SOF whose frame count and clock disagree (a SOF stall with the frame number frozen, a small frame jump: more than 100 us off on the RP2350, 0.5 ms on the RP2040) is a discontinuity, handled as `SOF_LOST`: the timeline ends and the unit anchors again once the rate estimate is back.
 - 44.1 kHz has no whole number of samples per frame: rate lock only (mode 1 behaviour).
 - N is 32 bits: it wraps after 49.7 days, which costs one re-anchor.
 
@@ -555,9 +556,9 @@ IN / OUT, 8 bytes.
 | 7 | 1 | `state` | *IN only*: `EXT_ALINK_USB_STATUS.state` | |
 
 - **Refused (STALL / `ERROR`):** `mode` above 2, undefined flag bits, `d` 0, a nonzero reserved byte, or `mode` 2 with `d` outside [`d_min`, `d_max`] (`EXT_ALINK_USB_STATUS` 26-29) at the time of the write.
-- **Limits.** `d_min = 1.5 * spf + block_cap + 32`, `d_max = 448 - block_cap`, with `block_cap` the output latency option's block cap. Every option USB can run (2 ms and up; the 0.67 and 1 ms options are not offered to USB) has a block cap of 49 at 48 kHz and 97 at 96 kHz, so the limits are **153..399 at 48 kHz** and **273..351 at 96 kHz** whatever the option. The default 192 (4.0 ms at 48 kHz) is valid at 48 kHz only; a 96 kHz system writes 273..351.
+- **Limits.** `d_min = 2.2 * spf + block_cap + 16` (spf * 2 + spf / 5 in integers), `d_max = 448 - block_cap`, with `block_cap` the output latency option's block cap. Every option USB can run (2 ms and up; the 0.67 and 1 ms options are not offered to USB) has a block cap of 49 at 48 kHz and 97 at 96 kHz, so the limits are **170..399 at 48 kHz** and **324..351 at 96 kHz** whatever the option. The default 192 (4.0 ms at 48 kHz) is valid at 48 kHz only; a 96 kHz system writes 324..351. (d_min holds one frame for the held packet, 1.2 frames of packet lateness and the block cap above a 16-sample floor.)
 - **Mode 1.** The unit measures the host's SOF rate against its crystal (2 s to the first estimate, then an 8-16 s window), pulls its soft VCXO to it (slew 6.7 ppm/s, so up to 45 s from 300 ppm; the asynchronous feedback keeps the fill meanwhile), then reports exactly nominal feedback (the host sends 48.000 samples per frame) and holds the ring fill with the VCXO. All units on one host then run at the same rate; their phase is whatever the streams started with.
-- **Mode 2.** Mode 1, then the anchor: the outputs mute, drain, prefill with silence and start when the arrival reaches D; the first measurement verifies within half a sample (whole-sample corrections, at most two, otherwise re-anchor), and the unit stays muted until then. From then on the outputs play the *timeline*: silence while no stream runs, and every packet placed by its S. A stream that stops and starts again, or a missing packet, never moves the timeline: constant latency across stream restarts, no re-anchor. The phase servo is the link's: `ppm = feed-forward + PI(e)`, `e = F_arr - (next_w - fill) - D`.
+- **Mode 2.** Mode 1, then the anchor: the outputs mute, drain, prefill with silence and start when the arrival reaches D; the first measurement verifies within half a sample (whole-sample corrections, at most two, otherwise re-anchor), and the unit stays muted until then. From then on the outputs play the *timeline*: silence while no stream runs, and every packet placed by its S. A stream that stops and starts again, or a missing packet, never moves the timeline: constant latency across stream restarts, no re-anchor. The newest packet is held back one frame before it is written, so that a lost packet is never a hard hole: the packet before the gap fades out over its own 1 ms, the silence of the gap follows, and the packet after it fades in over its 1 ms (both ramps on the input samples); each such gap counts in `gap_count` and sends `0xE3` `GAP`. A loss of more than about three frames is also muted for 20 ms and then fades in through the pipeline's 8 ms envelope. A stream's first packet fades in, its last (alt 0) fades out. With no stream the timeline runs on silence and the DSP keeps processing it in real time, so the idle CPU load and heat in mode 2 are those of playback. The phase servo is the link's: `ppm = feed-forward + PI(e)`, `e = F_arr - (next_w - fill) - D`.
 - **Host range.** A host whose SOF rate is more than **295 ppm** from the unit's crystal cannot be followed (the VCXO has 300 ppm); the unit reports state 6, parks its VCXO and keeps the stock asynchronous behaviour until the host comes back below 285 ppm.
 - **Changes.** A write that changes `mode` or `d` while the timeline runs re-anchors (about D + 20 ms of silence, `0xE3` reason `REANCHOR`). Mode 0 parks the VCXO and cancels pending ops (`0xE2` result `cancelled`). Rewriting the same values does nothing.
 
@@ -577,12 +578,12 @@ IN only, 64 bytes.
 | 8 | 4 | `vcxo_ppm` | f32, the soft VCXO's correction |
 | 12 | 4 | `phase_error` | f32, e in samples; 0 unless `phase_state` is 2 or 3 |
 | 16 | 8 | `sample` | u64, S arriving now (2.9.1); 0 without a time base |
-| 24 | 2 | `bus_frame` | the bus frame of the latest SOF (bits 0-10) |
+| 24 | 2 | `bus_frame` | the bus frame of `sample` (`(sample / spf) mod 2048`) |
 | 26 | 2 | `d_min` | 2.9.2 |
 | 28 | 2 | `d_max` | 2.9.2 |
 | 30 | 2 | `fill` | output ring fill of slot 0, samples |
 | 32 | 2 | `stream_first_bus_frame` | bus frame of the first packet of the current stream placed on the timeline; `0xFFFF` none (no stream, or not phase-locked) |
-| 34 | 2 | reserved | 0 |
+| 34 | 2 | `gap_count` | gaps since boot (u16, wraps): each one a faded hole of one or more missing packets on a playing stream (2.9.2) |
 | 36 | 4 | `stream_age_frames` | frames since that packet (`N_now - N_first`) |
 | 40 | 4 | `stream_shift` | i32 samples: silence the unit inserted for missing packets minus late samples it dropped, since that packet. The stream's content now plays `stream_shift` samples later than its first packet's placement implies |
 | 44 | 4 | `stream_samples` | stream samples placed since that packet |
@@ -591,7 +592,7 @@ IN only, 64 bytes.
 | 56 | 4 | `missed_samples` | silence inserted for missing packets while streaming, since boot |
 | 60 | 4 | `late_samples` | samples dropped because their packet came too late, since boot |
 
-**Start offsets (U6).** Two units of one host are phase-locked to the bus, but a host that opens their streams one after the other (ALSA, PipeWire) puts the same content into different frames. The hub reads `EXT_ALINK_USB_STATUS` of each unit after the streams start and computes, per unit, the bus frame its content began in: `first = (bus_frame - stream_age_frames) mod 2048`, unwrapped near the hub's own reading of `bus_frame` (the streams started less than 1 s apart). Unit A's content then plays `((first_B - first_A) mod 2048, as a signed value) * spf + (shift_B - shift_A)` samples earlier than unit B's; the hub delays the earlier units by that many samples (`REQ_SET_DELAY` or `EXT_APPLY_AT_FRAME` `OUT_DELAY`). A custom sender that puts sample S of the programme into frame S / spf on every unit needs no correction.
+**Start offsets (U6).** The figures describe the stream as placed on the current timeline: a unit that re-anchors while its stream runs reports the first packet placed *after* the anchor, not the stream's first content. So both streams must have started while their units were phase-locked; after any re-anchor (`reanchors` or `anchors` changed), restart the streams before reading these fields. Two units of one host are phase-locked to the bus, but a host that opens their streams one after the other (ALSA, PipeWire) puts the same content into different frames. The hub reads `EXT_ALINK_USB_STATUS` of each unit after the streams start and computes, per unit, the bus frame its content began in: `first = (bus_frame - stream_age_frames) mod 2048`, unwrapped near the hub's own reading of `bus_frame` (the streams started less than 1 s apart). Unit A's content then plays `((first_B - first_A) mod 2048, as a signed value) * spf + (shift_B - shift_A)` samples earlier than unit B's; the hub delays the earlier units by that many samples (`REQ_SET_DELAY` or `EXT_APPLY_AT_FRAME` `OUT_DELAY`). A custom sender that puts sample S of the programme into frame S / spf on every unit needs no correction.
 
 #### 2.9.4 `EXT_FRAME_COUNTER` (0x8005) and `EXT_APPLY_AT_FRAME` (0x8006) on the USB time base
 
@@ -618,10 +619,11 @@ The USB time base answers when the input source is USB and `EXT_ALINK_USB.mode` 
 | 1 | USB sample index S, as `EXT_FRAME_COUNTER` time base 1 and `EXT_ALINK_USB_STATUS.sample` report it |
 | 2 | a bus frame: bits 0-10 the bus frame number, bits 16-23 the sample in that frame (0..spf-1), every other bit 0. The unit takes the next occurrence of that frame; a frame within the last 64 frames is past (the op runs at once and reports `late`). So the same 8 bytes address the same instant on every unit of the host, with no read first, for up to 1.98 s ahead |
 
+- **Late.** An op runs when the timeline reaches its sample. If that sample has already been written to the output rings (S below the next sample to write, which is about one frame behind the arrival because of the held packet), it runs at once on the next samples written and reports `late` (1); this includes a bus frame that maps to the past 64 frames. An op for a sample of the held packet is not late.
 - Ops, arguments, the 4-deep queue, CLICK at -20 dBFS and never on a muted unit (here: `REQ_SET_USER_MUTE` or the host's UAC mute), `CANCEL_ALL`, and the results are those of 2.8.7. An op acts on the sample S as it enters the pipeline, and every phase-locked unit with the same D outputs that sample at the same instant, D samples after it arrived. Ops also act on the silence of the timeline (no stream needed: a CLICK measures the units' skew without any programme).
 - **Refused (STALL / `ERROR`):** `time_base` 1 or 2 unless the input source is USB and `EXT_ALINK_USB_STATUS.phase_state` is 2 or 3 (phase-locked); a bad bus-frame form (bits outside 0-10 and 16-23, or a sample offset of spf or more); `time_base` above 2; everything 2.8.7 refuses. `CANCEL_ALL` with `time_base` 1 or 2 cancels the USB queue in any state.
 - **`CLICK`** is refused at apply time (result 3) on the RP2040, whose fixed-point pipeline has no click injection, and on the PDM sub output.
-- **`SYNC_PULSE`** is refused at apply time (result 3) except on bench builds with `-DDSPI_ALINK_USB_GPIO=<pin>`, where the pin goes high for one frame at the SOF of the op's frame (frame = S / spf; the pin also pulses at every SOF whose frame number is a multiple of 128). Such builds are for the bench only.
+- **`SYNC_PULSE`** is refused at apply time (result 3) except on bench builds (one pending pulse: a later SYNC_PULSE moves the GPIO's frame) with `-DDSPI_ALINK_USB_GPIO=<pin>`, where the pin goes high for one frame at the SOF of the op's frame (frame = S / spf; the pin also pulses at every SOF whose frame number is a multiple of 128). Such builds are for the bench only.
 - **IN** reads the USB queue's `pending`, `last_op`, `last_result`, `last_frame` (S) while the USB time base answers (as `EXT_FRAME_COUNTER`), the link's otherwise.
 - **Event `0xE2`** for a USB op carries the target in bus form in bytes 8-11: bus frame in bits 0-10, sample in bits 16-23 (from S: `bus = (S / spf) mod 2048`, `k = S mod spf`).
 
@@ -636,7 +638,7 @@ Announced by `EXT_NOTIFY_FEATURES` bit 4 `NOTIFY_FEAT_ALINK_USB`; sent on every 
 | 0-3 | 4 | `2, 0xE3, 0, seq` |
 | 4 | 1 | `state` (as `EXT_ALINK_USB_STATUS.state`) |
 | 5 | 1 | `phase_state` |
-| 6 | 1 | `reason`: 0 `NONE`, 1 `LOCKED` (rate lock reached in mode 1, or phase-locked and playing in mode 2), 2 `HOST_RANGE` (state 6 entered, or the host back in range), 3 `SOF_LOST` (no SOF for 50 ms, or a gap of over 1 s: the timeline ends, it re-anchors when the bus returns), 4 `REANCHOR`, 5 `GAP` (packets missing while streaming: silence on the timeline, muted 20 ms, then the stream fades back in), 6 `DISABLED` (mode 0 written, or the source left USB), 7 `CONFIG` (mode 2 cannot phase-lock: 44.1 kHz or D outside the limits; it runs rate-locked) |
+| 6 | 1 | `reason`: 0 `NONE`, 1 `LOCKED` (rate lock reached in mode 1, or phase-locked and playing in mode 2), 2 `HOST_RANGE` (state 6 entered, or the host back in range), 3 `SOF_LOST` (no SOF for 50 ms, or a gap of over 1 s: the timeline ends, it re-anchors when the bus returns), 4 `REANCHOR`, 5 `GAP` (one or more packets missing while streaming: the packet before fades out over 1 ms, silence on the timeline, the packet after fades in over 1 ms; a loss of more than about three frames is also muted 20 ms), 6 `DISABLED` (mode 0 written, or the source left USB), 7 `CONFIG` (mode 2 cannot phase-lock: 44.1 kHz or D outside the limits; it runs rate-locked) |
 | 7 | 1 | reserved, 0 |
 | 8 | 4 | S now, low 32 bits |
 
@@ -647,7 +649,7 @@ Example: `02 e3 00 07 05 02 01 00 00 b4 c4 04`: phase-locked, reason `LOCKED`, S
 #### 2.9.6 Host recipe
 
 1. `EXT_LIST`: `0x8010` present. Read `EXT_NOTIFY_FEATURES` (decode `0xE3` only with bit 4, `0xE2` only with bit 3).
-2. Input source USB (`REQ_SET_INPUT_SOURCE` 0), stream at 48 kHz (or 96 kHz with D 273..351).
+2. Input source USB (`REQ_SET_INPUT_SOURCE` 0), stream at 48 kHz (or 96 kHz with D 324..351).
 3. Write `EXT_ALINK_USB` `02 01 <D LE> 00 00 00 00` on every unit, the same D; `REQ_SAVE_OUTPUT_CONFIG` to persist.
 4. Wait for state 5 (`0xE3` reason `LOCKED`, or poll `EXT_ALINK_USB_STATUS`): about 3-12 s after enumeration (pull-in from the host's offset at 6.7 ppm/s, then about D + 20 ms of muted anchoring). A unit that was phase-locked before a stream starts plays the stream at once.
 5. After every stream start read each unit's `stream_first_bus_frame`, `stream_age_frames` and `stream_shift` and equalise (2.9.3), unless the sender schedules the frames itself.
@@ -685,6 +687,8 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 **Adding a sub-command:** pick the next free ID (`0x0001`-`0x7FFF` only after agreeing it with Weeb Labs; a link sub-command takes the next free ID from `0x800B`, an alink USB-direct one from `0x8012`). Add it to `config.h`, to `ext_ids[]` in ascending order and to `ext_set_len()` if it has an OUT form, then add cases to `ext_handle_set()` / `ext_handle_get()` and a row to section 2.
 
 ## 5. History
+
+- 2026-11-13: fixups after review usb1: lost packets fade out / in (the newest packet is held a frame), `EXT_ALINK_USB_STATUS` 34 `gap_count`, `d_min` 170 / 324, SOF discontinuities end the timeline, `bus_frame` derived from `sample`, the U6 restart condition and the "late" rule for USB ops.
 
 - 2026-11-13: the alink USB-direct block (WP USB1, 2.9): `0x8010` `EXT_ALINK_USB`, `0x8011` `EXT_ALINK_USB_STATUS`, event `0xE3` and `EXT_NOTIFY_FEATURES` bit 4; `EXT_FRAME_COUNTER` grows to 20 bytes with `time_base` and `bus_frame`; `EXT_APPLY_AT_FRAME` byte 12 selects the time base; `0x8005`/`0x8006` and bit 3 also on builds without the link. Range `0x8010`-`0x801F` assigned.
 

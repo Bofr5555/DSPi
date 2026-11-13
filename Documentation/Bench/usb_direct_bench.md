@@ -80,14 +80,14 @@ The interrupt jitter does not enter the phase lock: the RP2350 takes the SOF ins
 
 Expected: the skew is **constant within the session** (per-minute values within a few us: both run at the host's rate,
 so nothing drifts and PipeWire's combine sink stops resampling) but **arbitrary**: anything up to milliseconds, and
-different after every restart of the streams. That is the contrast for E3 (the simulation's mode-1 case: 59.4 and 58.2
+different after every restart of the streams. That is the contrast for E3 (the simulation's mode-1 case: 61.1 and 62.1
 samples of latency on the two units).
 
 ## 4. E3: phase lock (mode 2), CLICK, restarts, start offsets
 
 ### 4.1 Lock
 
-1. Latency option: any; USB runs the 2 ms option or longer, where D may be 153..399 at 48 kHz.
+1. Latency option: any; USB runs the 2 ms option or longer, where D may be 170..399 at 48 kHz (324..351 at 96 kHz).
 2. Both units: `M $U set 0x00 --wvalue 0x8010 --payload 0201c00000000000` (mode 2, auto re-anchor, **D 192** = 4 ms).
    `M $U set 0x52` (REQ_SAVE_OUTPUT_CONFIG) persists it.
 3. Wait for `state phase-locked`, `phase locked`, `phase error` within +-0.05 sample (`ST $A a; ST $B b`): pull-in as
@@ -112,7 +112,7 @@ per run), then `tools/link/run.sh skew_xcorr.py /work/rec/clicks.wav --mode clic
 
 | Measurement | Expected | Pass |
 |---|---|---|
-| CLICK skew, mean | within +-1 us between two RP2350 units on one hub (simulation 0.009 sample = 0.2 us; the bench adds the E0 mean and the DACs' group-delay difference); about 3 us RP2350 vs RP2040 | under 20.8 us; target under 10 us |
+| CLICK skew, mean | within +-1 us between two RP2350 units on one hub (simulation 0.026 sample = 0.5 us; the bench adds the E0 mean and the DACs' group-delay difference); about 3 us RP2350 vs RP2040 | under 20.8 us; target under 10 us |
 | CLICK skew, spread over 20 clicks | under 0.1 sample | half a sample |
 | `ST`: phase error | +-0.05 sample | |
 
@@ -138,10 +138,26 @@ reads 0 +- 1 sample"). To provoke it, start the player on A, then add B to the c
 
 ### 4.5 Gaps
 
-`missed` and `late` in `ST` count samples of missing packets (silence placed on the timeline, the stream muted 20 ms and
-faded back in) and late samples dropped. On a quiet PC both stay 0 or grow very slowly; a burst says the host or the
-unit's main loop skipped a frame (the unit re-arms its OUT endpoint from the main loop, so a main-loop pass over 1 ms
-loses the next packet). The phase is not affected.
+`missed` and `late` in `ST` count samples of missing packets (silence placed on the timeline) and late samples dropped;
+`gaps` counts the holes. A lost packet is not a hard hole: the packet before it fades out over 1 ms and the one after it
+fades in over 1 ms (the unit holds the newest packet back one frame to be able to do that); a loss of more than about three
+frames is also muted for 20 ms. Each gap sends `0xE3` reason 5 (`GAP`), at most one event per 250 ms. On a quiet PC all
+three stay 0 or grow very slowly; a burst says the host or the unit's main loop skipped a frame (the unit re-arms its OUT
+endpoint from the main loop, so a main-loop pass over 1 ms loses the next packet). The phase is not affected.
+
+### 4.6 One hour of `missed` / `late` (before mode 2 goes near a listener)
+
+The loss rate decides whether mode 2 is usable: a faded 1 ms dip is inaudible once an hour and objectionable several
+times a second. Measure it on the real host with the real programme path, with no listener:
+
+1. Both units in mode 2, phase-locked, streaming programme through the guarded player at 80 % or less (or a silent
+   stream: the counters do not need sound), the Console or uconsole connected as it will be in use.
+2. At the start: `ST $A a0; ST $B b0`. Every 10 minutes for an hour: `ST $A a$i; ST $B b$i` (i = 1..6), noting
+   `missed`, `late`, `gaps`, `anchors`, `re-anchors`.
+3. Expected on a quiet PC: `gaps` 0 to a few per hour, `late` 0, `anchors` unchanged. More than one gap a minute: find
+   the cause before using mode 2 (host load, USB hub, the unit's main loop: a long command, a preset save); every preset
+   save or flash write re-anchors (about 0.25 s muted), by design.
+4. Note the worst minute; it decides whether D 192 (3-4 ms of main-loop stall budget) is enough for the installation.
 
 ## 5. One K340 alone
 
@@ -174,21 +190,32 @@ written):
 ## 7. What the simulation predicts
 
 `tools/alink_usb_sim/run.sh` (two units, real engine and phase code; RP2350 SOF timestamps unless noted; host +35 ppm,
-units +12 / -18 ppm, B booted 3.7 s after A, D 192, 48 kHz):
+units +12 / -18 ppm, B booted 3.7 s after A, D 192, 48 kHz). Every scenario also checks that no hard edge (audio cut to
+silence or silence to audio without a fade or the pipeline's mute) reaches a playing stream: 0 in all of them. The model
+loses about 0.4 % of packets by itself (1 % of its main-loop passes take 900 us and miss the re-arm), so every scenario
+has about 2-3 faded gaps per second; on the bench 4.6 measures the real rate.
 
 | Scenario | max skew, last 10 s | latency A / B (samples) | notes |
 |---|---|---|---|
-| two RP2350 | 0.026 sample (0.53 us) | 191.81 / 191.81 | locked 5.1 s / 9.6 s after boot |
-| two RP2040 (ISR time, 2 % late entries) | 0.036 (0.76 us) | 191.94 / 191.94 | |
-| RP2350 + RP2040 | 0.14 (3.0 us) | 191.81 / 191.93 | the RP2040's interrupt entry, a fixed offset |
-| host +100 / -100 ppm | 0.025 / 0.033 | 191.82 / 191.81 | locked 15-19 s after boot (VCXO slew) |
-| host +-300, +-400 ppm | | | rejected (state 6), VCXO parked |
-| 0.5 % of packets skipped | 0.040 | 191.82 / 191.83 | silence in place, no re-anchor |
-| stream on B stopped 2 s and restarted | 0.022 | 191.82 / 191.83 | no re-anchor |
-| SOF gone 120 ms, frame number jumps | 0.013 | 191.82 / 191.82 | one new anchor each |
-| CLICK on one bus frame | | | 0.009 sample apart |
-| 96 kHz, D 288 | 0.036 | 287.8 / 287.8 | |
-| mode 1 (contrast) | | 59.4 / 58.2 | arbitrary, per start |
+| S1 two RP2350 | 0.008 sample (0.17 us) | 191.8 / 191.8 | locked 5.1 s / 9.6 s after boot |
+| S2 two RP2040 (ISR time, 2 % late entries) | 0.033 (0.68 us) | 191.9 / 191.9 | |
+| S3 RP2350 + RP2040 | 0.14 (3.0 us) | 191.8 / 191.9 | the RP2040's interrupt entry, a fixed offset |
+| S4 host +100 / -100 ppm | 0.022 / 0.044 | 191.8 | locked 15-19 s after boot (VCXO slew) |
+| S5 / P3 host +-296, +-300, +-400 ppm | | | rejected (state 6), VCXO parked; +-294 ppm locks |
+| S6 / P1 0.5 % of packets skipped by the host | 0.038 | 191.8 / 191.8 | faded gaps, no re-anchor, no hard edge |
+| P2 / P2b 5 or 2 packets lost in a row | 0.029 / 0.026 | 191.8 | faded (5: also muted 20 ms), no re-anchor |
+| S7 stream on B stopped 2 s and restarted | 0.019 | 191.8 / 191.8 | no re-anchor; the stop fades out |
+| S8 SOF gone 120 ms, frame number jumps | 0.017 | 191.8 / 191.8 | one new anchor each |
+| P5 suspend 3 s / P6 port reset 15 ms (counter runs) | 0.021 / 0.019 | 191.8 | P5 one new anchor; P6 timeline kept |
+| P6b / P6c SOF stall 15 ms / 1 ms, frame number frozen | 0.030 / 0.030 | 191.8 | one new anchor each, no loop, no false host range |
+| P4 host 35 -> 300 -> 280 ppm | 0.026 | 191.8 | rejected in between, anchored again (3 / 2 anchors) |
+| P4b host step +25 ppm while locked | 0.013 | 191.6 | two re-anchors while the estimate follows |
+| P7 / P7b main-loop stall 10 / 100 ms on A | 0.020 / 0.029 | 191.8 | one re-anchor (the stall exceeds the ring fill at D 192) |
+| P8 / P8b / P8c interrupts masked 300-400 us | 0.013 / 0.070 / 0.013 | 191.8 | P8c: 4 of 38830 packets mis-stamped (the 100 us rule), faded |
+| P9 / P10 D 399 / D 170 | | 398.8 / 169.8 | |
+| S10 CLICK on one bus frame | | | 0.026 sample apart |
+| S12 96 kHz, D 336 | 0.025 | 335.8 / 335.8 | |
+| S11 mode 1 (contrast) | | 61.1 / 62.1 | arbitrary, per start |
 
 Latencies read about 0.2 sample short of D in the model (the output DMA's quarter-frame word in the fill reading), the
 same on every unit.

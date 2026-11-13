@@ -1312,7 +1312,7 @@ static bool uac1_apply_alt(uint8_t rhport, uint8_t alt) {
 #if DSPI_ALINK_USB
         // Phase mode keeps its timeline across streams: the new stream's
         // packets are placed by their frame, no pipeline reset (WP USB1).
-        alink_usb_stream(&alink_usb, true);
+        if (need_resync) alink_usb_stream(&alink_usb, true);   // not on a repeated SET_INTERFACE (review usb1 F7)
         if (need_resync && active_input_source == INPUT_SOURCE_USB && !alink_usb_engaged(&alink_usb)) {
 #else
         if (need_resync && active_input_source == INPUT_SOURCE_USB) {

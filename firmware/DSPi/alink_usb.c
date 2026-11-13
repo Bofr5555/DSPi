@@ -23,6 +23,7 @@
 #include "output_latency.h"
 #include "soft_vcxo.h"
 #include "usb_audio.h"
+#include "usb_audio_ring.h"   // USB_RING_MAX_PKT
 #include "audio_input.h"
 #include "pico/stdlib.h"
 
@@ -106,13 +107,46 @@ static void block_done(void) {
 #endif
 }
 
-void alink_usb_port_write_packet(const alink_usb_pkt_t *p, uint32_t off, uint32_t k) {
+// Input gain ramp on the decoded samples (review usb1 F1: fades around gaps).
+static void inputs_ramp(uint32_t k, float g0, float g1) {
+    if (g0 == 1.0f && g1 == 1.0f) return;
+    float step = k > 1u ? (g1 - g0) / (float)(k - 1u) : 0.0f;
+#if PICO_RP2350
+    float *ch[NUM_INPUT_CHANNELS] = { buf_l, buf_r };
+    for (int c = 0; c < NUM_INPUT_CHANNELS - NUM_STEREO_INPUTS; c++) ch[NUM_STEREO_INPUTS + c] = buf_in_ext[c];
+    for (int c = 0; c < NUM_INPUT_CHANNELS; c++)
+        for (uint32_t i = 0; i < k; i++) ch[c][i] *= g0 + step * (float)i;
+#else
+    for (uint32_t i = 0; i < k; i++) {
+        int32_t g = (int32_t)((g0 + step * (float)i) * 32768.0f);
+        buf_l[i] = (int32_t)(((int64_t)buf_l[i] * g) >> 15);
+        buf_r[i] = (int32_t)(((int64_t)buf_r[i] * g) >> 15);
+    }
+#endif
+}
+
+// The held packet's bytes (alink_usb_port_keep): .bss, one packet.
+static uint8_t keep_buf[USB_RING_MAX_PKT] __attribute__((aligned(4)));
+
+const void *alink_usb_port_keep(const alink_usb_pkt_t *p) {
+    uint16_t n = p->len <= sizeof(keep_buf) ? p->len : (uint16_t)sizeof(keep_buf);
+    memcpy(keep_buf, p->data, n);
+    return keep_buf;
+}
+
+void alink_usb_port_write_packet(const alink_usb_pkt_t *p, uint32_t off, uint32_t k, float g0, float g1) {
+    // A packet written in parts (an apply op splits it) is decoded once per
+    // part; only the first part counts in the USB stream bookkeeping (review usb1 F7).
+    extern volatile uint64_t total_samples_produced;
+    uint64_t produced = total_samples_produced;
     int32_t d = usb_audio_decode_packet((const uint8_t *)p->data, p->len);
+    if (off) total_samples_produced = produced;
     if (d <= 0) return;
     uint32_t n = (uint32_t)d;
     if (off >= n) return;
     if (k > n - off) k = n - off;
     if (off) inputs_shift(off, k);
+    inputs_ramp(k, g0, g1);
     process_input_block(k);
     block_done();
 }
@@ -212,6 +246,9 @@ void alink_usb_fw_init(void) {
     alink_usb_store(&alink_usb, s);           // keep values loaded from flash before init
     alink_usb_init(&alink_usb);
     alink_usb_load(&alink_usb, s);
+#if PICO_RP2350
+    alink_usb.exact = true;                 // SOF times from the PHY counter
+#endif
 #if defined(DSPI_ALINK_USB_GPIO)
     gpio_init(DSPI_ALINK_USB_GPIO);
     gpio_set_dir(DSPI_ALINK_USB_GPIO, GPIO_OUT);
