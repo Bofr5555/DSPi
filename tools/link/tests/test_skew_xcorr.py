@@ -64,6 +64,29 @@ class SkewXcorr(unittest.TestCase):
             write_wav(rec, rate, left, right)
             self.assertEqual(skew_xcorr.main([rec, "--every", "1", "--span", "0.25", "--max-lag", "8"]), 1)
 
+    def test_lk6_wav_clicks_minus_20_dbfs(self):
+        # Review lk6 F5: CLICK plays at -20 dBFS; a bench TX's vector payload
+        # adds DC.  The automatic threshold (half each channel's peak) finds
+        # the clicks, the skew is right to 0.02 sample.
+        rate, d = 48000, 0.3
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR_TESTS")) as td:
+            rec = os.path.join(td, "clicks.wav")
+            n = rate
+            left, right = [0.05] * n, [-0.04] * n
+            for c in range(1, 6):
+                p = c * 8000 + 0.25
+                for k in range(int(p) - 32, int(p) + 33):
+                    for x, q in ((left, p), (right, p + d)):
+                        u = k - q
+                        sv = 1.0 if u == 0 else math.sin(math.pi * u * 0.9) / (math.pi * u * 0.9)
+                        x[k] += 0.1 * sv * (0.5 + 0.5 * math.cos(math.pi * u / 33.0))
+            write_wav(rec, rate, left, right)
+            r, rows = skew_xcorr.measure(rec, "click", 60.0, 1.0, 8, 0.0)
+            self.assertEqual(len(rows), 5)
+            for _t, lag, _p in rows:
+                self.assertAlmostEqual(lag, d, delta=0.02)
+            self.assertEqual(skew_xcorr.main([rec, "--mode", "click", "--max-lag", "8"]), 0)
+
     def test_lk6_mono_refused(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR_TESTS")) as td:
             p = os.path.join(td, "mono.wav")

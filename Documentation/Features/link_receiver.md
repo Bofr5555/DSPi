@@ -87,15 +87,15 @@ The link's RAM-resident set is about 5.4 KB. `.data` against the budget of 10035
 
 | Build | `.data` after LK45F | after LK6 | Headroom |
 |---|---|---|---|
-| RP2350 default | 98776 | 99072 | 1280 |
-| RP2350 K340 (`DSPI_USB_MIDI`, 1.20 V) | 98896 | 99192 | 1160 |
-| RP2350 `DSPI_LINK_DECODE_CORE1` | 99256 | 99624 | 728 |
+| RP2350 default | 98776 | 99104 | 1248 |
+| RP2350 K340 (`DSPI_USB_MIDI`, 1.20 V) | 98896 | 99224 | 1128 |
+| RP2350 `DSPI_LINK_DECODE_CORE1` | 99256 | 99656 | 696 |
 | RP2350 `DSPI_LINK=OFF` | 93456 | 93480 | 6872 |
 
 The budget stays as it is (coordinator 2026-11-13). So later link work must fit about 1.5 KB of hot code on the
 default and K340 builds:
 
-- **LK6** (phase lock) took 296 B: the decode service's published reference (104 B), the CLICK injection in the
+- **LK6** (phase lock) took 328 B (296, plus 32 for the relock hold of the fixup after review lk6): the decode service's published reference (104 B), the CLICK injection in the
   pipeline's three finalize paths (about 100 B), the servo hook and a veneer. The phase servo, the anchor, the holdover
   and the apply executor run from flash (`check_ram_placement.py` whitelists them as `LINK_COLD`), and the two link
   event serialisers moved to flash too (`notify_push_link_state`, `notify_push_apply_result`: 134 B back).
@@ -133,10 +133,12 @@ silence. e shows it.
 
 **The anchor** (SYS2 3.1, 3.3):
 
-1. Lock (class, trim scan, superframe), then the VCXO pull-in. The drain waits until the VCXO is within 1 ppm of the
-   rate feed-forward (`link_input_rate_ready()`), so the anchor does not drift away while the VCXO still slews at
-   6.7 ppm/s. Meanwhile rows are dropped, so the decoder stays current. This takes up to 10 s from a 50 ppm crystal
-   offset, and the outputs stay muted.
+1. Lock (class, trim scan, superframe), then the VCXO pull-in. The drain waits until the long rate window is valid
+   (a 2 s span) and the VCXO is within 1 ppm of that feed-forward (`link_input_rate_ready()`), so the anchor neither
+   drifts away while the VCXO still slews at 6.7 ppm/s nor gets pushed off when the 32 ms windows hand over to the long
+   one. Meanwhile rows are dropped, so the decoder stays current. This takes 2-4 s from a small crystal offset and up
+   to 10 s from 50 ppm, and the outputs stay muted. After a holdover at the same rate the VCXO is still where it was:
+   no pull-in wait (review lk6 F4).
 2. Drain, then prefill the rings to `D - block_cap - 16` frames (the latency option's target when that is larger).
    `output_latency_apply()` asks `link_input_ring_target()` for the LINK source.
 3. Start the outputs when `F_arr - first = D` (first = the first frame written). The last millisecond is waited in
@@ -164,10 +166,16 @@ behaviour and PHASE flags `D_BELOW_MIN` (or, above the maximum, just state 0).
   tick without a lock).
 - The outputs keep running: silence keeps the rings at their fill, so the timeline (`next_w`) advances at the held
   rate. `EXT_LINK_STATUS.frame` is extrapolated.
-- On relock at the same rate the first rows are placed by F on that timeline: late rows are dropped, a gap is filled
-  with silence. Then the verification runs. Within half a frame the audio fades in again with no re-anchor (the
-  simulation resumes after a 2 s dark line at the same latency); otherwise it re-anchors. A new rate, a gap larger
-  than the rings or another stream (F far off) takes the full reset.
+- On relock the stream's F is compared with the holdover's extrapolation. Within the rings' writable span (448
+  frames) at the same rate, the first rows are placed by F on the held timeline: late rows are dropped, a gap is
+  filled with silence. Then the verification runs. Within half a frame the audio fades in again with no re-anchor
+  (the simulation resumes after 2 s and 60 s dark lines); otherwise it corrects whole frames (the correction's silence
+  delays the stream without moving `next_w`) or re-anchors. Further off in either direction (a sender that was power-
+  cycled restarts F at 0, another stream) or at a new rate it takes the full reset at once, and a placement gap beyond
+  the span during the resync re-anchors too (review lk6 F1: before, F behind dropped rows for as long as the unit had
+  been running).
+- For 2 s after a relock (until the long rate window is valid again) the VCXO keeps its held trim: the 32 ms windows
+  would drag it by several ppm.
 - Pending apply ops still act on their frames during the holdover (on silence). When the receiver stops, they are
   cancelled (`0xE2` result 2).
 
@@ -175,8 +183,9 @@ behaviour and PHASE flags `D_BELOW_MIN` (or, above the maximum, just state 0).
 that valid superframes carry (taken once; `RATE` stays the decoder's). An op acts on the samples of its frame as they
 enter the pipeline. The delivery splits the block so that the frame is the first sample the pipeline processes after
 the op. MUTE/UNMUTE (`user_mute`), MASTER_VOLUME, OUT_DELAY (`channel_delays_ms`) and PRESET_LOAD (the main loop's
-deferred load) start there. CLICK sets a one-sample full-scale impulse on that output, injected after delay and
-limiter in the finalize step of the core that owns the output. An op whose frame has already been written runs at once
+deferred load) start there. CLICK sets a one-sample impulse at -20 dBFS (`PIPELINE_CLICK_LEVEL` 0.1) on that output,
+injected after delay and limiter in the finalize step of the core that owns the output; a muted unit (`user_mute`, or
+a system-muted stream) plays none and reports `refused` (coordinator's decision after review lk6). An op whose frame has already been written runs at once
 and reports `late` (1). On a receiver, SYNC_PULSE reports `refused` (3): `EXT_LINK_CONFIG` has no sync GPIO. So does
 CLICK on the PDM sub (output 8), which is not finalized as PCM. Every result sends `0xE2` with the op's target frame.
 `CANCEL_ALL` reports each pending op as `cancelled` (2).

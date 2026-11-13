@@ -17,8 +17,10 @@ How the phase lock works is in `Documentation/Features/link_receiver.md` section
 | Audio interface | one interface with two line inputs on one clock (any USB interface; both channels share its ADC clock), 48 kHz or 96 kHz, 24-bit |
 | Recorder | any program that writes a 24-bit stereo WAV (`arecord -D hw:<card> -f S24_3LE -c 2 -r 48000 rec.wav`) |
 
-**Safety.** CLICK is a full-scale impulse **after** the volume control. Connect **no speaker and no amplifier input**
-to the outputs used here. Record line level: a DSPi's DAC output, or a K340's DAC test point. If only an amplifier
+**Safety.** CLICK is a one-sample impulse at **-20 dBFS after** the volume control (the master volume does not
+attenuate it). A muted unit does not click: user mute or the sender's system-mute flag make the op complete as
+`refused`, so keep the programme quiet by other means (2.1, 2.2), not by muting. Still connect **no speaker and no
+amplifier input** to the outputs used here. Record line level: a DSPi's DAC output, or a K340's DAC test point. If only an amplifier
 output is available, use a dummy load and a resistive divider to line level, never the interface directly. Noise from
 the PC goes through the owner's guarded player at 80 % volume or less (the test-audio rules).
 
@@ -45,7 +47,7 @@ unit falls back to the fill servo with `D_BELOW_MIN` if the range moves under it
 
 **Lock sequence to expect** (`M link` or `M notify`): class detection and trim scan (0.1-0.4 s), lock, then the VCXO
 pull-in. The unit stays muted until its VCXO is within 1 ppm of the stream's rate, which takes up to 10 s from a 50 ppm
-crystal offset and about 2.5 s from a small one. Then the anchor (silent, a few ms), `phase: state=locked`, and the
+crystal offset and 2-4 s from a small one (the long rate window needs a 2 s span first). Then the anchor (silent, a few ms), `phase: state=locked`, and the
 audio fades in. `status: phase_error` stays within a few hundredths of a frame.
 
 ### 2.1 Sender: USB audio and the click train
@@ -64,7 +66,9 @@ tools/link/bench.sh sender-diag --usb $SND --pattern audio        # test_pattern
 --wvalue 0x8007 --hex "..."`, which needs pyusb on the host.)
 
 For the **click train**, the sender schedules a CLICK apply in its superframe once a second. Every phase-locked
-receiver then plays a one-sample full-scale impulse on output 0 for the same link frame, `d_local` frames after it arrives:
+receiver then plays a one-sample impulse at -20 dBFS on output 0 for the same link frame, `d_local` frames after it
+arrives. Record the clicks with no USB audio playing (the sender sends zeros), not with the system-mute flag, which
+stops the clicks too:
 
 ```sh
 tools/link/bench.sh clicks --usb $SND --count 60 --period 1 --output 0
@@ -110,7 +114,10 @@ tools/link/run.sh skew_xcorr.py /work/rec/clicks.wav --mode click --calib /work/
 
 Noise mode correlates 1 s of left and right once a minute (`--every`, `--span`) over +-48 samples (`--max-lag`) and
 fits a parabola through the peak. Click mode finds each impulse on both channels and takes the fraction from the slope
-of the cross-spectrum's phase. A positive skew means B (right) is late. The last line says PASS or FAIL.
+of the cross-spectrum's phase; it removes each channel's DC (a bench TX's vector payload) and detects at half of each
+channel's peak (`--thresh` overrides), so the clicks' -20 dBFS and the interface's gain need no setting. Set the
+interface gain so that the clicks reach at least -40 dBFS in the recording. A positive skew means B (right) is late.
+The last line says PASS or FAIL.
 
 ## 4. Expected results
 
@@ -129,13 +136,17 @@ outputs (`LINK_PHASE_SIM_WAV=...`) analysed by `skew_xcorr.py` reads -0.01 sampl
 
 | Scenario (L1 48 kHz C8 unless noted, D 128) | max skew, last 10 s | latency A / B (frames) | CLICK skew |
 |---|---|---|---|
-| same boot, same clocks | 0.021 frame | 127.93 / 127.92 | 0.006 sample |
-| B boots 3.7 s later | 0.045 | 127.93 / 127.90 | 0.034 |
+| same boot, same clocks | 0.026 frame | 127.93 / 127.94 | 0.001 sample |
+| B boots 3.7 s later | 0.028 | 127.91 / 127.90 | 0.024 |
 | sender +20, A +45, B -38 ppm | 0.016 | 127.92 / 127.93 | 0.014 |
-| 1 ms dark line on B | 0.041 | 127.91 / 127.91 | 0.000 |
-| 2 s dark line on B (holdover, no re-anchor) | 0.022 | 127.91 / 127.91 | 0.008 |
-| L3 96 kHz C16, D 200, offsets, boot times | 0.031 | 199.89 / 199.88 | 0.005 |
+| 1 ms dark line on B | 0.035 | 127.90 / 127.90 | 0.012 |
+| 2 s dark line on B (holdover, no re-anchor) | 0.013 | 127.92 / 127.91 | 0.009 |
+| L3 96 kHz C16, D 200, offsets, boot times | 0.025 | 199.88 / 199.88 | 0.003 |
 | mode 0 (fill servo), for contrast | **3.75** | 86.2 / 82.5 | |
+| sender power cycle (F back to 0) during B's 2 s dark line: both re-anchor once, play 0-8 ms after the line carries the new stream | 0.037 | 127.91 / 127.90 | 0.006 |
+| sender restart with F 10M ahead, likewise | 0.033 | 127.91 / 127.92 | 0.002 |
+| 60 s dark line on B (holdover, no re-anchor) | 0.020 | 127.93 / 127.94 | 0.018 |
+| 60 s holdover, B's held VCXO drifting 0.5 ppm (whole-frame corrections, no re-anchor) | 0.065 | 127.92 / 127.86 | 0.062 |
 
 The latency reads 0.08 frame short of D in the model because the arrival is taken at the comma's end and to the DMA word.
 The offset is the same on every unit.
@@ -157,3 +168,5 @@ delay after the SYNC edge.
 | skew of whole samples | the two units have different `d_local`, or different output delays (`out.delay`, op `OUT_DELAY`), or one sits behind a fan-out (its `hop_delay_frames` must be compensated through `hops_offset`, `link_protocol_spec.md` 7.2) |
 | skew drifts | `loss_count` / re-anchors (`0xE1` reason 5); the recording's clock is not one clock for both channels |
 | click results 1 (late) | more lead (the bench TX recipe's 3 s), or the unit was not locked |
+| click results 3 (refused), no impulse | the unit is muted (`REQ_SET_USER_MUTE`, op MUTE, or the sender's system-mute flag), or the output is the PDM sub |
+| after a sender power cycle | every unit re-anchors once (F restarted at 0) and plays again within about 50 ms of locking; the skew is the same as before |

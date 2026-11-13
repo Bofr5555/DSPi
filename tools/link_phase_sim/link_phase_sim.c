@@ -86,6 +86,9 @@ typedef struct {
     double click_at_s;              // sender schedules CLICK (superframe) at about this time
     double unit_ops_at_s;           // per-unit ops on receiver 0 (EXT_APPLY_AT_FRAME path), 0 = none
     double expect_skew;             // max |skew| (frames) once both play phase-locked; < 0: expect a mismatch
+    double restart_at_s;            // review lk6 probe: the sender power-cycles at this time (0 none)...
+    uint64_t restart_f0;            // ... and its frame counter starts again here
+    double hold_drift_ppm;          // the held VCXO drifts by this much in a holdover (temperature model)
 } scenario_t;
 
 // The 1 ms latency option at the stream's rate: ring target 48 frames at
@@ -114,6 +117,8 @@ typedef struct {
     uint32_t *ring;
     bool click_scheduled;
     uint64_t click_frame;
+    bool restarted;
+    uint64_t restart_bits;          // line bit where the restarted stream begins
 } sender_t;
 
 static snd_tables_t T;
@@ -130,8 +135,19 @@ static void sender_init(sender_t *s, const scenario_t *sc) {
 // frames ahead of the frame being encoded at click_at_s (sender time).
 static void sender_fill(sender_t *s, const scenario_t *sc, uint64_t words) {
     while (s->sink.words < words) {
+        if (sc->restart_at_s > 0 && !s->restarted &&
+            (double)snd_sink_bits(&s->sink) / ((double)link_class_baud(sc->cls) * (1.0 + sc->sender_ppm * 1e-6)) >=
+                sc->restart_at_s) {
+            // A power cycle: the encoder starts over (its own disparity, F, superframe).
+            link_tx_init(&s->tx, sc->cls, sc->rate, sc->c, sc->restart_f0, 0x5A);
+            s->tx.flags = LINK_SF_FLAG_USB_LIVE;
+            s->restarted = true;
+            s->restart_bits = snd_sink_bits(&s->sink);
+            s->click_scheduled = sc->click_at_s <= sc->restart_at_s;   // a CLICK only on one stream
+        }
         if (sc->click_at_s > 0 && !s->click_scheduled &&
-            (double)(s->tx.frame - F0) / rate_hz(sc->rate) * (1.0 + sc->sender_ppm * 1e-6) >= sc->click_at_s) {
+            (double)snd_sink_bits(&s->sink) / ((double)link_class_baud(sc->cls) * (1.0 + sc->sender_ppm * 1e-6)) >=
+                sc->click_at_s) {
             uint64_t at = s->tx.frame + 2400u;
             if (link_tx_schedule(&s->tx, at, LINK_OP_CLICK, 0, 0)) {
                 s->click_scheduled = true;
@@ -202,7 +218,8 @@ typedef struct {
     uint8_t click[RING_TAGS];
     int8_t click_out;               // pipeline_click_output
     double soft_mute_until;         // local us
-    bool user_mute;
+    bool user_mute, stream_mute;
+    bool relocked;
     // Events and checks
     uint64_t now_us;                // local timer
     double t;                       // absolute seconds
@@ -374,7 +391,7 @@ static uint8_t apply_exec(rx_t *r, const link_apply_op_t *op) {
     case LINK_OP_UNMUTE: r->user_mute = false; return LINK_APPLY_APPLIED;
     case LINK_OP_MASTER_VOLUME: r->master_db = op->value * 0.01f; r->vol_frame = -2; return LINK_APPLY_APPLIED;
     case LINK_OP_CLICK:
-        if (op->arg >= 8) return LINK_APPLY_REFUSED;
+        if (op->arg >= 8 || r->user_mute || r->stream_mute) return LINK_APPLY_REFUSED;
         r->click_out = (int8_t)op->arg;
         return LINK_APPLY_APPLIED;
     case LINK_OP_PRESET_LOAD:
@@ -427,6 +444,7 @@ static void reanchor(rx_t *r) {
     r->drop_rows = 0;
     r->ph.resync = false;
     r->ph.hold = false;
+    r->ph.started = false;
     r->loss_latch = true;
     r->reanchors++;
 }
@@ -452,6 +470,10 @@ static bool deliver_place(rx_t *r, uint32_t *tail, uint32_t *avail, uint64_t *f)
     }
     if (!r->ph.resync) return true;
     int64_t gap = link_phase_gap(&r->ph, *f);
+    if (!link_phase_gap_ok(gap, r->lat.span)) {
+        reanchor(r);
+        return false;
+    }
     if (gap < 0) {
         k = (uint64_t)-gap < *avail ? (uint32_t)-gap : *avail;
         r->fifo_tail = *tail + k;
@@ -460,10 +482,6 @@ static bool deliver_place(rx_t *r, uint32_t *tail, uint32_t *avail, uint64_t *f)
         *f += k;
         if ((int64_t)k < -gap) return false;
     } else if (gap > 0) {
-        if (gap > (int64_t)r->lat.span) {
-            reanchor(r);
-            return false;
-        }
         uint32_t min_frames, max_frames = producer_block_bounds(r, &min_frames);
         k = (uint64_t)gap < max_frames ? (uint32_t)gap : max_frames;
         if (k) deliver_span(r, false, 0, r->ph.next_w, k);
@@ -520,7 +538,8 @@ static void phase_act(rx_t *r, int act, int32_t frames) {
             uint32_t k = (uint32_t)-frames;
             while (k) {
                 uint32_t n = k < r->lat.cap ? k : r->lat.cap;
-                deliver_span(r, false, 0, r->ph.next_w, n);
+                silence_block(r, n);
+                r->ph.next_w -= n;
                 k -= n;
             }
         }
@@ -589,6 +608,8 @@ static void update_clock_servo(rx_t *r) {
     if (hz == 0.0f) return;
     if (r->now_us - r->servo_last_us < SERVO_TICK_US) return;
     r->servo_last_us = r->now_us;
+    if (r->relocked && !r->meas.long_valid) return;
+    r->relocked = false;
     if (phase_servo_tick(r, hz)) return;
     fill_servo(r, hz);
 }
@@ -600,11 +621,15 @@ static void enter_locked(rx_t *r) {
     r->fifo_tail = r->fifo_head;
     link_meas_reset(&r->meas);
     if (r->ph.hold) {
-        if (r->detected_rate == was && r->detected_rate == r->fs) {
-            link_phase_relock(&r->ph);
+        uint64_t f_expect = r->hold_f + (r->now_us - r->hold_us) * (uint64_t)r->detected_rate / 1000000u;
+        bool same_rate = r->detected_rate == was && r->detected_rate == r->fs;
+        r->relocked = same_rate;
+        if (same_rate && link_phase_relock(&r->ph, r->lf.frame, f_expect, r->lat.span)) {
         } else {
             r->ph.hold = false;
+            r->ph.started = false;
             r->loss_latch = true;
+            r->reanchors++;
         }
     }
 }
@@ -624,6 +649,7 @@ static void link_up_step(rx_t *r) {
         if (r->lf.state != LINK_RX_LOCKED) {
             if (!enter_holdover(r)) {
                 r->pull_in = false;
+                r->relocked = false;
                 r->phase = PH_RELOCK;
                 r->loss_latch = true;
                 r->detected_rate = 0;
@@ -679,9 +705,8 @@ static void poll(rx_t *r) {
     bool rate_ready = true;         // link_input_rate_ready()
     if (locked && r->preset_loading && !r->prefilling) {
         r->pull_in = false;
-        if (link_phase_active(&r->ph)) {
-            float hz = link_meas_hz(&r->meas);
-            r->pull_in = !(hz != 0.0f && r->last_ff != 0.0f && fabs(r->vcxo_ppm - r->last_ff) < 1.0);
+        if (link_phase_active(&r->ph) && !(r->relocked && !r->meas.long_valid)) {
+            r->pull_in = !(r->meas.long_valid && r->last_ff != 0.0f && fabs(r->vcxo_ppm - r->last_ff) < 1.0);
             rate_ready = !r->pull_in;
         }
     }
@@ -764,6 +789,8 @@ static double frame_playing(const rx_t *r) {
 static double frame_arriving(const rx_t *r) {
     double bits = r->t * r->baud_s;
     double bpf = (double)link_class_baud(r->sc->cls) / (double)r->fs;
+    if (r->snd.restarted && bits >= (double)r->snd.restart_bits)
+        return (double)r->sc->restart_f0 + (bits - (double)r->snd.restart_bits - 10.0) / bpf;
     return (double)F0 + (bits - 10.0) / bpf;
 }
 
@@ -801,7 +828,8 @@ static void run_rx(rx_t *r, probe_log_t *log) {
             if (!isnan(fp)) log->lat[next_probe] = frame_arriving(r) - fp;
             next_probe++;
         }
-        double rate = r->fs * (1.0 + sc->rx_ppm[r->id] * 1e-6) * (1.0 + r->vcxo_ppm * 1e-6);
+        double rate = r->fs * (1.0 + sc->rx_ppm[r->id] * 1e-6) *
+                      (1.0 + (r->vcxo_ppm + (r->ph.hold ? sc->hold_drift_ppm : 0.0)) * 1e-6);
         double before = r->out_phase;
         if (r->running) r->out_phase += rate * (t_next - t_prev);
         // The CLICK sample's play time, by interpolation inside this pass.
@@ -961,31 +989,67 @@ static void run_scenario(const scenario_t *sc) {
         if (sc->loss_to[i] <= sc->loss_from[i]) continue;
         // During the loss: real frames only up to the loss, then silence
         // within D + 1 ms; after the line returns, audible again within
-        // 200 ms (SYS2 3.3) at the same latency.
+        // 200 ms (SYS2 3.3), back at the same latency 10 s later (the resume
+        // itself is within half a frame; the VCXO holds 2 s, then the servo).
         unsigned p0 = (unsigned)(sc->loss_from[i] * 1e6 / PROBE_US), p1 = (unsigned)(sc->loss_to[i] * 1e6 / PROBE_US);
         double last_f = NAN, lat_before = NAN, lat_after = NAN;
         unsigned silent_from = 0, back = 0;
+        double sb = 0; unsigned nb = 0;
         for (unsigned j = p0 > 1000 ? p0 - 1000 : 0; j < p0; j++)
-            if (log[i].aud[j]) { last_f = log[i].fplay[j]; lat_before = log[i].lat[j]; }
+            if (log[i].aud[j]) { last_f = log[i].fplay[j]; sb += log[i].lat[j]; nb++; }
+        lat_before = nb ? sb / nb : NAN;
         bool garbage = false;
         for (unsigned j = p0; j < p1 && j < log[i].n; j++) {
             if (isnan(log[i].fplay[j])) { if (!silent_from) silent_from = j; }
             else if (log[i].fplay[j] > last_f + (double)(sc->d_local + 200)) garbage = true;
         }
         for (unsigned j = p1; j < log[i].n; j++)
-            if (log[i].aud[j]) { back = j; lat_after = log[i].lat[j + 2000 < log[i].n ? j + 2000 : j]; break; }
+            if (log[i].aud[j]) { back = j; break; }
+        double lat_other = NAN;
+        if (back) {     // 1 s means, 9-10 s after the return, of this unit and the other one
+            double sa = 0, so = 0; unsigned na = 0, no = 0;
+            for (unsigned j = back + 9000; j < back + 10000 && j < log[i].n; j++) {
+                if (log[i].aud[j]) { sa += log[i].lat[j]; na++; }
+                if (log[1 - i].aud[j]) { so += log[1 - i].lat[j]; no++; }
+            }
+            lat_after = na ? sa / na : NAN;
+            lat_other = no ? so / no : NAN;
+        }
         double silent_ms = silent_from ? (silent_from - p0) * PROBE_US * 1e-3 : -1;
         double back_ms = back ? (back - p1) * PROBE_US * 1e-3 : -1;
         printf("   rx %c loss: silent %.1f ms after the line went dark, audible %.1f ms after it returned "
-               "(resume e %+.3f), latency before %.3f after %.3f\n",
-               'A' + i, silent_ms, back_ms, r[i].e_resume, lat_before, lat_after);
+               "(resume e %+.3f), latency before %.3f, 10 s after %.3f (other unit %.3f)\n",
+               'A' + i, silent_ms, back_ms, r[i].e_resume, lat_before, lat_after, lat_other);
         CHECK(!garbage, "%s: only frames from before the loss play during it", sc->name);
         CHECK(sc->loss_to[i] - sc->loss_from[i] < 0.003 || (silent_from && silent_ms <= sc->d_local * 1e3 / fs + 1.0),
               "%s: silent within D + 1 ms (%.1f ms)", sc->name, silent_ms);
         CHECK(back && back_ms < 200.0, "%s: audible again within 200 ms (%.1f ms)", sc->name, back_ms);
-        CHECK(r[i].reanchors == 0 && r[i].holdovers == 1, "%s: holdover and resume without a re-anchor", sc->name);
-        CHECK(fabs(lat_after - lat_before) < 0.1, "%s: latency after the loss %.3f vs %.3f", sc->name, lat_after,
-              lat_before);
+        if (sc->restart_at_s > 0)
+            CHECK(r[i].reanchors <= 1, "%s: one re-anchor at most (%u)", sc->name, r[i].reanchors);
+        else
+            CHECK(r[i].reanchors == 0 && r[i].holdovers == 1, "%s: holdover and resume without a re-anchor", sc->name);
+        if (sc->hold_drift_ppm != 0)
+            CHECK(r[i].corrections >= 1 && r[i].corrections <= LINK_PHASE_MAX_CORRECTIONS,
+                  "%s: whole-frame corrections within the budget, each applied once (%u)", sc->name, r[i].corrections);
+        CHECK(fabs(lat_after - lat_other) < 0.1, "%s: latency 9-10 s after the loss %.3f, the other unit %.3f",
+              sc->name, lat_after, lat_other);
+    }
+    if (sc->restart_at_s > 0) {
+        // Review lk6 F1: a sender that restarts its counter.  Every unit plays
+        // again within 200 ms of its line carrying the new stream, re-anchored
+        // once at most.
+        for (int i = 0; i < NRX; i++) {
+            double from = sc->restart_at_s;
+            if (sc->loss_to[i] > sc->loss_from[i] && sc->loss_to[i] > from) from = sc->loss_to[i];
+            unsigned p0 = (unsigned)(from * 1e6 / PROBE_US), back = 0;
+            for (unsigned j = p0; j < log[i].n; j++)
+                if (log[i].aud[j]) { back = j; break; }
+            double ms = back ? (back - p0) * PROBE_US * 1e-3 : -1;
+            printf("   rx %c after the sender restart (F from %" PRIu64 "): audible %.1f ms after its line carried it, "
+                   "re-anchors %u\n", 'A' + i, sc->restart_f0, ms, r[i].reanchors);
+            CHECK(back && ms < 200.0, "%s: rx %c audible within 200 ms of the restart (%.1f ms)", sc->name, 'A' + i, ms);
+            CHECK(r[i].reanchors <= 1, "%s: rx %c one re-anchor at most (%u)", sc->name, 'A' + i, r[i].reanchors);
+        }
     }
     if (sc->click_at_s > 0) {
         double dt = r[0].click_play_t - r[1].click_play_t;
@@ -1031,19 +1095,33 @@ int main(int argc, char **argv) {
     }
     const scenario_t sc[] = {
         { "same stream, same boot, same clocks", 1, 1, 8, 0, { 0, 0 }, { 0.0, 0.0 }, { 0, 0 }, { 0, 0 },
-          1, 128, 20.0, 15.0, 12.0, 0.1 },
+          1, 128, 20.0, 15.0, 12.0, 0.1, 0, 0, 0 },
         { "different boot times (B 3.7 s later)", 1, 1, 8, 0, { 0, 0 }, { 0.0, 3.7 }, { 0, 0 }, { 0, 0 },
-          1, 128, 30.0, 25.0, 0, 0.1 },
+          1, 128, 30.0, 25.0, 0, 0.1, 0, 0, 0 },
         { "clock offsets: sender +20, A +45, B -38 ppm", 1, 1, 8, 20, { 45, -38 }, { 0.3, 1.1 }, { 0, 0 }, { 0, 0 },
-          1, 128, 40.0, 35.0, 0, 0.1 },
+          1, 128, 40.0, 35.0, 0, 0.1, 0, 0, 0 },
         { "short loss on B (1 ms dark line)", 1, 1, 8, 0, { 12, -9 }, { 0.0, 0.5 }, { 0, 20.0 }, { 0, 20.001 },
-          1, 128, 40.0, 35.0, 0, 0.1 },
+          1, 128, 40.0, 35.0, 0, 0.1, 0, 0, 0 },
         { "long loss on B (2 s dark line), holdover", 1, 1, 8, 0, { 30, -25 }, { 0.0, 0.8 }, { 0, 18.0 }, { 0, 20.0 },
-          1, 128, 45.0, 40.0, 0, 0.1 },
+          1, 128, 45.0, 40.0, 0, 0.1, 0, 0, 0 },
         { "L3 96 kHz C 16, offsets and boot times", 3, 2, 16, -15, { 25, -40 }, { 0.2, 2.9 }, { 0, 0 }, { 0, 0 },
-          1, 200, 25.0, 20.0, 0, 0.1 },
+          1, 200, 25.0, 20.0, 0, 0.1, 0, 0, 0 },
         { "mode 0 (fill servo) for contrast", 1, 1, 8, 0, { 45, -38 }, { 0.3, 1.1 }, { 0, 0 }, { 0, 0 },
-          0, 128, 25.0, 0, 0, -1.0 },
+          0, 128, 25.0, 0, 0, -1.0, 0, 0, 0 },
+        // Review lk6's probes (F1, F2): a sender power cycle with F back at 0
+        // or 10M ahead during B's dark line, and a 60 s holdover.
+        { "sender power cycle (F restarts at 0) during B's 2 s dark line", 1, 1, 8, 0, { 30, -25 }, { 0.0, 0.8 },
+          { 0, 18.0 }, { 0, 20.0 }, 1, 128, 45.0, 40.0, 0, 0.1, 19.0, 0, 0 },
+        { "sender restart with F 10M ahead during B's 2 s dark line", 1, 1, 8, 0, { 30, -25 }, { 0.0, 0.8 },
+          { 0, 18.0 }, { 0, 20.0 }, 1, 128, 45.0, 40.0, 0, 0.1, 19.0, F0 + 10000000ull, 0 },
+        { "60 s dark line on B (long holdover), clocks +30/-25", 1, 1, 8, 0, { 30, -25 }, { 0.0, 0.8 },
+          { 0, 10.0 }, { 0, 70.0 }, 1, 128, 100.0, 95.0, 0, 0.1, 0, 0, 0 },
+        // Review lk6 F2: the held VCXO drifts 0.5 ppm in a 60 s holdover, so B
+        // resumes 1.4-2.3 frames early and needs negative whole-frame
+        // corrections (each applied once: before the fix the first one was
+        // applied twice and the budget ran out into a re-anchor), no re-anchor.
+        { "60 s holdover with 0.5 ppm VCXO drift on B (negative correction)", 1, 1, 8, 0, { 30, -25 }, { 0.0, 0.8 },
+          { 0, 10.0 }, { 0, 70.0 }, 1, 128, 100.0, 95.0, 0, 0.1, 0, 0, 0.5 },
     };
     for (unsigned i = 0; i < sizeof(sc) / sizeof(sc[0]); i++) {
         if (only && !strstr(sc[i].name, only)) continue;

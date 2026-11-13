@@ -10,9 +10,12 @@ audio interface, and this script measures how far apart they are.
          seconds of left and right, over lags of +-max-lag samples, with a
          parabolic fit through the peak for the sub-sample part.
   click  receivers fed the apply op CLICK through the sender's superframe
-         (both play a full-scale one-sample impulse on the same link frame):
-         each impulse is located on both channels to a sub-sample position
-         and the differences are reported.
+         (both play a one-sample impulse at -20 dBFS on the same link frame;
+         a muted unit, by user mute or the sender's system mute, plays none,
+         so the programme is kept quiet instead): each impulse is located on
+         both channels to a sub-sample position (detection at half of each
+         channel's peak unless --thresh is given) and the differences are
+         reported.
 
 Positive skew means the right channel lags the left one.  A --calib recording
 of ONE output split into both inputs measures the interface's own channel skew,
@@ -89,6 +92,16 @@ def xcorr_lag(a, b, start, n, max_lag):
     return best_k + off, best
 
 
+def click_level(x, thresh):
+    """The channel without its mean (a bench TX's vector payload is DC) and the
+    detection level: thresh as given, or 0 for half the channel's peak (the
+    receivers' CLICK is -20 dBFS before the DAC and the recording's gain is
+    unknown)."""
+    m = sum(x) / len(x) if x else 0.0
+    y = [v - m for v in x]
+    return y, (thresh if thresh > 0 else 0.5 * max((abs(v) for v in y), default=0.0))
+
+
 def find_clicks(x, rate, thresh, min_gap_s=0.05):
     """Sub-sample positions of impulses (|x| above thresh, one per min_gap)."""
     out, i, gap = [], 0, int(min_gap_s * rate)
@@ -151,7 +164,11 @@ def measure(path, mode, every, span, max_lag, thresh):
             if r and abs(r[1]) > 0.3:
                 rows.append((start / rate, r[0], r[1]))
     else:
-        cl, cr = find_clicks(left, rate, thresh), find_clicks(right, rate, thresh)
+        left, tl = click_level(left, thresh)
+        right, tr = click_level(right, thresh)
+        if tl <= 0 or tr <= 0:
+            return rate, rows
+        cl, cr = find_clicks(left, rate, tl), find_clicks(right, rate, tr)
         j = 0
         for t in cl:
             while j < len(cr) and cr[j] < t - max_lag:
@@ -196,7 +213,7 @@ def selftest():
         print(f"  noise: skew {d:+.2f} sample -> {lag:+.3f} (peak {peak:.3f}) {'OK' if good else 'MISS'}")
     # Clicks: a windowed-sinc impulse (a DAC's reconstruction) at fractional
     # positions, B later by d.
-    def click_at(x, pos, amp=0.9):
+    def click_at(x, pos, amp=0.1):       # the receivers' CLICK: -20 dBFS
         for k in range(int(pos) - 32, int(pos) + 33):
             u = k - pos
             s = 1.0 if u == 0 else math.sin(math.pi * u * 0.9) / (math.pi * u * 0.9)
@@ -209,7 +226,13 @@ def selftest():
             p = c * 5000 + 0.3 * c
             click_at(left, p)
             click_at(right, p + d)
-        cl, cr = find_clicks(left, rate, 0.5), find_clicks(right, rate, 0.5)
+        # Over a quiet programme 40 dB down and a DC offset (a bench TX vector).
+        for k in range(n):
+            left[k] += 0.003 + 0.001 * math.sin(k * 0.37)
+            right[k] += -0.002 + 0.001 * math.sin(k * 0.41)
+        left, tl = click_level(left, 0.0)
+        right, tr = click_level(right, 0.0)
+        cl, cr = find_clicks(left, rate, tl), find_clicks(right, rate, tr)
         diffs = [frac_delay(left, right, a, b) for a, b in zip(cl, cr)]
         good = len(diffs) == 7 and all(x is not None and abs(x - d) < 0.02 for x in diffs)
         ok &= good
@@ -225,7 +248,8 @@ def main(argv=None):
     ap.add_argument("--every", type=float, default=60.0, help="noise: seconds between windows (default 60)")
     ap.add_argument("--span", type=float, default=1.0, help="noise: window length in seconds (default 1)")
     ap.add_argument("--max-lag", type=int, default=48, help="largest skew searched, in samples (default 48)")
-    ap.add_argument("--thresh", type=float, default=0.5, help="click: detection level, full scale 1 (default 0.5)")
+    ap.add_argument("--thresh", type=float, default=0.0,
+                    help="click: detection level, full scale 1 (default 0: half each channel's peak)")
     ap.add_argument("--calib", help="recording of one output split into both inputs: the interface's own skew")
     ap.add_argument("--link-rate", type=float, default=48000.0, help="the link's sample rate for the pass limits")
     ap.add_argument("--selftest", action="store_true", help="check the estimators on synthetic data and exit")

@@ -4,7 +4,8 @@
 #   tools/link_phase_sim/run.sh [scenario substring]     (from the repository root)
 #   tools/link_phase_sim/run.sh pio                      (the line model against LK2's PIO model)
 #
-# Needs only a C compiler; run it in a container, e.g.
+# Needs a C compiler and Python 3 (the glue drift check, mirror_diff.py); run it
+# in a container, e.g.
 #   podman run --rm --network none -v "$PWD:/repo:ro" -v "$OUT:/out" -w /repo \
 #       localhost/dspi-console-build-debian sh tools/link_phase_sim/run.sh
 # LINK_PHASE_SIM_OUT: build directory (default build/link_phase_sim).  "pio"
@@ -33,6 +34,9 @@ if [ "${1:-}" = pio ]; then
         "$fw/DSPi/link/link_codec.c" "$fw/DSPi-Sender/sender_link.c" -lm
     exec "$out/pio_timing"
 fi
+# The simulation's copy of link_input.c's glue must not drift (review lk6):
+# mirror_diff.py fails unless the differences are the recorded port lines.
+python3 -I "$here/mirror_diff.py" "$root"
 cc -std=c11 -O2 -Wall -Wextra -Werror -I"$fw/DSPi/link" -I"$fw/DSPi-Sender" \
     -o "$out/link_phase_sim" "$here/link_phase_sim.c" \
     "$fw/DSPi/link/link_codec.c" "$fw/DSPi/link/link_fast.c" "$fw/DSPi/link/link_phase.c" \
