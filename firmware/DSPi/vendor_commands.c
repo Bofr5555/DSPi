@@ -392,6 +392,12 @@ bool is_valid_gpio_pin(uint8_t pin) {
     // GPIO 16/17 are general-purpose again since the debug UART was removed;
     // when the UART control interface claims them, is_pin_in_use() covers it.
     if (pin >= 23 && pin <= 25) return false;   // Power/LED
+#if defined(ALINK_SCOPE_MARKER_GPIO)   // -- WP SCOPE1 -- test builds: the marker pins are taken
+    if (pin == ALINK_SCOPE_MARKER_GPIO) return false;
+#if defined(ALINK_SCOPE_MARKER_LOCK_GPIO)
+    if (pin == ALINK_SCOPE_MARKER_LOCK_GPIO) return false;
+#endif
+#endif
 #if PICO_RP2350
     return pin <= 29;
 #else
