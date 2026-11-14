@@ -45,6 +45,11 @@ void alink_usb_fw_stop(bool release_dac);
 bool alink_usb_fw_keep_dac_mute(void);
 // The anchor released the DAC mute after the start (main.c).
 void alink_usb_fw_dac_released(void);
+// WP USB3b: how long the out-of-step soft mute has held the output at zero (us, 0 not).
+uint32_t alink_usb_fw_silent_us(void);
+// The lock-error action (EXT_ALINK_USB byte 4), persisted in the V26 alink block's spare byte.
+uint8_t alink_usb_fw_policy_byte(void);
+void alink_usb_fw_policy_load(uint8_t b);
 // The stored host rate (WP USB3): main loop, flash bracket like core_vreg's
 // persist (the write re-anchors a phase timeline; only due while idle).
 bool alink_usb_fw_seed_persist_due(void);

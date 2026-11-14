@@ -693,7 +693,11 @@ typedef struct __attribute__((packed)) {
     uint8_t slots[ALINK_SLOTS_LEN];           // EXT_ALINK_SLOTS
     uint8_t phase_version;                   // FLASH_ALINK_PHASE_VERSION; 0 = never saved (WP LK6)
     uint8_t phase[ALINK_PHASE_STORE_LEN];     // EXT_ALINK_PHASE: mode, d_local, hops_offset
-    uint8_t reserved[1];
+    // WP USB3b: the alink USB-direct lock-error action (EXT_ALINK_USB byte 4:
+    // 0 mute, the default, 1 play unaligned).  Reserved and written 0 by every
+    // firmware before it, which also ignored it on load: 0 is the default, so
+    // an older save or a downgrade only falls back to "mute"; no version change.
+    uint8_t usb_lock_error;
 } FlashAlinkConfig;                          // 24 bytes
 // WP LK6 took 6 of the V26 block's 7 reserved bytes (zero in every earlier
 // save, so those read as "never saved": factory phase settings), no V27.
@@ -5046,7 +5050,10 @@ uint8_t preset_save_output_config(void) {
     memcpy(dir_cache.alink.slots, alink_slots, ALINK_SLOTS_LEN);
     dir_cache.alink.phase_version = FLASH_ALINK_PHASE_VERSION;
     memcpy(dir_cache.alink.phase, alink_phase_store, ALINK_PHASE_STORE_LEN);
-    memset(dir_cache.alink.reserved, 0, sizeof(dir_cache.alink.reserved));
+    dir_cache.alink.usb_lock_error = 0;
+#if DSPI_ALINK_USB
+    dir_cache.alink.usb_lock_error = alink_usb_fw_policy_byte();
+#endif
     memset(&dir_cache.alink_usb, 0, sizeof(dir_cache.alink_usb));
 #if DSPI_ALINK_USB
     dir_cache.alink_usb.version = FLASH_ALINK_USB_VERSION;
@@ -5391,6 +5398,7 @@ void preset_load_alink_config(void) {
     alink_phase_store_defaults(alink_phase_store);
 #if DSPI_ALINK_USB
     // V27 alink USB block (WP USB1): implausible values keep the defaults.
+    if (dir_cache_valid) alink_usb_fw_policy_load(dir_cache.alink.usb_lock_error);   // WP USB3b
     if (dir_cache_valid && dir_cache.alink_usb.version == FLASH_ALINK_USB_VERSION) {
         alink_usb_fw_load(dir_cache.alink_usb.cfg);
         alink_usb_fw_seed_load(dir_cache.alink_usb.seed);    // WP USB3; invalid bytes: none

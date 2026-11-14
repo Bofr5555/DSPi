@@ -29,7 +29,7 @@ def status(b):
      late) = struct.unpack("<BBBBfffQHHHHHHIiIIIII", b[:64])
     print(f"state {name(STATES, st)}, phase {name(PHASE, ph)}, rate {RATES.get(rc, 'other')}")
     print(f"flags: hw-timestamp {fl & 1}, stream {fl >> 1 & 1}, nominal-feedback {fl >> 2 & 1}, time-base {fl >> 3 & 1}, "
-          f"holdover {fl >> 4 & 1}, seeded {fl >> 5 & 1}")
+          f"holdover {fl >> 4 & 1}, seeded {fl >> 5 & 1}, LOCK ERROR {fl >> 6 & 1}")
     print(f"host {hppm:+.3f} ppm, vcxo {vppm:+.3f} ppm, phase error {e:+.4f} samples")
     print(f"S now {s}, bus frame {bus}, d {dmin}..{dmax}, ring fill {fill}")
     if first == 0xFFFF:
@@ -41,9 +41,10 @@ def status(b):
 
 
 def config(b):
-    mode, flags, d, _r, sf, st = struct.unpack("<BBHHBB", b[:8])
+    mode, flags, d, le, _r, sf, st = struct.unpack("<BBHBBBB", b[:8])
     print(f"mode {mode} ({['off', 'rate lock', 'phase lock'][mode] if mode < 3 else '?'}), auto re-anchor {flags & 1}, "
-          f"D {d}, status flags 0x{sf:02x}, state {name(STATES, st)}")
+          f"D {d}, on lock error {['mute', 'play unaligned'][le] if le < 2 else le}, status flags 0x{sf:02x}, "
+          f"state {name(STATES, st)}")
 
 
 ENDS = ["SOF lost", "gap > 1 s", "discontinuity", "host rejected", "rate/config", "re-anchor: phase",
@@ -54,8 +55,15 @@ def diag(b):
     ver, last, rides, holds = struct.unpack("<BBHH", b[:6])
     ends = struct.unpack("<9H", b[6:24])
     sus, res, rst, unp = struct.unpack("<4H", b[24:32])
-    lf, lus, ldev, lride, mpass, mquiet, mlate, hold = struct.unpack("<IIiIIIII", b[32:64])
+    if ver >= 2:   # WP USB3b: 32-35 and 44-47 split into u16 fields
+        lf, bad, lus, ldev, lride, lockerr, mpass, mquiet, mlate, hold = struct.unpack("<HHIiHHIIII", b[32:64])
+        lride *= 1000
+    else:
+        lf, lus, ldev, lride, mpass, mquiet, mlate, hold = struct.unpack("<IIiIIIII", b[32:64])
+        bad = lockerr = None
     print(f"diag v{ver}: last end {ENDS[last] if last < len(ENDS) else 'none'}; holdovers {holds}, ridden {rides}")
+    if bad is not None:
+        print(f"lock errors entered {lockerr}; SOF timestamp readings repaired {bad}")
     print("timeline ends: " + ", ".join(f"{n} {c}" for n, c in zip(ENDS, ends) if c) if any(ends) else "timeline ends: none")
     print(f"USB events: suspend {sus}, resume {res}, bus reset {rst}, unplug {unp}")
     print(f"last absence: {lf} frames, {lus} us, clock - frames {ldev:+d} us; longest ridden {lride} us; running holdover {hold} us")

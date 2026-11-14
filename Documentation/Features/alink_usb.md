@@ -94,6 +94,18 @@ counted in `tud_event_hook_cb`, which TinyUSB calls for every queued event), the
 deviation, the longest main-loop pass, the longest time without a SOF interrupt entry and the latest SOF interrupt
 entry. Spec 2.9.6 says how to read it.
 
+**Bad RP2350 readings** (WP USB3b). `SOF_TIMESTAMP_RAW` and `_LAST` are 21-bit counters at 48 MHz (wrap 43.69 ms);
+the ISR's difference is masked to 21 bits, and since LAST is the latest SOF the true value is under a frame plus the
+interrupt latency. The K340's second bench hour read RAW 22.7 us *behind* LAST four times: the difference wrapped to
+2^21 - 1088 ticks (43.67 ms), the SOF's time was 43.7 ms early, and each one ended the time base (discontinuity) and
+made a fresh anchor (DIAG: `discontinuity 4`, `last absence 1 frames 44668 us, clock - frames +43668 us`, `max SOF
+interrupt latency 43668 us`). Why the PHY register lags is not documented (no erratum found); the firmware does not
+need to know: `alink_usb_service()` repairs a SOF whose time lies more than 1.37 ms before the interrupt entry that
+took it (the entry time instead, the clean pair kept out of the estimator, DIAG `bad_sof_readings`). Done in the main
+loop, so the RAM ISR keeps its size (a test in the inline time-base code grew it by 20-32 B of `.data`). A packet
+completing within 100 us after such a SOF, before the main loop repaired it, can still be stamped a frame off (a faded
+gap at worst).
+
 **SOF discontinuities** (review usb1 F2): a SOF whose frame count and clock disagree by more than 100 us (RP2350) or
 0.5 ms (RP2040) — a stall with the frame number frozen, a small frame jump — sets the long-gap flag: the timeline ends,
 the estimator reseeds, and the unit anchors again once the rate estimate is back (instead of a poisoned estimate for
@@ -161,9 +173,27 @@ pass, a stream included; the audio fades in only once phase-locked. `alink_usb.c
 `prepare_pipeline_reset()` finds the hold elapsed and drains at once; `complete_pipeline_reset()` keeps the pin asserted
 when a USB anchor follows (`alink_usb_fw_keep_dac_mute()`), so a preset load or flash write costs one DAC hold, not two;
 the anchor releases it after the start; leaving mode 2 or becoming not out of step another way (a rejected host, a
-rate or D the phase lock cannot run) releases it. Not muted: modes 0/1, a rejected host and a CONFIG unit (they play as
-before), PENDING (`AUTO_REANCHOR` clear: it plays while the servo pulls the error in), and a holdover (the timeline
-continues).
+rate or D the phase lock cannot run, with the PLAY action) releases it. Not muted: modes 0/1 and a holdover (the
+timeline continues).
+
+**Lock error** (owner decision 2026-11-14, WP USB3b). `alink_usb_lock_error()`: mode 2 and the host rejected, the phase
+lock impossible at this rate or D (CONFIG), or PENDING. The per-unit action `on_lock_error` (`EXT_ALINK_USB` byte 4,
+persisted in the V26 alink block's spare byte, which every earlier firmware wrote 0 and ignored: 0 is the default)
+is 0 *mute* (the default; the lock error counts as out of step: soft mute, DAC mute held) or 1 *play unaligned* (as
+before). Reported as STATUS flags bit 6, `0xE3` reasons 10 `LOCK_ERROR` / 11 `LOCK_OK`, DIAG `lock_errors`.
+
+**Drained outputs** (review usb3 N2). The anchor drains and disables the outputs; if the prefill then ends without a
+start (mode 2 left, the host rejected or CONFIG during those few ms), `alink_usb_outputs_orphaned()` tells `main.c`,
+which restarts them (`enable_outputs_in_sync()`, a 10 ms soft mute) and releases the DAC mute unless the unit is muted
+out of step.
+
+**The anchor's pipeline reset no longer blocks 200 ms** (WP USB3b, the second bench hour's 200125 us main-loop
+pass). `prepare_pipeline_reset()` settles to silence by waiting, inside the pass, until the envelope reached zero and
+the rings played past the delay lines, with a 200 ms cap. USB counts as streaming while `sync_started` is latched
+from an earlier stream, but the envelope moves only with processed packets: an anchor with no stream (the bench's
+start, before the player) or after a time-base loss waited the full cap. Before the anchor's reset `main.c` now marks
+the wire silent when nothing is being produced (no packet for 50 ms and no timeline writing) or when the out-of-step
+mute has held the output at zero longer than the delay lines plus the rings; the settle then returns at once.
 
 **Locked quickly.** What a lock waited for, and what it waits for now:
 
