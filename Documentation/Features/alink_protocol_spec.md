@@ -221,12 +221,37 @@ C MUST satisfy `layout(C) <= min S_F` at the class and rate in effect, and `1 <=
 | L1 | 8 | 8 | 3 |
 | L2 | 19 | 18 | 8 |
 | L3 | 41 | 38 | 18 |
+| *USB-direct, RP2350 (for comparison)* | *2 (16/24-bit)* | *8 (16-bit); 4 (24-bit)* | *2 (16/24-bit)* |
+| *USB-direct, RP2040 (for comparison)* | *2 (16/24-bit)* | *2 (16/24-bit)* | *2 (16/24-bit)* |
 
-**This table is normative and is the only capacity table** (coordinator decision, 2026-11-13). Code takes it from
-`alink_max_channels(class, rate)` in C or `alink_codec.CAPACITY[(class, rate)]` in Python, never from a copy:
+**This table is normative and is the only capacity table** (coordinator decision, 2026-11-13), except its rows
+marked *for comparison* (below). Code takes it from `alink_max_channels(class, rate)` in C or `alink_codec.CAPACITY[(class, rate)]` in Python, never from a copy:
 `EXT_ALINK_TX.channels` (`extension_channel_spec.md` 2.8.8), the sender (LK4), the fake device and the clients
 accept exactly C = 1 .. this value. The SYS2 figures (16 on L3 at 96 kHz; the 48 kHz values at 44.1 kHz) are
 superseded. Defaults are whole banks: 8 on L1, 16 on L2, 32 on L3 at 48 kHz.
+
+The rows marked *for comparison* are not alink classes and not part of this normative table: they are the channels a
+DSPi unit takes in one USB full-speed stream as an alink USB-direct unit (`extension_channel_spec.md` 2.9; the formats
+in `usb_descriptors.c` of the unit build: stereo 16 or 24 bit at every rate, 4 channels 16 or 24 bit and 6/8 channels
+16 bit at 48 kHz only). A `DSPI_ROLE_SENDER` build, which also has the USB-direct block, adds alt 7 (6 channels 24-bit,
+48 kHz) and alt 8 (4 channels 16-bit, 96 kHz); the rows do not count those. `alink_max_channels()` and `CAPACITY` do
+not know these rows. At 44.1 kHz USB-direct is rate lock only (no phase lock, 2.9.1). How many such units one computer
+carries (computed, not measured; WP AUSB3, guide `usb-direct-home-theater.md` in the console repository):
+
+| USB-direct units, for comparison | Units | Why |
+|---|---|---|
+| per single-TT hub (or a hub run at full speed: an isolator or a full-speed extender in front of it) | 1 | every unit reserves its endpoint's 788 B (RP2350; 582 B RP2040) per 1 ms frame whatever it streams: about 624 us (463 us) of the 900 us (90 %, USB 2.0 5.6.4) a full-speed frame allows for periodic transfers |
+| per multi-TT hub | 1 per downstream port | one transaction translator, so one full-speed frame, per port |
+| per USB controller (one high-speed bus, one SOF) | about 30 | about 25 us of split transactions per unit per frame of the 800 us (80 %) high-speed periodic budget, i.e. about 32; controllers check bandwidth themselves and may refuse sooner |
+
+The figures, host delay left out: full-speed isochronous transaction time (USB 2.0 5.11.3)
+`9107 + 83.54 x floor(3.167 + 1.1667 x 8 x bytes)` ns, 788 B = 624 us, 582 B = 463 us; through a transaction
+translator a 788 B packet is 5 start-splits of at most 188 B, each `55 x 8 x 2.083 + 2.083 x floor(3.167 + 1.1667 x 8 x 188)`
+ns = 4.6 us, about 23 us, plus about 2 us for the feedback endpoint's splits.
+
+Units that play aligned must be on one USB controller: another controller counts other frames on another clock. On an
+EHCI (USB 2.0 only) computer a full-speed unit on a root port is run by a companion UHCI/OHCI controller, another clock
+than the units behind a hub; there every unit goes behind the hub.
 
 ### 5.8 PRBS-7 test payload
 
