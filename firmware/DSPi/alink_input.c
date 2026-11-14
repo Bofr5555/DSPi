@@ -164,6 +164,13 @@ static uint32_t pub_p, pub_head;
 static bool pub_locked;
 static uint32_t drop_rows;                  // whole frames still to drop (anchor correction)
 static bool pull_in;                        // the drain waits for the VCXO: rows are dropped meanwhile
+// WP USB3: while pulling in muted and more than 4 ppm off, the VCXO slews 2 ppm
+// per tick (26.7 ppm/s, 4x); after such a step the anchor waits 300 ms for the
+// outputs' receivers.
+#define PULL_IN_FAST_SLEW_PPM   2.0f
+#define PULL_IN_FAST_MIN_PPM    4.0f
+#define PULL_IN_SETTLE_US       300000u
+static uint32_t fast_settle_us;             // 0: none pending
 static uint64_t hold_f, hold_us;            // holdover: F extrapolated from here
 static bool relocked;                       // back from a holdover, the long rate window not yet valid again
 static const alink_apply_limits_t apply_lim = { PRESET_SLOTS, NUM_OUTPUT_CHANNELS, MAX_DELAY_SAMPLES };
@@ -975,7 +982,14 @@ static __attribute__((noinline)) bool phase_servo_tick(float hz) {
         if (act == ALINK_PHASE_ACT_REANCHOR) alink_phase_pi_reset(&ph.pi);
         else if (ph.state == ALINK_PHASE_LOCKED || ph.state == ALINK_PHASE_PENDING) trim = alink_phase_servo(&ph, e);
     }
-    input_servo_apply_trim(hz, trim);
+    // Pull-in before the anchor with the output silent: nothing is audible,
+    // so the VCXO may move faster (WP USB3); the normal slew everywhere else.
+    float v0 = soft_vcxo_current_ppm(), off = input_servo_feedforward_ppm() - v0;
+    bool fast = pull_in && !ph.started && pipeline_mute_is_silent() &&
+                (off > PULL_IN_FAST_MIN_PPM || off < -PULL_IN_FAST_MIN_PPM);
+    input_servo_apply_trim_slew(hz, trim, fast ? PULL_IN_FAST_SLEW_PPM : INPUT_SERVO_SLEW_PPM_PER_TICK);
+    float dv = soft_vcxo_current_ppm() - v0;
+    if (dv > 1.0f || dv < -1.0f) fast_settle_us = (time_us_32() + PULL_IN_SETTLE_US) | 1u;
     return true;
 }
 
@@ -1306,6 +1320,12 @@ bool alink_input_rate_ready(void) {
     // windows would be pushed off by the feed-forward's step when it arrives.
     pull_in = !meas.long_valid || input_servo_feedforward_ppm() == 0.0f ||
               d <= -ALINK_RATE_READY_PPM || d >= ALINK_RATE_READY_PPM;
+    if (!pull_in && fast_settle_us) {
+        // After a fast pull-in step: the receivers settle before the drain
+        // (still pulling in: the rows are dropped meanwhile).
+        if ((int32_t)(time_us_32() - fast_settle_us) < 0) pull_in = true;
+        else fast_settle_us = 0;
+    }
     return !pull_in;
 }
 

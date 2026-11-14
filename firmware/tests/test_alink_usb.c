@@ -62,7 +62,10 @@ void alink_usb_port_write_silence(uint32_t k) {
 }
 const void *alink_usb_port_keep(const alink_usb_pkt_t *p) { (void)p; return keep_copy; }
 static int n_ff_only, n_fill_servo;
-void alink_usb_port_actuate(float hz, float trim, bool ff) { (void)trim; if (ff) n_ff_only++; else n_fill_servo++; n_actuate++; vcxo = (hz / (float)fs - 1.0f) * 1e6f; }
+static float last_slew;
+static int n_preset, n_fast;
+void alink_usb_port_actuate(float hz, float trim, bool ff, float slew) { (void)trim; if (ff) n_ff_only++; else n_fill_servo++; n_actuate++; last_slew = slew; if (slew > ALINK_USB_SLEW_PPM) n_fast++; vcxo = (hz / (float)fs - 1.0f) * 1e6f; }
+void alink_usb_port_preset(float ppm) { n_preset++; vcxo = ppm; }
 void alink_usb_port_park(void) { n_park++; vcxo = 0.0f; }
 float alink_usb_port_vcxo_ppm(void) { return vcxo; }
 uint8_t alink_usb_port_apply(const alink_apply_op_t *op) { (void)op; return ALINK_APPLY_APPLIED; }
@@ -75,7 +78,7 @@ void alink_usb_port_ring_target(void) { n_ring_target++; }
 static bool pkts_active = true;
 bool alink_usb_port_stream_active(void) { return pkts_active; }
 
-static void reset_counts(void) { n_actuate = n_park = n_events = n_writes = n_results = n_mute = n_wlog = n_pulse = n_ring_target = 0; }
+static void reset_counts(void) { n_actuate = n_park = n_events = n_writes = n_results = n_mute = n_wlog = n_pulse = n_ring_target = n_preset = 0; }
 
 // ---------------------------------------------------------------------------
 
@@ -140,8 +143,17 @@ static void est_run(double host_ppm, double jitter_us, int late_pct, float *ppm_
 static void test_estimator(void) {
     float ppm;
     bool valid;
-    est_run(100.0, 2.0, 0, &ppm, &valid, 1900);
-    CHECK(!valid, "not valid before a 2 s span");
+    est_run(100.0, 2.0, 0, &ppm, &valid, 480);
+    CHECK(!valid, "not valid before the quick estimate's two blocks (0.5 s)");
+    // WP USB3: the quick estimate from 0.5 s, RP2040 jitter and late entries.
+    const double qc[] = { 0.0, 35.0, -100.0, 290.0, -290.0 };
+    for (unsigned c = 0; c < sizeof(qc) / sizeof(qc[0]); c++) {
+        est_run(qc[c], 2.0, 2, &ppm, &valid, 520);
+        CHECK(valid && fabs(ppm - qc[c]) < 1.0, "quick estimate at 0.52 s, RP2040 jitter, host %+.0f ppm: %.3f", qc[c],
+              ppm);
+        est_run(qc[c], 2.0, 2, &ppm, &valid, 1900);
+        CHECK(valid && fabs(ppm - qc[c]) < 1.0, "quick estimate held to 1.9 s, host %+.0f ppm: %.3f", qc[c], ppm);
+    }
     const double cases[] = { 0.0, 100.0, -100.0, 300.0, -400.0 };
     for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
         est_run(cases[c], 2.0, 2, &ppm, &valid, 20000);
@@ -689,6 +701,212 @@ static void test_ride(void) {
           us.diag.last_cause == 0xFF, "diag clear (1 only)");
 }
 
+// ---------------------------------------------------------------------------
+// WP USB3
+// ---------------------------------------------------------------------------
+
+// SOF passes, exact timestamps, at host ppm against the unit, from frame i0.
+static void run_host(alink_usb_t *us, double ppm, int i0, int i1, bool stream) {
+    double period = 48000.0 / (1.0 + ppm * 1e-6);
+    for (int i = i0; i < i1; i++) {
+        now48 = (uint32_t)(uint64_t)(i * period);
+        now_us = now48 / 48u;
+        alink_usb_tb_sof(&alink_usb_tb, (uint32_t)i & 0x7FF, now48, 0);
+        us->stream = stream;
+        alink_usb_service(us, now_us / 1000u);
+    }
+}
+
+static void test_out_of_step(void) {
+    alink_usb_t us;
+    alink_usb_init(&us);
+    alink_usb_limits(&us, 48000, 96, 49, 448);
+    us.mode = 2;
+    CHECK(alink_usb_out_of_step(&us), "mode 2 before any anchor: out of step");
+    us.mode = 1;
+    CHECK(!alink_usb_out_of_step(&us), "mode 1: never");
+    us.mode = 0;
+    CHECK(!alink_usb_out_of_step(&us), "mode 0: never");
+    us.mode = 2;
+    us.rejected = true;
+    CHECK(!alink_usb_out_of_step(&us), "a rejected host plays rate-free, as stock: not out of step");
+    us.rejected = false;
+    us.d = 160;
+    CHECK(!alink_usb_out_of_step(&us), "D below d_min (runs as mode 1, CONFIG): not out of step");
+    locked_engine(&us);
+    CHECK(!alink_usb_out_of_step(&us), "phase-locked: in step");
+    us.ph.state = ALINK_PHASE_PENDING;
+    CHECK(!alink_usb_out_of_step(&us), "PENDING (auto re-anchor off): plays");
+    us.ph.state = ALINK_PHASE_ANCHORING;
+    CHECK(alink_usb_out_of_step(&us), "verifying: out of step");
+    us.dark = true;
+    us.ph.state = ALINK_PHASE_LOCKED;
+    CHECK(!alink_usb_out_of_step(&us), "holdover keeps the timeline: in step");
+
+    // The service mutes every pass while out of step, from the first SOF on,
+    // with or without a stream; never in mode 1.
+    alink_usb_init(&us);
+    alink_usb_limits(&us, 48000, 96, 49, 448);
+    us.mode = 2;
+    memset(&alink_usb_tb, 0, sizeof(alink_usb_tb));
+    reset_counts();
+    run_host(&us, 35.0, 0, 300, true);
+    CHECK(n_mute == 300, "mode 2 pull-in: muted every pass (%d of 300)", n_mute);
+    alink_usb_init(&us);
+    alink_usb_limits(&us, 48000, 96, 49, 448);
+    us.mode = 1;
+    memset(&alink_usb_tb, 0, sizeof(alink_usb_tb));
+    reset_counts();
+    run_host(&us, 35.0, 0, 3000, true);
+    CHECK(n_mute == 0 && us.rate_locked, "mode 1: never muted (%d)", n_mute);
+}
+
+static void test_fast_slew(void) {
+    alink_usb_t us;
+    alink_usb_init(&us);
+    alink_usb_limits(&us, 48000, 96, 49, 448);
+    us.mode = 2;
+    memset(&alink_usb_tb, 0, sizeof(alink_usb_tb));
+    reset_counts();
+    n_fast = 0;
+    vcxo = 0.0f;
+    run_host(&us, 100.0, 0, 600, false);
+    CHECK(us.est.valid && us.est.quick && fabs(us.est.ppm - 100.0f) < 0.3f, "quick estimate at 0.6 s: %.3f",
+          us.est.ppm);
+    CHECK(n_fast == 1, "mode 2 pull-in, muted, 100 ppm off: the first step at the fast slew (%d fast)", n_fast);
+    CHECK(last_slew == ALINK_USB_SLEW_PPM, "at the feed-forward (within 4 ppm): the normal slew again");
+    // The stub VCXO jumps to the feed-forward: a fast step, the anchor settles first.
+    CHECK(us.settling && !alink_usb_anchor_wanted(&us), "after a fast step no anchor for 300 ms");
+    run_host(&us, 100.0, 600, 1000, false);
+    CHECK(alink_usb_anchor_wanted(&us), "then the anchor");
+    us.mode = 1;
+    us.rate_locked = false;
+    run_host(&us, 100.0, 1000, 1100, false);
+    CHECK(last_slew == ALINK_USB_SLEW_PPM, "mode 1: the normal slew (%.2f)", last_slew);
+}
+
+static void test_seed(void) {
+    alink_usb_t us;
+    alink_usb_init(&us);
+    uint8_t b[ALINK_USB_SEED_LEN], z[ALINK_USB_SEED_LEN] = { 0, 0, 0 };
+    alink_usb_seed_load(&us, z);
+    CHECK(!us.seed_ok, "all-zero bytes (every older firmware): no stored rate");
+    us.seed_ok = true;
+    us.seed_ppm = -123.456f;
+    alink_usb_seed_bytes(&us, b);
+    alink_usb_t u2;
+    alink_usb_init(&u2);
+    alink_usb_seed_load(&u2, b);
+    CHECK(u2.seed_ok && fabs(u2.seed_ppm + 123.46f) < 0.006f, "round trip %.3f", u2.seed_ppm);
+    b[2] ^= 1;
+    alink_usb_seed_load(&u2, b);
+    CHECK(!u2.seed_ok, "a bad check byte: none");
+    // Beyond the host range: none.
+    us.seed_ppm = 300.0f;
+    alink_usb_seed_bytes(&us, b);
+    alink_usb_seed_load(&u2, b);
+    CHECK(!u2.seed_ok, "a stored rate beyond 295 ppm: none");
+
+    // Preset once at the start in mode 2, before any SOF.
+    alink_usb_init(&us);
+    alink_usb_limits(&us, 48000, 96, 49, 448);
+    us.mode = 2;
+    us.seed_ok = true;
+    us.seed_ppm = 57.0f;
+    memset(&alink_usb_tb, 0, sizeof(alink_usb_tb));
+    reset_counts();
+    vcxo = 0.0f;
+    now48 = now_us = 0;
+    alink_usb_service(&us, 0);
+    alink_usb_service(&us, 1);
+    CHECK(n_preset == 1 && vcxo == 57.0f && us.seed_used, "mode 2: the VCXO starts at the stored rate (%d presets)",
+          n_preset);
+    uint8_t st[ALINK_USB_STATUS_LEN];
+    alink_usb_get_status(&us, st);
+    CHECK(st[3] & 0x20, "status flags bit 5: seeded");
+    // Mode 1 with a stream playing: no preset (audible).
+    alink_usb_init(&us);
+    us.mode = 1;
+    us.seed_ok = true;
+    us.seed_ppm = 57.0f;
+    us.stream = true;
+    reset_counts();
+    vcxo = 0.0f;
+    alink_usb_service(&us, 0);
+    CHECK(n_preset == 0, "mode 1 with a stream: no preset");
+    // A held VCXO (after a time-base loss) is not preset again.
+    us.stream = false;
+    vcxo = 12.0f;
+    alink_usb_service(&us, 1);
+    CHECK(n_preset == 0, "a VCXO already trimmed is kept");
+
+    // Save: due only when settled over a long span and idle.
+    alink_usb_init(&us);
+    alink_usb_limits(&us, 48000, 96, 49, 448);
+    us.mode = 1;
+    memset(&alink_usb_tb, 0, sizeof(alink_usb_tb));
+    reset_counts();
+    run_host(&us, -42.0, 0, 9500, true);
+    CHECK(us.rate_locked && !alink_usb_seed_save_due(&us, b), "a stream plays: no save");
+    run_host(&us, -42.0, 9500, 15000, false);
+    CHECK(!alink_usb_seed_save_due(&us, b), "idle for 5.5 s: not yet");
+    run_host(&us, -42.0, 15000, 20000, false);
+    CHECK(alink_usb_seed_save_due(&us, b), "idle 10 s, span 8 s: due");
+    alink_usb_seed_saved(&us, b);
+    CHECK(us.seed_ok && fabs(us.seed_ppm + 42.0f) < 0.05f && !alink_usb_seed_save_due(&us, b),
+          "saved %.2f; not due again", us.seed_ppm);
+}
+
+static void test_soft_reanchor(void) {
+    alink_usb_t us;
+    locked_engine(&us);
+    us.est.valid = true;
+    us.rate_locked = us.ticked = true;
+    us.state = ALINK_USB_ST_PHASE_LOCK;
+    us.now_ms = 1000u;
+    reset_counts();
+    // |e| 10 > 2 samples from LOCKED: soft (no timeline end).
+    phase_act(&us, ALINK_PHASE_ACT_REANCHOR, 0, 10.0f);
+    CHECK(us.started && us.soft && us.ph.state == ALINK_PHASE_ANCHORING && us.reanchors == 1 && n_mute == 1 &&
+          alink_usb_out_of_step(&us), "a 10-sample error: soft re-anchor, outputs keep running, muted");
+    CHECK(!alink_usb_anchor_wanted(&us), "no drain wanted");
+    // 100 samples: full.
+    locked_engine(&us);
+    phase_act(&us, ALINK_PHASE_ACT_REANCHOR, 0, 100.0f);
+    CHECK(!us.started && !us.soft, "a 100-sample error: full re-anchor");
+    // From ANCHORING (verification failed): full.
+    locked_engine(&us);
+    us.ph.state = ALINK_PHASE_ANCHORING;
+    phase_act(&us, ALINK_PHASE_ACT_REANCHOR, 0, 10.0f);
+    CHECK(!us.started, "a failed verification re-anchors in full");
+}
+
+static void test_ride_rebase(void) {
+    alink_usb_t us;
+    // Return 50 us off (within the 100 us F2 limit): ridden, estimator rebased, rate kept.
+    ride_setup(&us);
+    us.est.ppm = 3.0f;
+    ride_dark(&us, 48000u, 48000u * 299u);
+    double per = 48000.0 / (1.0 + 3e-6);
+    uint32_t t300 = (uint32_t)(per * 300.0) + 50u * 48u;
+    sof_at(1300u, t300);
+    ride_pass(&us, t300 + 200u);
+    CHECK(!us.dark && us.started && us.est.rebase && us.est.valid && us.est.ppm == 3.0f,
+          "a 50 us return: ridden, rebase pending, rate kept");
+    sof_at(1301u, t300 + 48000u);
+    ride_pass(&us, t300 + 48000u + 200u);
+    CHECK(!us.est.rebase && us.est.n[0] == 1301u && us.est.valid && us.est.ppm == 3.0f,
+          "the next clean pair restarts the anchors (n0 %u)", us.est.n[0]);
+    // 5 us: anchors kept.
+    ride_setup(&us);
+    us.est.ppm = 3.0f;
+    ride_dark(&us, 48000u, 48000u * 299u);
+    t300 = (uint32_t)(per * 300.0) + 5u * 48u;
+    sof_at(1300u, t300);
+    ride_pass(&us, t300 + 200u);
+    CHECK(!us.dark && !us.est.rebase && us.est.n[0] == 1000u, "a 5 us return keeps the anchors");
+}
+
 int main(void) {
     test_time_base();
     test_estimator();
@@ -701,6 +919,11 @@ int main(void) {
     test_fixups();
     test_round3();
     test_ride();
+    test_out_of_step();
+    test_fast_slew();
+    test_seed();
+    test_soft_reanchor();
+    test_ride_rebase();
     printf("test_alink_usb: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

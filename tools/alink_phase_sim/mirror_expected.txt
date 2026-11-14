@@ -79,13 +79,21 @@
 ### phase_verify: 2 port statements
     -int act = alink_phase_check(&ph,e,(alink_config[ALINK_CFG_FLAGS] & 0x02u)!= 0,&k)
     +int act = alink_phase_check(&ph,e,true,&k)
-### phase_servo_tick: 6 port statements
+### phase_servo_tick: 14 port statements
     - static __attribute__((noinline))bool phase_servo_tick(float hz){if(!alink_phase_active(&ph))return false
     + static bool phase_servo_tick(float hz){if(!alink_phase_active(&ph))return false
     -if(ph.state != ALINK_PHASE_ANCHORING){act = alink_phase_check(&ph,e,(alink_config[ALINK_CFG_FLAGS] & 0x02u)!= 0,&k)
     +if(ph.state != ALINK_PHASE_ANCHORING){act = alink_phase_check(&ph,e,true,&k)
-    -}input_servo_apply_trim(hz,trim)
-    +}servo_actuate(hz,trim)
+    -}float v0 = soft_vcxo_current_ppm(),off = input_servo_feedforward_ppm()- v0
+    -bool fast = pull_in && !ph.started && pipeline_mute_is_silent()&&(off > PULL_IN_FAST_MIN_PPM || off < -PULL_IN_FAST_MIN_PPM)
+    -input_servo_apply_trim_slew(hz,trim,fast ? PULL_IN_FAST_SLEW_PPM : INPUT_SERVO_SLEW_PPM_PER_TICK)
+    -float dv = soft_vcxo_current_ppm()- v0
+    -if(dv > 1.0f || dv < -1.0f)fast_settle_us =(time_us_32()+ PULL_IN_SETTLE_US)| 1u
+    +}float v0 =(float)vcxo_ppm,off = last_ff - v0
+    +bool fast = pull_in && !ph.started && preset_loading &&(off > PULL_IN_FAST_MIN_PPM || off < -PULL_IN_FAST_MIN_PPM)
+    +servo_actuate(hz,trim,fast ? PULL_IN_FAST_SLEW_PPM : INPUT_SERVO_SLEW_PPM_PER_TICK)
+    +float dv =(float)vcxo_ppm - v0
+    +if(dv > 1.0f || dv < -1.0f)fast_settle_us =(now_us + PULL_IN_SETTLE_US)| 1u
 ### enter_locked: 13 port statements
     -lock_comma0 = lf.stats.comma_errors
     -lock_crc80 = lf.stats.crc8_errors

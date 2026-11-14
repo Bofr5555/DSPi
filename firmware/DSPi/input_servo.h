@@ -18,6 +18,9 @@
 // the per-tick gains in input_servo.c run no faster than they were bench-verified.
 // See current_architecture.md "Clock Servo".
 #define INPUT_SERVO_TICK_US  75000u
+// Slew limit per tick of every apply function (~6.7 ppm/s), the audible-safe
+// default; input_servo_apply_trim_slew() takes another (WP USB3).
+#define INPUT_SERVO_SLEW_PPM_PER_TICK 0.5f
 
 // True once a tick period has elapsed since *last_us, which it then restarts.
 // Unsigned elapsed time stays wrap-safe across any gap (at most one tick late).
@@ -39,6 +42,12 @@ void input_servo_apply(float actual_freq, int fill_slot);
 // measured rate plus the caller's trim (its phase servo), slew-limited like
 // input_servo_apply().  Flash; once per tick.
 void input_servo_apply_trim(float actual_freq, float trim_ppm);
+// The same with the slew limit per tick given (WP USB3: a faster, bounded
+// slew while an input is muted out of step).  Flash.
+void input_servo_apply_trim_slew(float actual_freq, float trim_ppm, float slew_ppm);
+// Start the VCXO at ppm at once (a stored rate, WP USB3), the slew limiter
+// from there.  Only while nothing is audible.  Flash.
+void input_servo_preset(float ppm);
 
 // The last rate feed-forward either apply function computed (ppm), 0 before
 // the first tick: with soft_vcxo_current_ppm() it says whether the VCXO has

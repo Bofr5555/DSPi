@@ -69,8 +69,9 @@ The interrupt jitter does not enter the phase lock: the RP2350 takes the SOF ins
 ## 3. E2: rate lock (mode 1)
 
 1. Both units: `M $U set 0x00 --wvalue 0x8010 --payload 0101c00000000000` (mode 1, D 192).
-2. Wait until both read `state rate-locked` and `nominal-feedback 1`: `ST $A a; ST $B b`. That takes 2 s plus the pull-in
-   at 6.7 ppm/s: about 5 s at a 20 ppm host, 17 s at 100 ppm. `host` shows the PC's SOF rate against each unit's
+2. Wait until both read `state rate-locked` and `nominal-feedback 1`: `ST $A a; ST $B b`. That takes 0.5 s (the first
+   rate estimate) plus the pull-in at 6.7 ppm/s (mode 1 is audible, so the normal slew): about 3.5 s at a 20 ppm host,
+   15 s at 100 ppm; about 0.5 s when the unit stored this host's rate before (`seeded 1`, WP USB3). `host` shows the PC's SOF rate against each unit's
    crystal (the two differ by the units' crystals); `vcxo` converges to it.
 3. PipeWire combine sink to both units (`pactl load-module module-combine-sink sink_name=both slaves=<A>,<B>`), pink
    noise through the guarded player at 80 % or less, record A left and B right (`arecord -D hw:<card> -f S24_3LE -c 2
@@ -90,9 +91,24 @@ up to 60, between the two units).
 1. Latency option: any; USB runs the 2 ms option or longer, where D may be 170..399 at 48 kHz (324..351 at 96 kHz).
 2. Both units: `M $U set 0x00 --wvalue 0x8010 --payload 0201c00000000000` (mode 2, auto re-anchor, **D 192** = 4 ms).
    `M $U set 0x52` (REQ_SAVE_OUTPUT_CONFIG) persists it.
-3. Wait for `state phase-locked`, `phase locked`, `phase error` within +-0.05 sample (`ST $A a; ST $B b`): pull-in as
-   in E2, then about 0.2 s of muted anchoring. `anchors 1`, `re-anchors 0`. No stream is needed: the units are
-   locked on silence.
+3. Wait for `state phase-locked`, `phase locked`, `phase error` within +-0.05 sample (`ST $A a; ST $B b`): in mode 2
+   the pull-in is muted and 4x faster (26.7 ppm/s, then 0.3 s settling): about 1.5 s at a 20 ppm host, 4.5 s at
+   100 ppm, 12 s at 290 ppm; then a few ms of anchoring (the DAC mute is already held). `anchors 1`, `re-anchors 0`.
+   No stream is needed: the units are locked on silence.
+
+### 4.1b Muted while out of step, the stored host rate, soft re-anchors (WP USB3)
+
+1. **Muted out of step.** With the stream already playing (guarded player, 80 % or less), write mode 2 on A
+   (`0201c00000000000`): the output goes silent at once and comes back with a fade once `state phase-locked`; no
+   unaligned audio in between. Repeat with a power cycle of A while the stream plays: silent from power-up until
+   phase-locked (seconds on the first boot, about 0.5 s after the SOF starts once a rate is stored, below).
+2. **The stored host rate.** After A has been phase-locked for over 8 s, stop the stream and wait 10 s: A writes its
+   directory once (a 45 ms flash write, a muted re-anchor while nothing plays; `anchors` +1). Power-cycle A: `ST $A a`
+   shows `seeded 1` and `state phase-locked` about 0.5 s after the PC enumerates it. On another PC (another rate) the
+   first lock takes the slew, and A stores the new rate 10 s after it next idles.
+3. **Soft re-anchor.** A phase error of 3-64 samples (rare; the simulation forces one with a ring skip) re-anchors
+   without stopping the outputs: `re-anchors` +1, `anchors` unchanged, about 15 ms muted. Errors beyond 64 samples,
+   a preset save or a flash write still re-anchor in full (`anchors` +1).
 
 ### 4.2 CLICK skew (no programme needed)
 
@@ -164,7 +180,8 @@ times a second. Measure it on the real host with the real programme path, with n
    `rides` equal (every SOF absence ridden through), no timeline ends but `stop`, no USB events. If `anchors` still
    rises: the `ends` cause, `last_frames` against `last_us` (equal: the host's counter ran on), the bus events (a host
    suspend or reset), and `max pass` / `max time without a SOF interrupt` / `max SOF interrupt latency` (the unit's own
-   main loop or USB interrupt starved) say which.
+   main loop or USB interrupt starved) say which. `max time without a SOF interrupt` also grows to the length of every
+   SOF absence the host caused: it points at the unit only with `holdovers` 0 and no bus event (review usb2 N2).
 5. Note the worst minute; it decides whether D 192 (about 1-2 ms of main-loop stall budget: the held frame costs one
    frame of ring fill) is enough for the installation. A larger D (up to 399) buys stall budget at 1 sample per sample.
 
@@ -206,10 +223,10 @@ has about 2-3 faded gaps per second; on the bench 4.6 measures the real rate.
 
 | Scenario | max skew, last 10 s | latency A / B (samples) | notes |
 |---|---|---|---|
-| S1 two RP2350 | 0.008 sample (0.17 us) | 191.8 / 191.8 | locked 5.1 s / 9.6 s after boot |
+| S1 two RP2350 | 0.008 sample (0.17 us) | 191.8 / 191.8 | locked 1.5 s / 2.6 s after boot (WP USB3; 5.3 / 9.9 s before) |
 | S2 two RP2040 (ISR time, 2 % late entries) | 0.033 (0.68 us) | 191.9 / 191.9 | |
 | S3 RP2350 + RP2040 | 0.14 (3.0 us) | 191.8 / 191.9 | the RP2040's interrupt entry, a fixed offset |
-| S4 host +100 / -100 ppm | 0.022 / 0.044 | 191.8 | locked 15-19 s after boot (VCXO slew) |
+| S4 host +100 / -100 ppm | 0.022 / 0.044 | 191.8 | locked 4-5 s after boot (muted fast slew; 15-19 s before WP USB3) |
 | S5 / P3 host +-296, +-300, +-400 ppm | | | rejected (state 6), VCXO parked; +-294 ppm locks |
 | S6 / P1 0.5 % of packets skipped by the host | 0.038 | 191.8 / 191.8 | faded gaps, no re-anchor, no hard edge |
 | P2 / P2b 5 or 2 packets lost in a row | 0.029 / 0.026 | 191.8 | faded (5: also muted 20 ms), no re-anchor |
@@ -226,6 +243,19 @@ has about 2-3 faded gaps per second; on the bench 4.6 measures the real rate.
 | S12 96 kHz, D 336 | 0.025 | 335.8 / 335.8 | |
 | H1 / H2 no stream, mode 1 / mode 2 | | | VCXO on the host rate; mode 2 anchors on silence (with a 1 s DAC mute hold) |
 | S11 mode 1 (contrast) | mean 11, max 62 samples | 60 / 60 (spread 15-82) | the phase follows each packet and the fill servo |
+
+Lock times (WP USB3, `LOCKTIME` lines; host against the unit's crystal, the model's 200 ms DAC hold):
+
+| Case | before WP USB3 | WP USB3 | stored host rate |
+|---|---|---|---|
+| L2 / L3 / L4 cold boot, host +20 / +100 / +290 ppm | 4.8 / 16.9 / 45.5 s | 1.4 / 4.3-4.4 / 11.5 s | 0.51 s |
+| L5 SOF lost 15 s (beyond the ride), from the SOF's return | 3.5 s | 0.51 s | |
+| L6 stream restart | no relock (timeline kept) | no relock | |
+| L7 phase error 10 samples (ring skip) | 0.27 s (full) | 0.08 s (soft, from the skip; 15 ms muted) | |
+| L8 output rings reset (preset load, flash write), after the reset | 0.20 s (second DAC hold) | 0.004 s | |
+| L9 stored rate +290, host +20 (another PC) | | 10.8 s (slew from the stored rate) | |
+
+In every mode-2 scenario no stream sample is heard while the unit is out of step.
 
 Latencies read about 0.2 sample short of D in the model (the output DMA's quarter-frame word in the fill reading), the
 same on every unit.

@@ -85,6 +85,9 @@ void preset_set_output_config_mode(uint8_t mode);
 // in both modes; dormant in WITH_PRESET.  Returns PRESET_OK or
 // PRESET_ERR_FLASH_WRITE.  Mirrors preset_save_master_volume().
 uint8_t preset_save_output_config(void);
+// WP USB3: the settled USB host rate alone (V27 alink USB block, 3 bytes);
+// DSPI_ALINK_USB builds.  Main loop, inside the flash write bracket.
+uint8_t preset_save_alink_usb_seed(const uint8_t seed[3]);
 
 // Set the master-volume persistence mode (0 = independent, 1 = per-preset).
 // Values outside the valid range are clamped to INDEPENDENT.

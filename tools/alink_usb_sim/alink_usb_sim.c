@@ -117,11 +117,20 @@ typedef struct {
     double pend_sof_true;
     bool stamp_off_known;
     uint32_t stamp_off, misstamps, stamped;
+    // WP USB3: lock times and audible output while out of step (mode 2).
+    bool was_locked;
+    double lock_t, unlock_t;    // last entry into / exit from PHASE_LOCK (true time)
+    uint32_t audible_unlocked;  // stream samples written unmuted while mode 2 was not phase-locked
+    bool skipped, reset_done;
+    bool dac_on;                // the DAC's hardware mute pin asserted
+    double dac_t;               // since
+    uint32_t presets;
 } unit_t;
 
 typedef struct scen scen_t;
 static const scen_t *S;
 static double g_stall_at, g_stall_len, g_dac_hold = 0.2;
+static bool g_no_long_pass;
 
 static unit_t U[NU];
 static unit_t *cur;
@@ -160,7 +169,13 @@ uint32_t alink_usb_port_room(void) {
     if (r <= 0) return 0;
     return r < cap() ? (uint32_t)r : cap();
 }
+static bool out_of_step_now(void) {
+    const alink_usb_t *u = &cur->us;
+    return u->mode == ALINK_USB_MODE_PHASE && u->state != ALINK_USB_ST_PHASE_LOCK &&
+           u->state != ALINK_USB_ST_REJECTED && alink_usb_phase_possible(u, fs);
+}
 static void write_one(double c) {
+    if (!isnan(c) && cur->W >= cur->mute_end_w && out_of_step_now()) cur->audible_unlocked++;
     cur->content[cur->W % RING] = c;
     cur->W++;
     if (cur->running && ring_fill() > 448.0) cur->overruns++;
@@ -195,20 +210,20 @@ const void *alink_usb_port_keep(const alink_usb_pkt_t *p) {
     cur->keep = *(const spkt_t *)p->data;
     return &cur->keep;
 }
-static void vcxo_cmd(double ppm) {
-    if (ppm > cur->last_cmd + 0.5) ppm = cur->last_cmd + 0.5;
-    if (ppm < cur->last_cmd - 0.5) ppm = cur->last_cmd - 0.5;
+static void vcxo_cmd(double ppm, double slew) {
+    if (ppm > cur->last_cmd + slew) ppm = cur->last_cmd + slew;
+    if (ppm < cur->last_cmd - slew) ppm = cur->last_cmd - slew;
     cur->last_cmd = ppm;
     if (ppm > 300) ppm = 300;
     if (ppm < -300) ppm = -300;
     cur->vcxo = round(ppm / 0.11) * 0.11;
 }
-void alink_usb_port_actuate(float hz, float trim, bool ff_trim) {
+void alink_usb_port_actuate(float hz, float trim, bool ff_trim, float slew) {
     double ff = ((double)hz / fs - 1.0) * 1e6;
     if (ff_trim) {
         cur->fill_int = 0;
         cur->fill_smooth = cur->target / 48.0;
-        vcxo_cmd(ff + trim);
+        vcxo_cmd(ff + trim, slew);
         return;
     }
     // input_servo_apply(): P 2 ppm / buffer (48 frames) on the smoothed fill, I 5e-5.
@@ -221,7 +236,13 @@ void alink_usb_port_actuate(float hz, float trim, bool ff_trim) {
     cur->fill_int += e * 5e-5;
     if (cur->fill_int > 3) cur->fill_int = 3;
     if (cur->fill_int < -3) cur->fill_int = -3;
-    vcxo_cmd(ff + p + cur->fill_int);
+    vcxo_cmd(ff + p + cur->fill_int, 0.5);
+}
+void alink_usb_port_preset(float ppm) {
+    cur->last_cmd = ppm;
+    cur->fill_int = 0;
+    cur->vcxo = round(ppm / 0.11) * 0.11;
+    cur->presets++;
 }
 void alink_usb_port_park(void) {
     cur->vcxo = cur->last_cmd = 0;
@@ -374,6 +395,18 @@ static void drain(unit_t *u) {
     }
 }
 
+// The DAC's hardware mute (main.c, alink_usb.c dac_hold_update(), WP USB3):
+// asserted once the soft mute has silenced the output while out of step;
+// complete_pipeline_reset() keeps it asserted when the USB anchor follows (the
+// reset's own bracket waited the hold before it); the anchor drains when the
+// hold has elapsed since the assert and releases it after the start.
+static void sim_reset_dac(unit_t *u) {
+    if (alink_usb_out_of_step(&u->us)) {
+        u->dac_on = true;
+        u->dac_t = T - g_dac_hold;
+    }
+}
+
 static void unit_pass(unit_t *u) {
     unit_sel(u);
     // tud_task: xfer_cb pushes the packet and re-arms.
@@ -392,10 +425,21 @@ static void unit_pass(unit_t *u) {
         // main.c: prepare_pipeline_reset() asserts the DAC mute, and the drain
         // waits for its hold (the K340's GP11 mute: modelled as 200 ms) while
         // the anchor is still wanted (round 3, hardware H2).
+        bool oos = alink_usb_out_of_step(&u->us);
+        if (oos && !u->dac_on && !u->us.started && u->W < u->mute_end_w) {
+            u->dac_on = true;
+            u->dac_t = T;
+        } else if (!oos && u->dac_on && !u->us.prefilling) {
+            u->dac_on = false;
+        }
         bool want = alink_usb_anchor_wanted(&u->us);
-        if (want && u->hold_until < 0) u->hold_until = T + g_dac_hold;
-        if (want && T >= u->hold_until) {
-            u->hold_until = -1;
+        // prepare_pipeline_reset(): muted while the hold runs (preset_loading).
+        if (want) alink_usb_port_soft_mute(fs / 10u);
+        if (want && !u->dac_on) {
+            u->dac_on = true;
+            u->dac_t = T;
+        }
+        if (want && T >= u->dac_t + g_dac_hold) {
             u->running = false;     // drain_and_disable_outputs()
             u->W = 0;
             u->C = 0;
@@ -413,8 +457,12 @@ static void unit_pass(unit_t *u) {
     drain(u);
     alink_usb_service(&u->us, (uint32_t)(local_us(T) / 1000.0));
     if (!u->locked_at && u->us.state == ALINK_USB_ST_PHASE_LOCK) u->locked_at = T - u->boot_s;
+    bool lk = u->us.state == ALINK_USB_ST_PHASE_LOCK;
+    if (lk && !u->was_locked) u->lock_t = T;
+    if (!lk && u->was_locked) u->unlock_t = T;
+    u->was_locked = lk;
     double pass = 60e-6 + urand() * 240e-6;
-    if (urand() < 0.01) pass = 900e-6;
+    if (urand() < 0.01 && !g_no_long_pass) pass = 900e-6;
     if (g_stall_len > 0 && u == &U[0] && !u->stalled && T >= g_stall_at) {
         pass = g_stall_len;             // one long pass (a flash write, a long command)
         u->stalled = true;
@@ -425,6 +473,7 @@ static void unit_pass(unit_t *u) {
 
 static void unit_start(unit_t *u) {
     unit_sel(u);
+    u->dac_on = false;              // dac_hw_mute_release() after enable_outputs_in_sync()
     u->running = true;
     u->start_at = -1;
     alink_usb_on_enabled(&u->us);
@@ -511,6 +560,12 @@ struct scen {
     double sof_gap_at, sof_gap_len;     // SOF stops (bus suspend / host controller restart), frame number jumps
     double click_at;            // CLICK on both units at the same bus frame
     uint32_t fs;                // 0: 48 kHz
+    // WP USB3 lock-time probes
+    double skip_at; uint32_t skip_n;            // unit 0's output reader skips skip_n samples (a ring skip)
+    double reset_at;                            // unit 0's output rings reset (preset load, flash write)
+    double ev_at;                               // the event lock times are measured from
+    bool seeded; double seed;                   // a stored host rate (ppm against the unit's crystal)
+    bool no_long_pass;                          // no 900 us main-loop passes (they lose packets at random)
 };
 
 typedef struct {
@@ -524,6 +579,8 @@ typedef struct {
     uint32_t holes[NU], hole_samples[NU], muted_silence[NU], gap_events[NU], events[NU], misstamps[NU], stamped[NU];
     double locked_at[NU];
     uint32_t rides[NU];
+    double relock[NU];              // from ev_at to the last entry into PHASE_LOCK (-1: never left / not after)
+    uint32_t audible_unlocked[NU];
     double lat_after_restart[NU];
     int gaps_at_stop;               // unit 1: GAPs counted from 30 ms before the alt 0 to 100 ms after it
     uint32_t gaps_pre;
@@ -538,6 +595,7 @@ static void run(const scen_t *s, res_t *r) {
     S = s;
     g_stall_at = s->stall_at;
     g_stall_len = s->stall_len;
+    g_no_long_pass = s->no_long_pass;
     g_dac_hold = s->dac_hold > 0 ? s->dac_hold : 0.2;
     int burst_done = 0;
     host_ppm = s->host_ppm;
@@ -556,6 +614,12 @@ static void run(const scen_t *s, res_t *r) {
         U[i].d = s->d;
         U[i].stream_offset = s->stream_offset[i];
         unit_init(&U[i]);
+        if (s->seeded) {
+            int16_t v = (int16_t)lround(s->seed * 100.0);
+            uint8_t b[ALINK_USB_SEED_LEN] = { (uint8_t)v, (uint8_t)((uint16_t)v >> 8), 0 };
+            b[2] = (uint8_t)(0xA5u ^ b[0] ^ b[1]);
+            alink_usb_seed_load(&U[i].us, b);
+        }
     }
     meas_reset(&r->m);
     const double dt = 1e-6;
@@ -637,6 +701,21 @@ static void run(const scen_t *s, res_t *r) {
                 unit_sof_at(u, u->pend_f11, u->pend_sof_true, T);
                 u->pend_sof = false;
             }
+            if (i == 0 && s->skip_n && !u->skipped && T >= s->skip_at) {
+                u->skipped = true;
+                u->C += s->skip_n;                  // the output reader skips: the rings lose skip_n samples
+                if (u->C > (double)u->W) u->W = (uint64_t)ceil(u->C);
+            }
+            if (i == 0 && s->reset_at > 0 && !u->reset_done && T >= s->reset_at) {
+                // complete_pipeline_reset(): the rings restart empty at the stock target.
+                u->reset_done = true;
+                unit_sel(u);
+                u->W = (uint64_t)ceil(u->C);
+                alink_usb_outputs_reset(&u->us);
+                sim_reset_dac(u);
+                for (uint32_t k = 0; k < u->target; k++) write_one(NAN);
+                unit_unsel();
+            }
             if (u->comp_t > 0 && T >= u->comp_t && !masked) unit_complete(u);
             if (u->start_at >= 0 && T >= u->start_at) unit_start(u);
             if (T >= u->next_pass) unit_pass(u);
@@ -692,6 +771,8 @@ static void run(const scen_t *s, res_t *r) {
         r->stamped[i] = u->stamped;
         r->locked_at[i] = u->locked_at;
         r->rides[i] = u->us.diag.rides;
+        r->relock[i] = s->ev_at > 0 && u->lock_t > s->ev_at && u->us.state == ALINK_USB_ST_PHASE_LOCK ? u->lock_t - s->ev_at : -1.0;
+        r->audible_unlocked[i] = u->audible_unlocked;
         if (getenv("SIM_DEBUG"))
             printf("    dbg unit %d: tb valid %d have_c %d n %u n_c %u | est seeded %d valid %d n0 %u last %u ppm %.3f | tb_ok %d rej %d ticked %d locked %d | e %.3f integ %.3f trim %.3f\n",
                    i, u->tb.valid, u->tb.have_c, u->tb.n, u->tb.n_c, u->us.est.seeded, u->us.est.valid,
@@ -721,6 +802,8 @@ static void report(const scen_t *s, const res_t *r) {
                "GAP events %u, events %u, mis-stamped packets %u of %u\n", i, r->holes[i], r->hole_samples[i],
                r->muted_silence[i], r->gap_events[i], r->events[i], r->misstamps[i], r->stamped[i]);
     printf("    phase-locked %.2f s / %.2f s after boot\n", r->locked_at[0], r->locked_at[1]);
+    printf("    stream samples audible while out of step (mode 2): %u / %u\n", r->audible_unlocked[0], r->audible_unlocked[1]);
+    if (s->ev_at > 0) printf("    relock after the event at %.1f s: %.3f s / %.3f s\n", s->ev_at, r->relock[0], r->relock[1]);
     if (r->m.skew_n)
         printf("    skew (last 10 s): max %.4f mean %.4f samples (%.2f us)\n", r->m.skew_max, r->m.skew_sum / r->m.skew_n,
                r->m.skew_max * 1e6 / FS);
@@ -753,6 +836,11 @@ static bool allow_underrun;
 
 static void expect_locked(const scen_t *s, const res_t *r, double skew_max) {
     for (int i = 0; i < NU; i++) {
+        // Owner decision 2026-11-14 (WP USB3): nothing of a stream is heard
+        // while a mode-2 unit is out of step.
+        if (s->mode == ALINK_USB_MODE_PHASE)
+            CHECK(r->audible_unlocked[i] == 0, "%s: unit %d muted while out of step (%u stream samples heard)", s->name, i,
+                  r->audible_unlocked[i]);
         // review usb1 F1: never a hard edge on the playing stream.
         CHECK(r->holes[i] == 0, "%s: unit %d no hard edge on the playing stream (holes %u)", s->name, i, r->holes[i]);
         double mean = r->m.lat_n[i] ? r->m.lat_sum[i] / r->m.lat_n[i] : 1e9;
@@ -768,9 +856,161 @@ static void expect_locked(const scen_t *s, const res_t *r, double skew_max) {
     CHECK(r->m.skew_n > 9000 && r->m.skew_max < skew_max, "%s: skew %.4f < %.2f sample", s->name, r->m.skew_max, skew_max);
 }
 
+#define WANT(n) (!only || strstr((n), only))
+
+// One LOCKTIME line: phase-locked after boot (cold) or after the event.
+static void locktime(const scen_t *s, const res_t *r) {
+    if (s->ev_at > 0)
+        printf("LOCKTIME %-34s relock %.3f / %.3f s after %.1f s (anchors %u/%u reanchors %u/%u)\n", s->name, r->relock[0],
+               r->relock[1], s->ev_at, r->anchors[0], r->anchors[1], r->reanchors[0], r->reanchors[1]);
+    else
+        printf("LOCKTIME %-34s locked %.3f / %.3f s after boot (anchors %u/%u)\n", s->name, r->locked_at[0],
+               r->locked_at[1], r->anchors[0], r->anchors[1]);
+}
+
+// The lock-time scenarios check the skew too, with the margin of a 40 s run
+// that locked early: the PI is still trimming the rate estimate's 0.1 ppm
+// steps (the window rotates every 8 s), S1 and S4 are the skew's own cases.
+#define LOCK_SKEW 0.08
+
+static void lock_scenarios(const char *only) {
+    res_t r;
+    // Cold boot: phase-locked (s after boot) at most; unit 1 boots 3.7 s later.
+    {
+        scen_t s = base("L1 cold boot, host +35 ppm");
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            expect_locked(&s, &r, LOCK_SKEW);
+            locktime(&s, &r);
+            CHECK(r.locked_at[0] < 3.0 && r.locked_at[1] < 3.0, "L1: locked within 3 s of boot (%.2f / %.2f)",
+                  r.locked_at[0], r.locked_at[1]);
+        }
+    }
+    const double hp[] = { 20.0, 100.0, 290.0, -290.0 };
+    const char *const tag[] = { "L2", "L3", "L4", "L4n" };
+    const double lim[] = { 2.0, 5.5, 13.5, 13.5 };
+    for (int k = 0; k < 4; k++) {
+        for (int sd = 0; sd < 2; sd++) {
+            static char nm[8][80];
+            snprintf(nm[2 * k + sd], sizeof(nm[0]), "%s%s cold boot, host %+.0f ppm%s", tag[k], sd ? "s" : "", hp[k],
+                     sd ? ", stored rate 0.4 ppm off" : "");
+            scen_t s = base(nm[2 * k + sd]);
+            s.host_ppm = hp[k];
+            s.xtal[0] = s.xtal[1] = 0;
+            s.duration = 40.0;
+            if (sd) {
+                s.seeded = true;
+                s.seed = hp[k] - 0.4;       // the host drifted since the save
+            }
+            if (WANT(s.name)) {
+                run(&s, &r);
+                report(&s, &r);
+                expect_locked(&s, &r, LOCK_SKEW);
+                locktime(&s, &r);
+                double l = sd ? 1.2 : lim[k];
+                CHECK(r.locked_at[0] < l && r.locked_at[1] < l, "%s: locked within %.1f s of boot (%.2f / %.2f)", s.name,
+                      l, r.locked_at[0], r.locked_at[1]);
+            }
+        }
+    }
+    {
+        // The stored rate is another host's: the quick estimate takes over and
+        // the muted fast slew brings the VCXO over (no worse than no seed by much).
+        scen_t s = base("L9 cold boot, host +20 ppm, stored rate +290 (another host)");
+        s.host_ppm = 20.0;
+        s.xtal[0] = s.xtal[1] = 0;
+        s.seeded = true;
+        s.seed = 290.0;
+        s.duration = 40.0;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            expect_locked(&s, &r, LOCK_SKEW);
+            locktime(&s, &r);
+            CHECK(r.locked_at[0] < 12.0 && r.locked_at[1] < 12.0, "L9: locked within 12 s (%.2f / %.2f)", r.locked_at[0],
+                  r.locked_at[1]);
+        }
+    }
+    {
+        scen_t s = base("L5 SOF lost 15 s at 20 s (beyond the ride)");
+        s.sof_gap_at = 20.0;
+        s.sof_gap_len = 15.0;
+        s.gap_counts = true;
+        s.ev_at = 35.0;
+        s.duration = 60.0;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            expect_locked(&s, &r, LOCK_SKEW);
+            locktime(&s, &r);
+            CHECK(r.relock[0] > 0 && r.relock[0] < 1.0 && r.relock[1] > 0 && r.relock[1] < 1.0,
+                  "L5: relocked within 1 s of the SOF's return (%.2f / %.2f)", r.relock[0], r.relock[1]);
+        }
+    }
+    {
+        scen_t s = base("L6 host stream restart (unit 1, 2 s)");
+        s.stop_at = 20.0;
+        s.stop_len = 2.0;
+        s.ev_at = 22.0;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            expect_locked(&s, &r, LOCK_SKEW);
+            locktime(&s, &r);
+            CHECK(r.anchors[1] == 1 && r.reanchors[1] == 0, "L6: the restart keeps the timeline (no relock needed)");
+        }
+    }
+    {
+        scen_t s = base("L7 re-anchor: ring skip 10 samples");
+        s.skip_at = 25.0;
+        s.skip_n = 10;
+        s.ev_at = 25.0;
+        s.duration = 55.0;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            expect_locked(&s, &r, LOCK_SKEW);
+            locktime(&s, &r);
+            CHECK(r.anchors[0] == 1 && r.reanchors[0] == 1 && r.relock[0] > 0 && r.relock[0] < 0.1,
+                  "L7: a soft re-anchor (no drain), relocked in %.3f s", r.relock[0]);
+        }
+    }
+    {
+        scen_t s = base("L7b re-anchor: ring skip 100 samples (beyond the soft correction)");
+        s.skip_at = 25.0;
+        s.skip_n = 100;
+        s.ev_at = 25.0;
+        s.duration = 55.0;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            allow_underrun = true;          // 100 of the ring's ~130 samples gone: it runs dry until the anchor
+            expect_locked(&s, &r, LOCK_SKEW);
+            allow_underrun = false;
+            locktime(&s, &r);
+            CHECK(r.anchors[0] == 2 && r.relock[0] > 0 && r.relock[0] < 0.4, "L7b: a full re-anchor, relocked in %.3f s",
+                  r.relock[0]);
+        }
+    }
+    {
+        scen_t s = base("L8 re-anchor: output rings reset");
+        s.reset_at = 25.0;
+        s.ev_at = 25.0;
+        s.duration = 55.0;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            expect_locked(&s, &r, LOCK_SKEW);
+            locktime(&s, &r);
+            CHECK(r.anchors[0] == 2 && r.relock[0] > 0 && r.relock[0] < 0.1,
+                  "L8: re-anchored without a second DAC hold, relocked in %.3f s", r.relock[0]);
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     const char *only = argc > 1 ? argv[1] : NULL;
-#define WANT(n) (!only || strstr((n), only))
     res_t r;
 
     {
@@ -1218,6 +1458,10 @@ int main(int argc, char **argv) {
         s.stop_at = 20.0;
         s.stop_len = 2.0;
         s.stop_lead = 0.005;
+        // Only the stop's own gap: the model's random packet loss (1 % of the
+        // passes take 900 us and miss the re-arm) can put a real GAP into the
+        // 130 ms window and made this check depend on the random sequence.
+        s.no_long_pass = true;
         if (WANT(s.name)) {
             run(&s, &r);
             report(&s, &r);
@@ -1260,6 +1504,10 @@ int main(int argc, char **argv) {
                   r.anchors[1]);
         }
     }
+    // ----------------------------------------------------------------------
+    // WP USB3: lock times (LOCKTIME lines) and out-of-step muting
+    // ----------------------------------------------------------------------
+    lock_scenarios(only);
     printf("alink_usb_sim: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

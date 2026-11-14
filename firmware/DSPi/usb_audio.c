@@ -1069,6 +1069,10 @@ static uint16_t uac1_driver_open(uint8_t rhport, tusb_desc_interface_t const *it
 // buffer is FULL from its completion until the next arm, which happens with
 // out_wait set and interrupts off, so a FULL buffer seen while out_wait is
 // set is this packet.
+// The event index needs no mask (review usb2 N3): TinyUSB's ids stop below
+// DCD_EVENT_COUNT (9 in 0.18, incl. USBD_EVENT_FUNC_CALL), checked here.
+_Static_assert(DCD_EVENT_COUNT <= sizeof(alink_usb_tb.ev) / sizeof(alink_usb_tb.ev[0]),
+               "TinyUSB event ids beyond alink_usb_tb.ev[]: widen the array");
 void __not_in_flash_func(tud_event_hook_cb)(uint8_t rhport, uint32_t eventid, bool in_isr) {
     (void)rhport;
     (void)in_isr;

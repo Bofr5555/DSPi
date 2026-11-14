@@ -135,9 +135,11 @@ silence. e shows it.
 
 1. Lock (class, trim scan, superframe), then the VCXO pull-in. The drain waits until the long rate window is valid
    (a 2 s span) and the VCXO is within 1 ppm of that feed-forward (`alink_input_rate_ready()`), so the anchor neither
-   drifts away while the VCXO still slews at 6.7 ppm/s nor gets pushed off when the 32 ms windows hand over to the long
-   one. Meanwhile rows are dropped, so the decoder stays current. This takes 2-4 s from a small crystal offset and up
-   to 10 s from 50 ppm, and the outputs stay muted. After a holdover at the same rate the VCXO is still where it was:
+   drifts away while the VCXO still slews nor gets pushed off when the 32 ms windows hand over to the long
+   one. Meanwhile rows are dropped, so the decoder stays current, and the outputs stay muted. Since WP USB3 the
+   VCXO slews 2 ppm per tick (26.7 ppm/s) while it pulls in muted and is more than 4 ppm off, and the drain then
+   waits 300 ms for the outputs' receivers to settle; everywhere else it keeps 6.7 ppm/s. Start-up (simulation):
+   2.0-2.6 s from any offset up to 50 ppm (2.0-8.6 s before), 4.1 s at 100 ppm (14.9 s). After a holdover at the same rate the VCXO is still where it was:
    no pull-in wait (review lk6 F4).
 2. Drain, then prefill the rings to `D - block_cap - 16` frames (the latency option's target when that is larger).
    `output_latency_apply()` asks `alink_input_ring_target()` for the ALINK source.

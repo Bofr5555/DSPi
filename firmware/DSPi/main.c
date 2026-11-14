@@ -383,7 +383,7 @@ static void stop_foreign_input_receivers(uint8_t keep) {
 #endif
 #if DSPI_ALINK_USB
     // WP USB1: the SOF lock belongs to the USB source (VCXO parked, ops cancelled).
-    if (keep != INPUT_SOURCE_USB && alink_usb.state != ALINK_USB_ST_OFF) alink_usb_fw_stop();
+    if (keep != INPUT_SOURCE_USB && alink_usb.state != ALINK_USB_ST_OFF) alink_usb_fw_stop(false);
 #endif
 }
 
@@ -1466,7 +1466,15 @@ static void complete_pipeline_reset(void) {
     // input_source_is_spdif() matches the prefill block's own gate, covering
     // SPDIF inputs 2/3 as well; a bare == INPUT_SOURCE_SPDIF here once left
     // those two sources releasing early through this same path.
-    if (!(preset_loading &&
+    // WP USB3: a USB phase-mode unit out of step (its timeline just ended
+    // with these rings) keeps the mute too: its anchor drains and restarts the
+    // outputs once more, at once (the hold has elapsed), and releases it.
+    bool usb_anchor_follows = false;
+#if DSPI_ALINK_USB
+    usb_anchor_follows = active_input_source == INPUT_SOURCE_USB && alink_usb_fw_keep_dac_mute();
+#endif
+    if (!usb_anchor_follows &&
+        !(preset_loading &&
           (active_input_source == INPUT_SOURCE_I2S ||
            input_source_is_spdif(active_input_source) ||
            active_input_source == INPUT_SOURCE_ADAT ||
@@ -2159,6 +2167,7 @@ static void input_service_handshakes(void) {
             enable_outputs_in_sync();
             alink_usb_on_enabled(&alink_usb);
             dac_hw_mute_release();
+            alink_usb_fw_dac_released();
         }
     }
 #endif
@@ -2464,6 +2473,16 @@ int main(void) {
                     complete_flash_write_operation_full();
                 }
             }
+#if DSPI_ALINK_USB
+            // WP USB3: the settled host rate, so the next start begins there.
+            // Due only while no stream has played for 10 s (the write re-anchors
+            // a phase timeline), at most every 10 minutes and three times a boot.
+            if (alink_usb_fw_seed_persist_due()) {
+                prepare_flash_write_operation();
+                alink_usb_fw_seed_persist();
+                complete_flash_write_operation_full();
+            }
+#endif
 
             extern volatile bool flash_set_output_config_mode_pending;
             if (flash_set_output_config_mode_pending) {

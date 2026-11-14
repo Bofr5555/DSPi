@@ -28,7 +28,8 @@ def status(b):
     (st, ph, rc, fl, hppm, vppm, e, s, bus, dmin, dmax, fill, first, gaps, age, shift, nsamp, anch, rean, miss,
      late) = struct.unpack("<BBBBfffQHHHHHHIiIIIII", b[:64])
     print(f"state {name(STATES, st)}, phase {name(PHASE, ph)}, rate {RATES.get(rc, 'other')}")
-    print(f"flags: hw-timestamp {fl & 1}, stream {fl >> 1 & 1}, nominal-feedback {fl >> 2 & 1}, time-base {fl >> 3 & 1}")
+    print(f"flags: hw-timestamp {fl & 1}, stream {fl >> 1 & 1}, nominal-feedback {fl >> 2 & 1}, time-base {fl >> 3 & 1}, "
+          f"holdover {fl >> 4 & 1}, seeded {fl >> 5 & 1}")
     print(f"host {hppm:+.3f} ppm, vcxo {vppm:+.3f} ppm, phase error {e:+.4f} samples")
     print(f"S now {s}, bus frame {bus}, d {dmin}..{dmax}, ring fill {fill}")
     if first == 0xFFFF:
