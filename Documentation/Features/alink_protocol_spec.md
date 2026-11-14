@@ -221,12 +221,29 @@ C MUST satisfy `layout(C) <= min S_F` at the class and rate in effect, and `1 <=
 | L1 | 8 | 8 | 3 |
 | L2 | 19 | 18 | 8 |
 | L3 | 41 | 38 | 18 |
+| *USB-direct, RP2350 (for comparison)* | *2* | *8 (16-bit); 4 (24-bit)* | *2* |
+| *USB-direct, RP2040 (for comparison)* | *2* | *2* | *2* |
 
-**This table is normative and is the only capacity table** (coordinator decision, 2026-11-13). Code takes it from
-`alink_max_channels(class, rate)` in C or `alink_codec.CAPACITY[(class, rate)]` in Python, never from a copy:
+**This table is normative and is the only capacity table** (coordinator decision, 2026-11-13), except its rows
+marked *for comparison* (below). Code takes it from `alink_max_channels(class, rate)` in C or `alink_codec.CAPACITY[(class, rate)]` in Python, never from a copy:
 `EXT_ALINK_TX.channels` (`extension_channel_spec.md` 2.8.8), the sender (LK4), the fake device and the clients
 accept exactly C = 1 .. this value. The SYS2 figures (16 on L3 at 96 kHz; the 48 kHz values at 44.1 kHz) are
 superseded. Defaults are whole banks: 8 on L1, 16 on L2, 32 on L3 at 48 kHz.
+
+The rows marked *for comparison* are not alink classes and not part of this normative table: they are the channels a
+DSPi unit takes in one USB full-speed stream as an alink USB-direct unit (`extension_channel_spec.md` 2.9; the formats
+in `usb_descriptors.c`: stereo at every rate, 4/6/8 channels at 48 kHz only, 6 and 8 in 16 bit). `alink_max_channels()`
+and `CAPACITY` do not know them. At 44.1 kHz USB-direct is rate lock only (no phase lock, 2.9.1). How many such units one
+computer carries (computed from USB 2.0 5.11.3, not measured; WP AUSB3, guide `usb-direct-home-theater.md` in the
+console repository):
+
+| USB-direct units, for comparison | Units | Why |
+|---|---|---|
+| per single-TT hub (or a hub run at full speed: an isolator or a full-speed extender in front of it) | 1 | every unit reserves its endpoint's 788 B (RP2350; 582 B RP2040) per 1 ms frame whatever it streams: about 632 us (471 us) of the 900 us a full-speed frame allows for periodic transfers |
+| per multi-TT hub | 1 per downstream port | one transaction translator, so one full-speed frame, per port |
+| per USB controller (one high-speed bus, one SOF) | about 30 | about 19 us of split transactions per unit per frame; controllers check bandwidth themselves and may refuse sooner |
+
+Units that play aligned must be on one USB controller: another controller counts other frames on another clock.
 
 ### 5.8 PRBS-7 test payload
 
