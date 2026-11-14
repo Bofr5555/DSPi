@@ -70,6 +70,7 @@
 #include "tusb.h"
 #include "pico/binary_info.h"
 #include "build_info.h"
+#include "scope_marker.h"   // -- WP SCOPE1 -- (test builds only; empty otherwise)
 
 // Same stamp REQ_GET_BUILD_INFO reports, embedded in the UF2's binary info
 // so `picotool info` can identify a build file or a BOOTSEL-mode device.
@@ -2328,6 +2329,8 @@ int main(void) {
     // Enable watchdog
     watchdog_enable(8000, 1);
 
+    scope_marker_init();   // -- WP SCOPE1 -- no-op unless ALINK_SCOPE_MARKER_GPIO
+
     while (1) {
         // Update watchdog
         watchdog_update();
@@ -2338,6 +2341,7 @@ int main(void) {
         // gap, min consumer fill, PWM-pacer movement).  No-op when the flag
         // is 0.
         clock_diag_sample();
+        scope_marker_service();   // -- WP SCOPE1 -- no-op unless ALINK_SCOPE_MARKER_GPIO
 
         // TinyUSB device task — processes enumeration, control transfers, and
         // deferred bus events.  Must be called at least once per main-loop

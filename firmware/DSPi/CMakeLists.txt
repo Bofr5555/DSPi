@@ -280,6 +280,28 @@ if (DSPI_ALINK_USB)
     endif()
 endif()
 
+# -- WP SCOPE1 -- ALINK_SCOPE_MARKER_GPIO=<pin>: TEST BUILDS ONLY.  The pin rises
+# when output sample index M (a multiple of ALINK_SCOPE_MARKER_N, a power of two,
+# default 4096 = 11.7 Hz at 48 kHz) on the shared time base (USB S in
+# EXT_ALINK_USB mode 2, or the alink frame F) is fetched for the I2S/S/PDIF
+# output; ALINK_SCOPE_MARKER_LOCK_GPIO=<pin> is high while phase-locked.  For a
+# scope / logic analyser (Documentation/Bench/scope_marker.md).  Empty = none.
+set(ALINK_SCOPE_MARKER_GPIO "" CACHE STRING "Test only: GPIO of the time-base marker (empty = none)")
+set(ALINK_SCOPE_MARKER_LOCK_GPIO "" CACHE STRING "Test only: GPIO high while phase-locked (empty = none)")
+set(ALINK_SCOPE_MARKER_N "4096" CACHE STRING "Test only: marker period in samples (power of two, 256..32768)")
+if (NOT ALINK_SCOPE_MARKER_GPIO STREQUAL "")
+    if (DSPI_ALINK_DECODE_CORE1)
+        message(FATAL_ERROR "ALINK_SCOPE_MARKER_GPIO needs the alink decode on Core 0 (DSPI_ALINK_DECODE_CORE1=OFF)")
+    endif()
+    target_sources(DSPi PRIVATE scope_marker.c)
+    target_compile_definitions(DSPi PRIVATE ALINK_SCOPE_MARKER_GPIO=${ALINK_SCOPE_MARKER_GPIO}
+        ALINK_SCOPE_MARKER_N=${ALINK_SCOPE_MARKER_N}u)
+    if (NOT ALINK_SCOPE_MARKER_LOCK_GPIO STREQUAL "")
+        target_compile_definitions(DSPi PRIVATE ALINK_SCOPE_MARKER_LOCK_GPIO=${ALINK_SCOPE_MARKER_LOCK_GPIO})
+    endif()
+    message(STATUS "WP SCOPE1 scope marker: GPIO ${ALINK_SCOPE_MARKER_GPIO}, lock GPIO '${ALINK_SCOPE_MARKER_LOCK_GPIO}', N ${ALINK_SCOPE_MARKER_N} (test build)")
+endif()
+
 target_include_directories(DSPi PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}/generated
@@ -297,6 +319,9 @@ if (RELEASE)
             message(FATAL_ERROR "RELEASE build refused: ${_bench} is a bench option and must be OFF")
         endif()
     endforeach()
+    if (NOT ALINK_SCOPE_MARKER_GPIO STREQUAL "")   # -- WP SCOPE1 --
+        message(FATAL_ERROR "RELEASE build refused: ALINK_SCOPE_MARKER_GPIO is a test option and must be empty")
+    endif()
     # Variant suffix of the published file name: platform, MIDI, non-default
     # core voltage (K340: rp2350-midi-vreg1200).  Override with
     # -DRELEASE_VARIANT=<name>.

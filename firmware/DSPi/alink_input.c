@@ -1510,4 +1510,15 @@ void alink_input_get_diag(uint8_t o[ALINK_DIAG_LEN]) {
     put32(o + 52, s.idle_errors);
 }
 
+// -- WP SCOPE1 -- the receiver's timeline for the scope marker (test builds).
+#if defined(ALINK_SCOPE_MARKER_GPIO)
+#include "scope_marker.h"
+bool alink_input_scope_timeline(uint64_t *next_w, bool *locked) {
+    if (!ph.started || !ph.timeline) return false;
+    *next_w = ph.next_w;
+    *locked = ph.state == ALINK_PHASE_LOCKED && !ph.hold;
+    return true;
+}
+#endif
+
 #endif // DSPI_ALINK
