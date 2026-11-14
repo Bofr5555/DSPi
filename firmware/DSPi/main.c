@@ -2155,7 +2155,25 @@ static void input_service_handshakes(void) {
     // stream restarts do not come here again.
     else if (active_input_source == INPUT_SOURCE_USB && alink_usb.mode == ALINK_USB_MODE_PHASE) {
         if (alink_usb_anchor_wanted(&alink_usb)) {
-            if (!preset_loading) prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+            if (!preset_loading) {
+                // WP USB3b: nothing left to fade, so prepare_pipeline_reset()'s
+                // blocking settle must not wait.  With sync_started latched from
+                // an earlier stream but no packet processed (no stream, or the
+                // timeline gone after a time-base loss), the envelope never moved
+                // and the settle ran into its 200 ms cap (PIPELINE_FADE_CAP_US):
+                // the second bench hour's 200125 us main-loop pass.  Idle (no
+                // packet for 50 ms, no timeline writing) is the case the poll
+                // already treats as silent; so is an output the out-of-step mute
+                // has held at zero longer than the delay lines and the rings.
+                uint32_t fs = audio_state.freq ? audio_state.freq : 48000u;
+                uint32_t flush_us = ((pipeline_max_active_delay_samples() + 512u) * 1000u / fs + 3u) * 1000u;
+                if (!pipeline_wire_silent && ((!usb_audio_stream_active() && !alink_usb.started) ||
+                                              alink_usb_fw_silent_us() > flush_us)) {
+                    pipeline_latch_mute_silence();
+                    pipeline_wire_silent = true;
+                }
+                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+            }
             if (preset_loading && dac_hw_mute_hold_elapsed()) {
                 drain_and_disable_outputs();
                 preset_loading = false;
@@ -2275,6 +2293,19 @@ static void input_service_servos(void) {
 #if DSPI_ALINK_USB
     else if (active_input_source == INPUT_SOURCE_USB) {
         alink_usb_fw_service();      // WP USB1: SOF lock, phase lock (mode 0: nothing)
+        // Review usb3 N2: the anchor drained the outputs and nothing will start
+        // them now (mode 2 left, host rejected or CONFIG during the prefill):
+        // restart them here.  The DAC mute stays held if the unit is muted out
+        // of step (a lock error with the mute action), else it is released.
+        if (alink_usb_outputs_orphaned(&alink_usb)) {
+            pipeline_request_soft_mute(samples_for_duration_ms(audio_state.freq ? audio_state.freq : 48000u, 10u));
+            enable_outputs_in_sync();
+            alink_usb_on_restarted(&alink_usb);
+            if (!alink_usb_fw_keep_dac_mute()) {
+                dac_hw_mute_release();
+                alink_usb_fw_dac_released();
+            }
+        }
     }
 #endif
 }

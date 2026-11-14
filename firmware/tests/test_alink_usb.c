@@ -193,7 +193,7 @@ static void test_config(void) {
     CHECK(alink_usb_set_config(&us, p), "mode 1 takes any D");
     p[0] = 2; p[2] = 200;
     CHECK(alink_usb_set_config(&us, p) && us.mode == 2 && us.d == 200, "mode 2 D 200");
-    uint8_t bad[][8] = { { 3, 1, 200, 0, 0, 0, 0, 0 }, { 2, 2, 200, 0, 0, 0, 0, 0 }, { 2, 1, 200, 0, 1, 0, 0, 0 },
+    uint8_t bad[][8] = { { 3, 1, 200, 0, 0, 0, 0, 0 }, { 2, 2, 200, 0, 0, 0, 0, 0 }, { 2, 1, 200, 0, 2, 0, 0, 0 },
                          { 1, 1, 0, 0, 0, 0, 0, 0 }, { 2, 1, 0x90, 1, 0, 0, 0, 0 } };
     for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         uint8_t before[8];
@@ -696,7 +696,7 @@ static void test_ride(void) {
     uint32_t pass;
     memcpy(&ends_sof, o + 6, 2);
     memcpy(&pass, o + 48, 4);
-    CHECK(o[0] == 1 && o[1] == ALINK_USB_END_SOF_LOST && ends_sof == 1 && pass == 1234u, "diag layout");
+    CHECK(o[0] == 2 && o[1] == ALINK_USB_END_SOF_LOST && ends_sof == 1 && pass == 1234u, "diag layout");
     CHECK(!alink_usb_clear_diag(&us, 2) && alink_usb_clear_diag(&us, 1) && us.diag.ends[0] == 0 &&
           us.diag.last_cause == 0xFF, "diag clear (1 only)");
 }
@@ -729,14 +729,20 @@ static void test_out_of_step(void) {
     CHECK(!alink_usb_out_of_step(&us), "mode 0: never");
     us.mode = 2;
     us.rejected = true;
-    CHECK(!alink_usb_out_of_step(&us), "a rejected host plays rate-free, as stock: not out of step");
+    CHECK(alink_usb_lock_error(&us) && alink_usb_out_of_step(&us), "a rejected host: lock error, muted by default (USB3b)");
+    us.on_lock_error = ALINK_USB_LOCKERR_PLAY;
+    CHECK(alink_usb_lock_error(&us) && !alink_usb_out_of_step(&us), "... plays rate-free with the PLAY action");
+    us.on_lock_error = ALINK_USB_LOCKERR_MUTE;
     us.rejected = false;
     us.d = 160;
-    CHECK(!alink_usb_out_of_step(&us), "D below d_min (runs as mode 1, CONFIG): not out of step");
+    CHECK(alink_usb_lock_error(&us) && alink_usb_out_of_step(&us), "D below d_min (CONFIG): lock error, muted");
     locked_engine(&us);
-    CHECK(!alink_usb_out_of_step(&us), "phase-locked: in step");
+    CHECK(!alink_usb_out_of_step(&us) && !alink_usb_lock_error(&us), "phase-locked: in step");
     us.ph.state = ALINK_PHASE_PENDING;
-    CHECK(!alink_usb_out_of_step(&us), "PENDING (auto re-anchor off): plays");
+    CHECK(alink_usb_lock_error(&us) && alink_usb_out_of_step(&us), "PENDING (auto re-anchor off): lock error, muted");
+    us.on_lock_error = ALINK_USB_LOCKERR_PLAY;
+    CHECK(!alink_usb_out_of_step(&us), "PENDING with the PLAY action: plays");
+    us.on_lock_error = ALINK_USB_LOCKERR_MUTE;
     us.ph.state = ALINK_PHASE_ANCHORING;
     CHECK(alink_usb_out_of_step(&us), "verifying: out of step");
     us.dark = true;
@@ -834,9 +840,11 @@ static void test_seed(void) {
     vcxo = 0.0f;
     alink_usb_service(&us, 0);
     CHECK(n_preset == 0, "mode 1 with a stream: no preset");
-    // A held VCXO (after a time-base loss) is not preset again.
+    // A held VCXO (after a time-base loss) is not preset again (review usb3 N4:
+    // the engine's parked flag, not a float compare).
     us.stream = false;
-    vcxo = 12.0f;
+    us.parked = false;
+    vcxo = 0.0f;
     alink_usb_service(&us, 1);
     CHECK(n_preset == 0, "a VCXO already trimmed is kept");
 
@@ -907,6 +915,141 @@ static void test_ride_rebase(void) {
     CHECK(!us.dark && !us.est.rebase && us.est.n[0] == 1000u, "a 5 us return keeps the anchors");
 }
 
+// ---------------------------------------------------------------------------
+// WP USB3b
+// ---------------------------------------------------------------------------
+
+// The K340's second bench hour: RP2350 RAW read 22.7 us behind LAST, the
+// 21-bit difference 2^21 - 1088, the SOF time 43.7 ms early.
+static void test_bad_sof(void) {
+    alink_usb_t us;
+    ride_setup(&us);
+    uint32_t f = 1000u, t48 = 0;
+    for (int i = 1; i <= 20; i++) {
+        f++;
+        t48 = 48000u * (uint32_t)i;
+        sof_at(f, t48);
+        ride_pass(&us, t48 + 200u);
+    }
+    uint16_t disc0 = us.diag.ends[ALINK_USB_END_DISCONT];
+    f++;
+    t48 += 48000u;
+    uint32_t bad_since = (1u << 21) - 1088u;
+    alink_usb_tb_sof(&alink_usb_tb, f & 0x7FFu, t48 + 96u, bad_since);    // what the ISR passes (masked to 21 bits)
+    CHECK(alink_usb_tb.t == t48 + 96u - bad_since, "the ISR takes the reading as given (RAM ISR unchanged)");
+    CHECK(alink_usb_tb.n_c == f, "and as a clean pair");
+    ride_pass(&us, t48 + 200u);
+    CHECK(us.started && us.diag.ends[ALINK_USB_END_DISCONT] == disc0 && us.diag.bad_sof == 1,
+          "the main loop repairs it: no discontinuity, the timeline kept (bad %u)", us.diag.bad_sof);
+    CHECK(alink_usb_tb.t == t48 + 96u && alink_usb_tb.t_c == t48 + 96u && us.bad_c && us.bad_n == f,
+          "time = the interrupt entry, the pair kept out of the estimator");
+    CHECK(us.diag.max_isr_late_us < 10u, "the diag's interrupt latency is not 43.7 ms (%u us)", us.diag.max_isr_late_us);
+    // The following SOFs are normal again.
+    for (int i = 0; i < 5; i++) {
+        f++;
+        t48 += 48000u;
+        sof_at(f, t48);
+        ride_pass(&us, t48 + 200u);
+    }
+    CHECK(us.started && us.diag.ends[ALINK_USB_END_DISCONT] == disc0 && us.diag.bad_sof == 1, "then normal");
+    // Before WP USB3b (no repair) the same reading ended the time base: shown by
+    // the F2 check on the unrepaired pair.
+    int64_t dev = (int64_t)(int32_t)((t48 + 96u - bad_since) - (t48 - 48000u)) - 48000;
+    CHECK(dev < -4800 || dev > 4800, "(the unrepaired pair was a discontinuity: %lld ticks)", (long long)dev);
+}
+
+static void test_lock_error(void) {
+    alink_usb_t us;
+    // Host beyond 295 ppm in mode 2: lock error entered, counted, flagged, muted.
+    alink_usb_init(&us);
+    alink_usb_limits(&us, 48000, 96, 49, 448);
+    us.mode = 2;
+    memset(&alink_usb_tb, 0, sizeof(alink_usb_tb));
+    reset_counts();
+    run_host(&us, 300.0, 0, 3000, true);
+    uint8_t st[ALINK_USB_STATUS_LEN];
+    alink_usb_get_status(&us, st);
+    CHECK(us.rejected && us.lock_err && us.diag.lock_errors == 1 && (st[3] & 0x40) && st[0] == ALINK_USB_ST_REJECTED,
+          "rejected host: lock error (count %u, flags 0x%02x)", us.diag.lock_errors, st[3]);
+    int m0 = n_mute;
+    run_host(&us, 300.0, 3000, 3100, true);
+    CHECK(n_mute - m0 == 100, "muted every pass by default (%d)", n_mute - m0);
+    us.on_lock_error = ALINK_USB_LOCKERR_PLAY;
+    m0 = n_mute;
+    run_host(&us, 300.0, 3100, 3200, true);
+    CHECK(n_mute == m0, "the PLAY action: not muted");
+    uint8_t d[ALINK_USB_DIAG_LEN];
+    alink_usb_get_diag(&us, d);
+    CHECK(d[0] == 2 && d[46] == 1 && d[47] == 0, "DIAG v2 46-47: lock errors");
+    // CONFIG: 44.1 kHz in mode 2.
+    alink_usb_init(&us);
+    alink_usb_limits(&us, 44100, 88, 46, 448);
+    us.mode = 2;
+    us.fs = 44100;
+    CHECK(alink_usb_lock_error(&us), "mode 2 at 44.1 kHz: lock error");
+    // Leaving: enter by PENDING, leave by LOCKED; events LOCK_ERROR / LOCK_OK.
+    locked_engine(&us);
+    us.ph.state = ALINK_PHASE_PENDING;
+    us.state = ALINK_USB_ST_PHASE_LOCK;
+    now48 = 0;
+    alink_usb_tb.t = alink_usb_tb.t_c = 0;
+    alink_usb_tb.isr = 0;
+    us.tick_last_us = 0;
+    alink_usb_service(&us, 1000);
+    CHECK(us.lock_err && us.diag.lock_errors == 1, "PENDING: lock error");
+    us.ph.state = ALINK_PHASE_LOCKED;
+    alink_usb_service(&us, 2000);
+    CHECK(!us.lock_err && us.diag.lock_errors == 1, "LOCKED again: left");
+
+    // EXT_ALINK_USB byte 4.
+    alink_usb_init(&us);
+    alink_usb_limits(&us, 48000, 96, 49, 448);
+    uint8_t p[8] = { 2, 1, 192, 0, 1, 0, 0, 0 };
+    CHECK(alink_usb_set_config(&us, p) && us.on_lock_error == ALINK_USB_LOCKERR_PLAY, "byte 4 = 1: play");
+    uint8_t o[8];
+    alink_usb_get_config(&us, o);
+    CHECK(o[4] == 1, "byte 4 read back");
+    p[4] = 2;
+    CHECK(!alink_usb_set_config(&us, p) && us.on_lock_error == ALINK_USB_LOCKERR_PLAY, "byte 4 = 2 refused");
+    alink_usb_policy_load(&us, 7);
+    CHECK(us.on_lock_error == ALINK_USB_LOCKERR_MUTE && alink_usb_policy_byte(&us) == 0, "a stored 7 loads as mute");
+    alink_usb_policy_load(&us, 1);
+    CHECK(alink_usb_policy_byte(&us) == 1, "stored 1: play");
+}
+
+static void test_usb3_nits(void) {
+    alink_usb_t us;
+    // N2: mode left during the prefill: the drained outputs are orphaned.
+    locked_engine(&us);
+    us.started = false;
+    us.est.valid = true;
+    alink_usb_on_drain(&us);
+    CHECK(us.drained && us.prefilling && !alink_usb_outputs_orphaned(&us), "prefilling: the anchor will start them");
+    uint8_t p[8] = { 1, 1, 192, 0, 0, 0, 0, 0 };
+    uint32_t re0 = us.reanchors;
+    CHECK(alink_usb_set_config(&us, p), "mode 1 written during the prefill");
+    CHECK(alink_usb_outputs_orphaned(&us), "orphaned: main.c restarts them");
+    CHECK(us.reanchors == re0 && us.diag.ends[ALINK_USB_END_STOP] == 1 && us.diag.ends[ALINK_USB_END_RE_OTHER] == 0,
+          "leaving mode 2 is a stop, not a re-anchor");
+    alink_usb_on_restarted(&us);
+    CHECK(!alink_usb_outputs_orphaned(&us), "restarted");
+    // A D change in mode 2 during the prefill: the next anchor starts them.
+    locked_engine(&us);
+    us.started = false;
+    alink_usb_on_drain(&us);
+    uint8_t q[8] = { 2, 1, 200, 0, 0, 0, 0, 0 };
+    CHECK(alink_usb_set_config(&us, q) && !alink_usb_outputs_orphaned(&us) && us.diag.ends[ALINK_USB_END_RE_OTHER] == 1,
+          "a new D in mode 2: re-anchor (other), not orphaned");
+    // A phase re-anchor is counted as phase.
+    locked_engine(&us);
+    phase_act(&us, ALINK_PHASE_ACT_REANCHOR, 0, 100.0f);
+    CHECK(us.diag.ends[ALINK_USB_END_RE_PHASE] == 1 && us.diag.ends[ALINK_USB_END_RE_OTHER] == 0,
+          "a full phase re-anchor counts as phase");
+    // N4: the parked flag.
+    alink_usb_init(&us);
+    CHECK(us.parked, "parked at init");
+}
+
 int main(void) {
     test_time_base();
     test_estimator();
@@ -924,6 +1067,9 @@ int main(void) {
     test_seed();
     test_soft_reanchor();
     test_ride_rebase();
+    test_bad_sof();
+    test_lock_error();
+    test_usb3_nits();
     printf("test_alink_usb: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

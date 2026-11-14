@@ -122,6 +122,9 @@ typedef struct {
     double lock_t, unlock_t;    // last entry into / exit from PHASE_LOCK (true time)
     uint32_t audible_unlocked;  // stream samples written unmuted while mode 2 was not phase-locked
     bool skipped, reset_done;
+    double next_bad;            // WP USB3b: next bad RP2350 SOF reading (RAW behind LAST)
+    uint32_t bad_given;
+    uint32_t heard_lockerr;     // stream samples heard while in lock error (either action)
     bool dac_on;                // the DAC's hardware mute pin asserted
     double dac_t;               // since
     uint32_t presets;
@@ -131,6 +134,7 @@ typedef struct scen scen_t;
 static const scen_t *S;
 static double g_stall_at, g_stall_len, g_dac_hold = 0.2;
 static bool g_no_long_pass;
+static double g_bad_period;     // unit 0 (RP2350): a SOF reading with RAW 22.7 us behind LAST every this many s
 
 static unit_t U[NU];
 static unit_t *cur;
@@ -169,13 +173,21 @@ uint32_t alink_usb_port_room(void) {
     if (r <= 0) return 0;
     return r < cap() ? (uint32_t)r : cap();
 }
+// Should the unit be silent now?  Mode 2 and not playing phase-locked on its
+// timeline, except a lock error with the PLAY action (WP USB3b).  Decided from
+// the state the hub sees, independently of alink_usb_out_of_step().
 static bool out_of_step_now(void) {
     const alink_usb_t *u = &cur->us;
-    return u->mode == ALINK_USB_MODE_PHASE && u->state != ALINK_USB_ST_PHASE_LOCK &&
-           u->state != ALINK_USB_ST_REJECTED && alink_usb_phase_possible(u, fs);
+    if (u->mode != ALINK_USB_MODE_PHASE) return false;
+    bool in_step = u->state == ALINK_USB_ST_PHASE_LOCK && u->started && u->ph.state == ALINK_PHASE_LOCKED;
+    if (in_step) return false;
+    bool lock_error = u->state == ALINK_USB_ST_REJECTED || !alink_usb_phase_possible(u, fs) ||
+                      (u->started && u->ph.state == ALINK_PHASE_PENDING);
+    return !(lock_error && u->on_lock_error == ALINK_USB_LOCKERR_PLAY);
 }
 static void write_one(double c) {
     if (!isnan(c) && cur->W >= cur->mute_end_w && out_of_step_now()) cur->audible_unlocked++;
+    if (!isnan(c) && cur->W >= cur->mute_end_w && alink_usb_lock_error(&cur->us)) cur->heard_lockerr++;
     cur->content[cur->W % RING] = c;
     cur->W++;
     if (cur->running && ring_fill() > 448.0) cur->overruns++;
@@ -317,6 +329,14 @@ static void unit_sof_at(unit_t *u, uint32_t f11, double sof_true, double tnow) {
         // RP2350: the PHY counter (48 MHz from the crystal) gives the ticks
         // since the SOF exactly, but "now" is time_us_32() * 48: whole microseconds.
         uint32_t since = (uint32_t)((tproc - tsof) * 48e6 * (1.0 + u->xtal_ppm * 1e-6));
+        if (g_bad_period > 0 && u == &U[0] && T >= u->next_bad) {
+            // The second bench hour's reading: the ISR's 21-bit difference wrapped.
+            if (u->next_bad > 0) {
+                since = (1u << 21) - 1088u;     // RAW 1088 ticks (22.7 us) behind LAST, masked to 21 bits
+                u->bad_given++;
+            }
+            u->next_bad = T + g_bad_period;
+        }
         uint32_t now48 = (uint32_t)(uint64_t)local_us(tproc) * 48u;
         alink_usb_tb_sof(&alink_usb_tb, f11, now48, since);
     } else {
@@ -456,6 +476,11 @@ static void unit_pass(unit_t *u) {
     }
     drain(u);
     alink_usb_service(&u->us, (uint32_t)(local_us(T) / 1000.0));
+    if (alink_usb_outputs_orphaned(&u->us)) {      // main.c, review usb3 N2
+        u->running = true;
+        u->start_at = -1;
+        alink_usb_on_restarted(&u->us);
+    }
     if (!u->locked_at && u->us.state == ALINK_USB_ST_PHASE_LOCK) u->locked_at = T - u->boot_s;
     bool lk = u->us.state == ALINK_USB_ST_PHASE_LOCK;
     if (lk && !u->was_locked) u->lock_t = T;
@@ -566,6 +591,9 @@ struct scen {
     double ev_at;                               // the event lock times are measured from
     bool seeded; double seed;                   // a stored host rate (ppm against the unit's crystal)
     bool no_long_pass;                          // no 900 us main-loop passes (they lose packets at random)
+    double bad_period;                          // WP USB3b: bad RP2350 SOF readings on unit 0, every this many s
+    bool lock_play;                             // EXT_ALINK_USB byte 4 = 1: play unaligned in lock error
+    bool no_auto;                               // AUTO_REANCHOR clear (PENDING instead of a re-anchor)
 };
 
 typedef struct {
@@ -581,6 +609,9 @@ typedef struct {
     uint32_t rides[NU];
     double relock[NU];              // from ev_at to the last entry into PHASE_LOCK (-1: never left / not after)
     uint32_t audible_unlocked[NU];
+    uint32_t bad_sof[NU], bad_given[NU], disc[NU], lock_errors[NU];
+    bool lock_err[NU];
+    uint32_t heard_lockerr[NU];
     double lat_after_restart[NU];
     int gaps_at_stop;               // unit 1: GAPs counted from 30 ms before the alt 0 to 100 ms after it
     uint32_t gaps_pre;
@@ -596,6 +627,7 @@ static void run(const scen_t *s, res_t *r) {
     g_stall_at = s->stall_at;
     g_stall_len = s->stall_len;
     g_no_long_pass = s->no_long_pass;
+    g_bad_period = s->bad_period;
     g_dac_hold = s->dac_hold > 0 ? s->dac_hold : 0.2;
     int burst_done = 0;
     host_ppm = s->host_ppm;
@@ -614,6 +646,8 @@ static void run(const scen_t *s, res_t *r) {
         U[i].d = s->d;
         U[i].stream_offset = s->stream_offset[i];
         unit_init(&U[i]);
+        U[i].us.on_lock_error = s->lock_play ? ALINK_USB_LOCKERR_PLAY : ALINK_USB_LOCKERR_MUTE;
+        if (s->no_auto) U[i].us.flags = 0;
         if (s->seeded) {
             int16_t v = (int16_t)lround(s->seed * 100.0);
             uint8_t b[ALINK_USB_SEED_LEN] = { (uint8_t)v, (uint8_t)((uint16_t)v >> 8), 0 };
@@ -773,6 +807,12 @@ static void run(const scen_t *s, res_t *r) {
         r->rides[i] = u->us.diag.rides;
         r->relock[i] = s->ev_at > 0 && u->lock_t > s->ev_at && u->us.state == ALINK_USB_ST_PHASE_LOCK ? u->lock_t - s->ev_at : -1.0;
         r->audible_unlocked[i] = u->audible_unlocked;
+        r->bad_sof[i] = u->us.diag.bad_sof;
+        r->bad_given[i] = u->bad_given;
+        r->disc[i] = u->us.diag.ends[ALINK_USB_END_DISCONT];
+        r->lock_errors[i] = u->us.diag.lock_errors;
+        r->lock_err[i] = u->us.lock_err;
+        r->heard_lockerr[i] = u->heard_lockerr;
         if (getenv("SIM_DEBUG"))
             printf("    dbg unit %d: tb valid %d have_c %d n %u n_c %u | est seeded %d valid %d n0 %u last %u ppm %.3f | tb_ok %d rej %d ticked %d locked %d | e %.3f integ %.3f trim %.3f\n",
                    i, u->tb.valid, u->tb.have_c, u->tb.n, u->tb.n_c, u->us.est.seeded, u->us.est.valid,
@@ -1005,6 +1045,94 @@ static void lock_scenarios(const char *only) {
             locktime(&s, &r);
             CHECK(r.anchors[0] == 2 && r.relock[0] > 0 && r.relock[0] < 0.1,
                   "L8: re-anchored without a second DAC hold, relocked in %.3f s", r.relock[0]);
+        }
+    }
+}
+
+// WP USB3b: bad RP2350 SOF readings, lock error and its action.
+static void usb3b_scenarios(const char *only) {
+    res_t r;
+    {
+        scen_t s = base("W1 bad RP2350 SOF readings (RAW 22.7 us behind LAST) every 7 s on unit 0");
+        s.bad_period = 7.0;
+        s.duration = 45.0;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            printf("    bad readings given %u, repaired %u, discontinuities %u\n", r.bad_given[0], r.bad_sof[0], r.disc[0]);
+            expect_locked(&s, &r, 0.05);
+            CHECK(r.bad_given[0] >= 5 && r.bad_sof[0] >= r.bad_given[0] - 1 && r.disc[0] == 0 && r.anchors[0] == 1 &&
+                  r.reanchors[0] == 0, "W1: %u bad readings, %u repaired, no discontinuity, one anchor (anchors %u)",
+                  r.bad_given[0], r.bad_sof[0], r.anchors[0]);
+        }
+    }
+    for (int play = 0; play < 2; play++) {
+        static char nm[2][80];
+        snprintf(nm[play], sizeof(nm[0]), "E1%s host +300 ppm in mode 2 (lock error: host rejected), %s", play ? "p" : "",
+                 play ? "action play" : "default action mute");
+        scen_t s = base(nm[play]);
+        s.host_ppm = 300.0;
+        s.xtal[0] = s.xtal[1] = 0;
+        s.lock_play = play;
+        s.duration = 15.0;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            for (int i = 0; i < NU; i++) {
+                CHECK(r.state[i] == ALINK_USB_ST_REJECTED && r.lock_err[i] && r.lock_errors[i] == 1,
+                      "%s: unit %d rejected, in lock error, counted once", s.name, i);
+                if (play)
+                    CHECK(r.heard_lockerr[i] > 100000, "%s: unit %d plays unaligned (%u samples heard)", s.name, i,
+                          r.heard_lockerr[i]);
+                else
+                    CHECK(r.audible_unlocked[i] == 0 && r.heard_lockerr[i] == 0, "%s: unit %d silent (heard %u)", s.name,
+                          i, r.heard_lockerr[i]);
+            }
+        }
+    }
+    for (int play = 0; play < 2; play++) {
+        static char nm[2][80];
+        snprintf(nm[play], sizeof(nm[0]), "E2%s D 160 below d_min (lock error: CONFIG), %s", play ? "p" : "",
+                 play ? "action play" : "default action mute");
+        scen_t s = base(nm[play]);
+        s.d = 160;
+        s.lock_play = play;
+        s.duration = 15.0;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            for (int i = 0; i < NU; i++) {
+                CHECK(r.lock_err[i] && r.anchors[i] == 0, "%s: unit %d in lock error, no anchor", s.name, i);
+                if (play)
+                    CHECK(r.heard_lockerr[i] > 100000, "%s: unit %d plays rate-locked (%u samples heard)", s.name, i,
+                          r.heard_lockerr[i]);
+                else
+                    CHECK(r.audible_unlocked[i] == 0 && r.heard_lockerr[i] == 0, "%s: unit %d silent (heard %u)", s.name,
+                          i, r.heard_lockerr[i]);
+            }
+        }
+    }
+    {
+        scen_t s = base("E3 PENDING (auto re-anchor off, ring skip 3 samples at 20 s): muted until pulled in");
+        s.no_auto = true;
+        s.skip_at = 20.0;
+        s.skip_n = 3;
+        s.ev_at = 20.0;
+        s.duration = 60.0;
+        if (WANT(s.name)) {
+            run(&s, &r);
+            report(&s, &r);
+            // The PI that pulled 3 samples in (7 s in this run) is still unwinding
+            // its integrator 30 s later (alink_phase's servo, unchanged here), so
+            // not expect_locked()'s 0.05-sample bounds: within 0.5 sample of D.
+            for (int i = 0; i < NU; i++) {
+                double mean = r.m.lat_n[i] ? r.m.lat_sum[i] / r.m.lat_n[i] : 1e9;
+                CHECK(r.state[i] == ALINK_USB_ST_PHASE_LOCK && r.holes[i] == 0 && r.audible_unlocked[i] == 0 &&
+                      fabs(mean - s.d) < 0.5, "E3: unit %d phase-locked at the end, no hard edge, silent out of step "
+                      "(latency %.3f)", i, mean);
+            }
+            CHECK(r.lock_errors[0] == 1 && !r.lock_err[0] && r.reanchors[0] == 0 && r.heard_lockerr[0] == 0,
+                  "E3: lock error entered and left, no re-anchor, nothing heard meanwhile (%u)", r.heard_lockerr[0]);
         }
     }
 }
@@ -1508,6 +1636,7 @@ int main(int argc, char **argv) {
     // WP USB3: lock times (LOCKTIME lines) and out-of-step muting
     // ----------------------------------------------------------------------
     lock_scenarios(only);
+    usb3b_scenarios(only);
     printf("alink_usb_sim: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

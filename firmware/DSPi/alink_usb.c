@@ -304,11 +304,17 @@ static void refresh_limits(void) {
 // this releases it when the unit stops being out of step another way (mode 1,
 // a rejected host).  Not after a soft re-anchor: the outputs keep running.
 static bool dac_held;
+static uint32_t silent_since;               // out of step with the soft mute at zero since (us, 0 none)
 
 static void dac_hold_update(void) {
     // Released meanwhile (a reset bracket's completion): not ours any more.
     if (dac_held && !dac_hw_mute_is_asserted()) dac_held = false;
     bool oos = alink_usb_out_of_step(&alink_usb);
+    if (oos && pipeline_mute_is_silent()) {
+        if (!silent_since) silent_since = time_us_32() | 1u;
+    } else {
+        silent_since = 0;
+    }
     if (oos && !dac_held && !alink_usb.started && !dac_hw_mute_is_asserted() && pipeline_mute_is_silent()) {
         // Only a pin nobody else holds: then the lifecycle is ours to end.
         dac_hw_mute_assert();
@@ -322,6 +328,11 @@ static void dac_hold_update(void) {
 }
 
 void alink_usb_fw_dac_released(void) { dac_held = false; }
+
+uint32_t alink_usb_fw_silent_us(void) { return silent_since ? time_us_32() - silent_since : 0u; }
+
+uint8_t alink_usb_fw_policy_byte(void) { return alink_usb_policy_byte(&alink_usb); }
+void alink_usb_fw_policy_load(uint8_t b) { alink_usb_policy_load(&alink_usb, b); }
 
 bool alink_usb_fw_keep_dac_mute(void) {
     if (!alink_usb_out_of_step(&alink_usb)) return false;

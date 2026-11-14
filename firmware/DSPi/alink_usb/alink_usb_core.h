@@ -54,6 +54,10 @@
 
 // EXT_ALINK_USB.flags (OUT and IN)
 #define ALINK_USB_FLAG_AUTO_REANCHOR 0x01u
+// EXT_ALINK_USB byte 4 (WP USB3b, reserved 0 before): what a mode-2 unit in
+// lock error does.  Persisted outside the V27 block (see flash_storage.c).
+#define ALINK_USB_LOCKERR_MUTE   0u      // default: stay muted (the unit was asked to be in step)
+#define ALINK_USB_LOCKERR_PLAY   1u      // play unaligned (rate-free or rate-locked, as before WP USB3b)
 #define ALINK_USB_FLAGS_DEFAULT      ALINK_USB_FLAG_AUTO_REANCHOR
 #define ALINK_USB_D_DEFAULT          192u    // 4 ms at 48 kHz; 96 kHz needs 324..351
 
@@ -85,6 +89,8 @@ enum {
     ALINK_USB_RS_CONFIG    = 7,  // mode 2 cannot phase-lock (rate, D range): runs rate-locked
     ALINK_USB_RS_HOLDOVER  = 8,  // no SOF for 50 ms: the time base is extrapolated, the timeline kept (WP USB2)
     ALINK_USB_RS_RESUMED   = 9,  // SOF back within the ride-through limit, frame and time consistent
+    ALINK_USB_RS_LOCK_ERROR= 10, // mode 2 entered lock error: host rejected, cannot phase-lock, or PENDING (WP USB3b)
+    ALINK_USB_RS_LOCK_OK   = 11, // mode 2 left lock error
 };
 
 // EXT_ALINK_USB_DIAG: why a timeline (or the time base) ended (WP USB2).
@@ -111,6 +117,8 @@ typedef struct {
     uint32_t last_us;            // its duration by the unit's clock
     int32_t  last_dev_us;        // clock minus frames (host rate) at the return, us
     uint32_t longest_ride_us;
+    uint16_t lock_errors;        // entries into lock error (WP USB3b; DIAG v2 46-47)
+    uint16_t bad_sof;            // SOF readings repaired (RP2350 RAW behind LAST; WP USB3b; DIAG v2 34-35)
     uint32_t max_pass_us;        // longest main-loop pass (USB source), since the last clear
     uint32_t max_isr_quiet_us;   // longest time without a SOF interrupt entry seen by the main loop
     uint32_t max_isr_late_us;    // longest SOF interrupt entry after its SOF (RP2350 exact; RP2040 predicted)
@@ -181,6 +189,19 @@ typedef struct {
 // One SOF.  f11: SOF frame number; now: t48 at the call; since: t48 ticks
 // since the SOF from the RP2350's SOF_TIMESTAMP_RAW - _LAST (exact), or
 // UINT32_MAX on the RP2040 (the call time stands for the SOF time).
+//
+// WP USB3b: both PHY registers are 21 bits (48 MHz, wrap 43.69 ms; rp2350
+// regs/usb.h USB_SOF_TIMESTAMP_{RAW,LAST}_BITS 0x1FFFFF) and the ISR masks
+// their difference to 21 bits.  LAST is the latest SOF, so with SOFs running
+// the true value is under a frame plus the interrupt latency.  The K340's
+// second bench hour read RAW 22.7 us *behind* LAST four times in an hour: the
+// masked difference was 2^21 - 1088 (43.67 ms), the SOF time 43.7 ms early, a
+// discontinuity and a fresh anchor each time.  The main loop repairs such a
+// SOF (alink_usb_service: its time more than ALINK_USB_SINCE_MAX48 before the
+// interrupt entry that took it): the entry time instead, kept out of the rate
+// estimator, counted in the DIAG.  Done there, not here, so the RAM ISR keeps
+// its size (a test here grew it by 20-32 bytes of .data).
+#define ALINK_USB_SINCE_MAX48      0x10000u   // 1.37 ms
 static inline void alink_usb_tb_sof(alink_usb_tb_t *tb, uint32_t f11, uint32_t now, uint32_t since) {
     bool exact = since != UINT32_MAX;
     uint32_t t = exact ? now - since : now;
@@ -340,6 +361,13 @@ typedef struct {
     uint8_t  seed_saves;                     // this boot
     uint32_t seed_save_ms;
     uint32_t idle_ms;                        // no stream since then (0: a stream plays)
+    // WP USB3b
+    uint8_t  on_lock_error;                  // ALINK_USB_LOCKERR_*
+    bool     lock_err;                       // in lock error (status flags bit 6, event 10/11)
+    bool     parked;                         // the VCXO is parked at 0 (init, stop, rejection): the seed may preset it
+    bool     drained;                        // the anchor drained the outputs and has not started them yet
+    bool     bad_c;                          // the clean pair bad_n was repaired: not for the estimator
+    uint32_t bad_n;
 } alink_usb_t;
 
 void alink_usb_init(alink_usb_t *us);
@@ -369,6 +397,23 @@ uint32_t alink_usb_ring_target(alink_usb_t *us, uint32_t fs, uint32_t target, ui
 // phase-lock (it plays rate-locked, as before), PENDING (automatic re-anchor
 // off: plays while the servo pulls the error in), a holdover.
 bool alink_usb_out_of_step(const alink_usb_t *us);
+
+// WP USB3b, owner decision 2026-11-14: mode 2 that cannot be in step is in
+// *lock error*: the host rejected (state 6), the phase lock impossible at this
+// rate or D (state 3, reason CONFIG), or PENDING (automatic re-anchor off and
+// more than 2 samples off).  With on_lock_error MUTE (default) a lock error
+// counts as out of step (muted, DAC mute held); with PLAY it plays unaligned.
+// A holdover is not a lock error.
+bool alink_usb_lock_error(const alink_usb_t *us);
+// The anchor drained the outputs, and no anchor will start them now (mode left
+// 2, host rejected, CONFIG during the prefill): main.c restarts them
+// (review usb3 N2) and calls alink_usb_on_restarted().
+bool alink_usb_outputs_orphaned(const alink_usb_t *us);
+void alink_usb_on_restarted(alink_usb_t *us);
+// The lock-error action's stored byte (flash_storage.c): 0 mute, 1 play;
+// anything else loads as the default.
+uint8_t alink_usb_policy_byte(const alink_usb_t *us);
+void alink_usb_policy_load(alink_usb_t *us, uint8_t b);
 
 // The stored host rate (WP USB3): 3 bytes, int16 LE in 0.01 ppm and a check
 // byte (0xA5 ^ lo ^ hi); all zero = none.  load: at boot from the directory;

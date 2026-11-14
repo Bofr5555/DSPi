@@ -109,6 +109,11 @@ up to 60, between the two units).
 3. **Soft re-anchor.** A phase error of 3-64 samples (rare; the simulation forces one with a ring skip) re-anchors
    without stopping the outputs: `re-anchors` +1, `anchors` unchanged, about 15 ms muted. Errors beyond 64 samples,
    a preset save or a flash write still re-anchor in full (`anchors` +1).
+4. **Lock error** (WP USB3b). Play a 44.1 kHz stream (mode 2 cannot phase-lock at 44.1 kHz): with `0201c00000000000`
+   (byte 4 = 0, the default) the unit stays silent, `ST` shows `LOCK ERROR 1`, a `0xE3` with reason 10 arrives, and
+   the DIAG's `lock errors entered` is 1; with `0201c00001000000` (byte 4 = 1, play unaligned) it plays rate-locked.
+   Back to 48 kHz: reason 11, flag 0, phase-locked and audible (byte 4 = 0) after the anchor. `M $U set 0x52` persists
+   byte 4; a firmware before WP USB3b refuses byte 4 = 1.
 
 ### 4.2 CLICK skew (no programme needed)
 
@@ -171,9 +176,12 @@ times a second. Measure it on the real host with the real programme path, with n
    stream: the counters do not need sound), the Console or uconsole connected as it will be in use.
 2. At the start: `ST $A a0; ST $B b0`. Every 10 minutes for an hour: `ST $A a$i; ST $B b$i` (i = 1..6), noting
    `missed`, `late`, `gaps`, `anchors`, `re-anchors`.
-3. Expected on a quiet PC: `gaps` 0 to a few per hour, `late` 0, `anchors` unchanged. More than one gap a minute: find
-   the cause before using mode 2 (host load, USB hub, the unit's main loop: a long command, a preset save); every preset
-   save or flash write re-anchors (about 0.25 s muted), by design.
+3. Expected on a quiet PC: `gaps` 0 to a few per hour, `late` 0, `anchors` unchanged - except **one extra anchor (and
+   re-anchor, cause `output reset`) the first time the stream has been idle for 10 s** once the rate estimate spans 8 s:
+   the unit stores its settled host rate (a directory write, 2.9.2; again only if the rate moves 2 ppm, at most every
+   10 minutes and three times a boot). A player that loops a file with gaps of 10 s or more triggers it. More than one
+   gap a minute: find the cause before using mode 2 (host load, USB hub, the unit's main loop: a long command, a preset
+   save); every preset save or flash write re-anchors (about 0.25 s muted), by design.
 4. Read and keep `EXT_ALINK_USB_DIAG` at the start (clear it: `M $U set 0x00 --wvalue 0x8012 --payload 01`), every 10
    minutes and at the end: `M $U get 0x00 --wvalue 0x8012 --out out/diag.bin` and
    `python3 -I tools/alink_usb/alink_usb_status.py --diag tools/midi_ctrl/out/diag.bin`. Expected: `holdovers` and
@@ -182,6 +190,11 @@ times a second. Measure it on the real host with the real programme path, with n
    suspend or reset), and `max pass` / `max time without a SOF interrupt` / `max SOF interrupt latency` (the unit's own
    main loop or USB interrupt starved) say which. `max time without a SOF interrupt` also grows to the length of every
    SOF absence the host caused: it points at the unit only with `holdovers` 0 and no bus event (review usb2 N2).
+   The DIAG is layout version 2 since WP USB3b (the tool reads both): `SOF timestamp readings repaired` counts the
+   RP2350 readings that ended the time base before (expect a few per hour, and `discontinuity` 0), `lock errors
+   entered` should stay 0 in this test. Script check: a DIAG read must give 64 bytes; the second hour's script wrote
+   empty files (its hex parser found no data lines), so its per-10-minute reads and possibly its start-of-hour clear are
+   not in the record; check the clear by reading the DIAG right after it.
 5. Note the worst minute; it decides whether D 192 (about 1-2 ms of main-loop stall budget: the held frame costs one
    frame of ring fill) is enough for the installation. A larger D (up to 399) buys stall budget at 1 sample per sample.
 
