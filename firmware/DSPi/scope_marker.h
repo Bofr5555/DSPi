@@ -2,9 +2,9 @@
  * scope_marker.h - WP SCOPE1: a GPIO marker on the shared time base, for
  * measuring the alink timing between units with a logic analyser / MSO.
  *
- * TEST BUILDS ONLY.  Compiled in only with -DALINK_SCOPE_MARKER_GPIO=<pin>
- * (CMake cache variable of the same name); a normal build has none of this
- * and RELEASE builds refuse the option.
+ * TEST BUILDS ONLY.  Compiled in only with -DALINK_SCOPE_MARKER=ON (GPIO 22,
+ * Pico pin 29) or -DALINK_SCOPE_MARKER_GPIO=<pin> (fallback GPIO 21, pin 27);
+ * a normal build has none of this and RELEASE builds refuse the option.
  *
  * The marker pin rises when output sample index M, a multiple of
  * ALINK_SCOPE_MARKER_N, is fetched from the output ring by slot 0's DMA, M on
