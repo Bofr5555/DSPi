@@ -8,18 +8,20 @@ between units directly. It is a compile-time option, off in every normal build; 
 
 ```sh
 cmake -S firmware -B build-scope -G Ninja -DPICO_PLATFORM=rp2350-arm-s -DPICO_BOARD=pico2 \
-      -DALINK_SCOPE_MARKER_GPIO=2 -DALINK_SCOPE_MARKER_LOCK_GPIO=3        # optional: -DALINK_SCOPE_MARKER_N=4096
+      -DALINK_SCOPE_MARKER=ON                    # GPIO 22; K340 adds -DDSPI_USB_MIDI=ON -DDSPI_VREG_MV=1200
 cmake --build build-scope            # RP2040: -DPICO_PLATFORM=rp2040 -DPICO_BOARD=pico
 ```
 
 | Option | Default | Meaning |
 |---|---|---|
-| `ALINK_SCOPE_MARKER_GPIO` | empty (off) | marker pin |
-| `ALINK_SCOPE_MARKER_LOCK_GPIO` | empty (off) | sanity pin: high while phase-locked (USB `EXT_ALINK_USB_STATUS.state` 5 with phase LOCKED; alink phase LOCKED and not in holdover) |
+| `ALINK_SCOPE_MARKER` | OFF | ON: the marker on GPIO 22 (Pico / Pico 2 pin 29) |
+| `ALINK_SCOPE_MARKER_GPIO` | empty | another marker pin (also turns the marker on); the fallback is GPIO 21 (pin 27) |
+| `ALINK_SCOPE_MARKER_LOCK_GPIO` | empty (off) | optional sanity pin: high while phase-locked (USB `EXT_ALINK_USB_STATUS.state` 5 with phase LOCKED; alink phase LOCKED and not in holdover). No default; the bench images do not use it |
 | `ALINK_SCOPE_MARKER_N` | 4096 | marker period in samples: a power of two, 256..32768. 4096 = 11.72 Hz at 48 kHz, 23.4 Hz at 96 kHz |
 
-Both pins are refused as output/UART/I2C pins at run time in such a build (`is_valid_gpio_pin`).
-`DSPI_ALINK_DECODE_CORE1=ON` is refused with the marker (the alink timeline would move on the other core).
+The marker pins are refused as output/UART/I2C pins at run time in such a build (`is_valid_gpio_pin`). Refused at
+configure time: `DSPI_ALINK_DECODE_CORE1=ON` (the alink timeline would move on the other core), the marker on the
+same pin as the `DSPI_ALINK_USB_GPIO` bench SOF marker (also GPIO 22 by convention), marker = lock pin.
 
 **Why 4096 and not 4800 (exactly 10 Hz).** On the USB time base two units count the frame number N from origins
 that differ by a multiple of 2048 frames, i.e. their S differ by a multiple of 2048 x spf = 98304 samples at 48 kHz
@@ -27,14 +29,11 @@ that differ by a multiple of 2048 frames, i.e. their S differ by a multiple of 2
 on every unit; 4800 does not divide 98304, 4096 does. On the alink time base every receiver sees the same F, so any
 N would do; the same N keeps the tool simple.
 
-**GPIO choice.** Default GP2 (marker) and GP3 (lock): Pico/Pico 2 header pins 4 and 5, next to GND on pin 3. No
-receiver feature defaults to them (README pin tables: GP5-GP10 outputs/S/PDIF in, GP12 UART TX/ADAT, GP13-GP15
-MCK/BCK/LRCLK, GP23-GP25 reserved; elsewhere: GP0 alink RX, GP1 I2S RX, GP11 DAC mute, GP16/17 UART control,
-GP18/19 I2C control, GP20-22 S/PDIF RX 2-4, GP26/27 slave clocks on RP2350, GP21 MCK on RP2040). They are only used
-by the alink *sender* carrier (alinks 0/1), which does not run this firmware. On the K340 GP2/GP3 are module pads 4/5,
-not used by the board. Alternatives: GP22 (free unless S/PDIF RX 4 is enabled; also the
-`DSPI_ALINK_USB_GPIO` SOF bench marker, so do not combine), GP28, GP4 (free unless an I2S ADC data line is put
-there, as in the PCM1808 example), GP26/GP27 on RP2040.
+**GPIO choice (owner, 2026-11-14).** GPIO 22 (pin 29), fallback GPIO 21 (pin 27). Neither is used by the K340
+(GP6, 7, 11, 13, 14, 15; on the K340 PCB both module pads are unconnected), the default outputs and clocks (GP5-GP10,
+GP12-GP17), the alink (GP0-GP5), the ADC pins (GP26-GP28) or the reserved pins (GP23-GP25). Run-time options that
+would claim them, and must stay off on a bench unit: S/PDIF input 4 (default GP22) and the `DSPI_ALINK_USB_GPIO`
+bench SOF marker (GP22) for GPIO 22; S/PDIF input 3 (default GP21) and, on the RP2040, MCK (default GP21) for GPIO 21.
 
 ## Where the edge is, and the fixed offset
 

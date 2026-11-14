@@ -1,6 +1,6 @@
 /*
  * scope_marker.c - WP SCOPE1: GPIO marker on the shared time base (test
- * builds only, -DALINK_SCOPE_MARKER_GPIO=<pin>).  See scope_marker.h and
+ * builds only, -DALINK_SCOPE_MARKER=ON / -DALINK_SCOPE_MARKER_GPIO=<pin>).  See scope_marker.h and
  * Documentation/Bench/scope_marker.md.
  *
  * How the edge is placed.
