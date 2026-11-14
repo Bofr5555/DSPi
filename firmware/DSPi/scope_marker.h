@@ -22,9 +22,14 @@
  * (2^15 * 3 at 48 kHz), so only a divisor of that marks the same bus instant
  * on every unit.  The default 4096 is 11.7 Hz at 48 kHz, 23.4 Hz at 96 kHz.
  *
+ * When it runs: from the moment the outputs start on the timeline (the mode-2
+ * anchor's start), so also while the anchor verifies (USB state 4) and in
+ * phase state 3 (pending); not in modes 0/1, at 44.1 kHz or without a timeline.
+ *
  * ALINK_SCOPE_MARKER_LOCK_GPIO (optional): high while the unit is
- * phase-locked on that time base (USB state 5 / alink phase LOCKED, not in
- * holdover), low otherwise: the per-unit sanity signal.
+ * phase-locked on that time base (USB state 5 with phase LOCKED and no SOF
+ * holdover; alink phase LOCKED and not in holdover), low otherwise: the
+ * per-unit sanity signal.
  */
 
 #ifndef SCOPE_MARKER_H

@@ -15,9 +15,12 @@
  *     dedicated hardware alarm a little more than two DMA words early.
  *  3. Alarm IRQ (RAM, lowest priority, so USB and DMA interrupts preempt it):
  *     spin on the DMA read address; the moment it equals the target, set the
- *     pin.  If the spin was preempted around that moment (two time reads more
+ *     pin, but only if an earlier read of this IRQ run saw the address short
+ *     of it.  If the IRQ entered late (the first read already at or past the
+ *     target), the spin was preempted around that moment (two time reads more
  *     than 1 us apart), the address went past, or the spin timed out, the edge
- *     is skipped rather than placed late: a missing edge, never a wrong one.
+ *     is skipped (scope_marker_stats.skipped) rather than placed late: a
+ *     missing edge, never a wrong one.
  *  4. The main loop lowers the pin half a period later (only the rising edge
  *     carries timing).
  */
@@ -78,17 +81,20 @@ static void __not_in_flash_func(marker_irq)(void) {
     const volatile uint32_t *ra = &dma_hw->ch[tgt_dma].read_addr;
     const uint32_t target = tgt_addr, mask = tgt_mask, half = (tgt_mask + 1u) / 2u, budget = tgt_spin_us;
     uint32_t t0 = t->timerawl, prev = t0;
+    bool seen = false;                      // a read in this run showed "not yet" (review scope1 F1)
     uint8_t r = 2u;
     for (;;) {
         uint32_t a = *ra;
         uint32_t now = t->timerawl;
         uint32_t d = (a - target) & mask;
         if (d == 0u) {
-            // Placed only if nothing held this loop off around the change:
-            // the previous read (not yet there) was at most 1 us before.
+            // Placed only if this run saw the address before the target and
+            // nothing held the loop off around the change: the previous read
+            // (not yet there) was at most 1 us before.  An IRQ that entered
+            // with the target already reached (a late entry) skips the edge.
             uint32_t s = save_and_disable_interrupts();
             uint32_t n2 = t->timerawl;
-            if (*ra == target && n2 - prev <= 1u) {
+            if (seen && *ra == target && n2 - prev <= 1u) {
                 sio_hw->gpio_set = MARKER_MASK;
                 r = 1u;
             }
@@ -97,6 +103,7 @@ static void __not_in_flash_func(marker_irq)(void) {
         }
         if (d < half) break;                // went past while we were away
         if (now - t0 > budget) break;       // the estimate was off: give up
+        seen = true;
         prev = now;
     }
     result = r;
@@ -112,7 +119,8 @@ static bool timeline(uint64_t *next_w, bool *locked) {
     if (active_input_source == INPUT_SOURCE_USB) {
         if (!alink_usb.started || !alink_usb.ph.timeline) return false;
         *next_w = alink_usb.ph.next_w;
-        *locked = alink_usb.state == ALINK_USB_ST_PHASE_LOCK && alink_usb.ph.state == ALINK_PHASE_LOCKED;
+        *locked = alink_usb.state == ALINK_USB_ST_PHASE_LOCK && alink_usb.ph.state == ALINK_PHASE_LOCKED &&
+                  !alink_usb.dark;      // not in a SOF holdover (as the alink's !ph.hold)
         return true;
     }
 #endif
