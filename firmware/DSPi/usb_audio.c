@@ -38,6 +38,7 @@
 #include "class/audio/audio.h"
 
 #include "usb_audio.h"
+#include "pipeline_settle.h"
 #include "audio_pipeline.h"
 #include "output_latency.h"
 #include "adat_output.h"
@@ -475,10 +476,20 @@ volatile uint8_t usb_input_channels = 2;
 // streaming leaves sync_started latched; the test-signal pump needs a live
 // view to know when to take over pacing.
 bool usb_audio_stream_active(void) {
-    if (!sync_started) return false;
-    uint64_t last = last_packet_time_us;
-    return last > 0 && (time_us_64() - last) <= AUDIO_GAP_THRESHOLD_US;
+    return pipeline_usb_packets_recent(sync_started, last_packet_time_us, time_us_64(),
+                                       AUDIO_GAP_THRESHOLD_US);
 }
+
+#if DSPI_ALINK_USB
+// Packets reaching the endpoint within the gap threshold, by their arrival
+// time in the ISR: phase mode feeds them to its timeline instead of
+// process_audio_packet(), so usb_audio_stream_active() does not see them.
+// 0 = none since the last flush or alt change.
+bool usb_audio_packets_arriving(void) {
+    uint32_t last = audio_ring_last_push_us;
+    return last != 0 && (time_us_32() - last) <= AUDIO_GAP_THRESHOLD_US;
+}
+#endif
 
 // Consumer fill for instance 0 — used by watermark monitoring only
 // (no longer part of the active feedback path).

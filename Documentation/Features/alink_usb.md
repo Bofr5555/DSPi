@@ -189,11 +189,13 @@ out of step.
 
 **The anchor's pipeline reset no longer blocks 200 ms** (WP USB3b, the second bench hour's 200125 us main-loop
 pass). `prepare_pipeline_reset()` settles to silence by waiting, inside the pass, until the envelope reached zero and
-the rings played past the delay lines, with a 200 ms cap. USB counts as streaming while `sync_started` is latched
+the rings played past the delay lines, with a 200 ms cap. USB counted as streaming while `sync_started` was latched
 from an earlier stream, but the envelope moves only with processed packets: an anchor with no stream (the bench's
-start, before the player) or after a time-base loss waited the full cap. Before the anchor's reset `main.c` now marks
-the wire silent when nothing is being produced (no packet for 50 ms and no timeline writing) or when the out-of-step
-mute has held the output at zero longer than the delay lines plus the rings; the settle then returns at once.
+start, before the player) or after a time-base loss waited the full cap. Since WP IDLE1 the settle itself counts the
+USB source as a producer only while packets arrive (every reset, every mode; in phase mode only while the timeline is
+started and the endpoint received a packet within 50 ms, see `current_architecture.md` "Preset-Switch Mute"). Before
+the anchor's reset `main.c` still marks the wire silent when the out-of-step mute has held the output at zero longer
+than the delay lines plus the rings (packets may still arrive then); the settle then returns at once.
 
 **Locked quickly.** What a lock waited for, and what it waits for now:
 

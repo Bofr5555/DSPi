@@ -70,6 +70,7 @@
 #include "tusb.h"
 #include "pico/binary_info.h"
 #include "build_info.h"
+#include "pipeline_settle.h"
 
 // Same stamp REQ_GET_BUILD_INFO reports, embedded in the UF2's binary info
 // so `picotool info` can identify a build file or a BOOTSEL-mode device.
@@ -958,22 +959,14 @@ static void reset_usb_feedback_loop(void) {
 // refresh and prepare_pipeline_reset() taking ownership.  Kept short so a
 // fade that is armed and then abandoned unmutes promptly.
 #define PIPELINE_FADE_REQUEST_MS    40u
-// Defensive cap on the whole settle (fade + drain), for a producer that
-// stalls after being declared live.  Comfortably above the worst real case
-// (8 ms fade + ~30 ms of queue + 42 ms of delay line).
-#define PIPELINE_FADE_CAP_US    200000u
-// A fade that has not been polled for this long belongs to an abandoned
-// operation; the next poll starts a fresh one rather than inheriting its
-// "already silent" verdict.
-#define PIPELINE_FADE_STALE_US   50000u
+// PIPELINE_FADE_CAP_US / PIPELINE_FADE_STALE_US and the settle's decisions:
+// pipeline_settle.h (host-tested).
 // Floor on an operation's mute counter: outlasts packets produced between
 // prepare_pipeline_reset() and the restart, so the envelope cannot fade back
 // up inside the disruptive window.
 #define PIPELINE_OP_MUTE_FLOOR_MS 24u
 
-static uint64_t fade_last_poll_us = 0;
-static uint64_t fade_start_us = 0;
-static bool fade_drain_armed = false;
+static pipeline_settle_t fade_settle;
 // Set when a settle has run to completion and cleared as soon as the envelope
 // is seen above zero again.  Lets a nested or back-to-back prepare (a handler
 // that runs process_type_switches() and then another bracket, say) skip a
@@ -986,9 +979,22 @@ static bool pipeline_wire_silent = false;
 // Discard the in-flight settle's progress (not the wire-silent latch, which
 // tracks the state of the outputs rather than of any one operation).
 static void pipeline_fade_reset(void) {
-    fade_drain_armed = false;
-    fade_last_poll_us = 0;
-    fade_start_us = 0;
+    pipeline_settle_reset(&fade_settle);
+}
+
+// USB counts as a producer only while host packets actually arrive.  The
+// latched sync_started is cleared only by the next packet after a gap, so with
+// the host idle (alt 0, a paused player) it stayed set and every pipeline
+// reset waited the full PIPELINE_FADE_CAP_US for an envelope no packet would
+// move.  Phase mode (DSPI_ALINK_USB) bypasses process_audio_packet(), so there
+// the endpoint's arrival time is the evidence, and only a started timeline
+// turns packets into blocks.
+static bool usb_source_streaming(void) {
+#if DSPI_ALINK_USB
+    if (alink_usb_engaged(&alink_usb))
+        return alink_usb.started && usb_audio_packets_arriving();
+#endif
+    return usb_audio_stream_active();
 }
 
 // True while something is actually feeding process_input_block(); mirrors the
@@ -996,8 +1002,7 @@ static void pipeline_fade_reset(void) {
 // is what fills the rings when no source is streaming).  Public: the CS
 // INPUT_LEVEL_MAX noun gates on it (peaks[] freezes when blocks stop).
 bool pipeline_producer_is_streaming(void) {
-    extern volatile bool sync_started;
-    if (active_input_source == INPUT_SOURCE_USB && sync_started) return true;
+    if (active_input_source == INPUT_SOURCE_USB && usb_source_streaming()) return true;
     if (input_source_is_spdif(active_input_source) &&
         spdif_input_get_state() == SPDIF_INPUT_LOCKED) return true;
     if (active_input_source == INPUT_SOURCE_I2S &&
@@ -1082,45 +1087,27 @@ static void pipeline_service_producer(bool lock_gated) {
 }
 
 static bool pipeline_fade_to_silence_poll(void) {
-    const uint64_t now = time_us_64();
-    if (fade_last_poll_us != 0 && (now - fade_last_poll_us) > PIPELINE_FADE_STALE_US) {
-        pipeline_fade_reset();
-    }
-    if (fade_start_us == 0) fade_start_us = now;
-    fade_last_poll_us = now;
-
     // Audio came back since the last completed settle: this fade starts over.
     if (!pipeline_mute_is_silent()) pipeline_wire_silent = false;
 
     uint32_t fs = audio_state.freq ? audio_state.freq : 48000u;
     pipeline_request_soft_mute(samples_for_duration_ms(fs, PIPELINE_FADE_REQUEST_MS));
 
-    // Already silent all the way to the wire from an earlier settle.
-    if (pipeline_wire_silent) return true;
-
-    if (!pipeline_producer_is_streaming()) {
-        // Nothing to fade, and no packet will arrive to advance the envelope.
-        pipeline_latch_mute_silence();
-        pipeline_wire_silent = true;
+    switch (pipeline_settle_step(&fade_settle, time_us_64(), pipeline_wire_silent,
+                                 pipeline_producer_is_streaming(), pipeline_mute_is_silent())) {
+    case PIPELINE_SETTLE_SILENT:
         return true;
-    }
-
-    // Defensive: a producer that was declared live but stopped delivering.
-    if ((now - fade_start_us) > PIPELINE_FADE_CAP_US) {
-        pipeline_latch_mute_silence();
-        pipeline_wire_silent = true;
-        return true;
-    }
-
-    if (!fade_drain_armed) {
-        if (!pipeline_mute_is_silent()) return false;
-        // The envelope reached zero; delay lines still hold pre-fade audio.
+    case PIPELINE_SETTLE_WAIT_ENVELOPE:
+        return false;
+    case PIPELINE_SETTLE_ARM_DRAIN:
         output_rings_silence_mark_arm(pipeline_max_active_delay_samples());
-        fade_drain_armed = true;
+        // fall through
+    case PIPELINE_SETTLE_WAIT_DRAIN:
+        if (!output_rings_silence_mark_reached()) return false;
+        break;
+    case PIPELINE_SETTLE_LATCH:
+        break;
     }
-
-    if (!output_rings_silence_mark_reached()) return false;
-
     pipeline_latch_mute_silence();
     pipeline_wire_silent = true;
     return true;
@@ -2156,19 +2143,14 @@ static void input_service_handshakes(void) {
     else if (active_input_source == INPUT_SOURCE_USB && alink_usb.mode == ALINK_USB_MODE_PHASE) {
         if (alink_usb_anchor_wanted(&alink_usb)) {
             if (!preset_loading) {
-                // WP USB3b: nothing left to fade, so prepare_pipeline_reset()'s
-                // blocking settle must not wait.  With sync_started latched from
-                // an earlier stream but no packet processed (no stream, or the
-                // timeline gone after a time-base loss), the envelope never moved
-                // and the settle ran into its 200 ms cap (PIPELINE_FADE_CAP_US):
-                // the second bench hour's 200125 us main-loop pass.  Idle (no
-                // packet for 50 ms, no timeline writing) is the case the poll
-                // already treats as silent; so is an output the out-of-step mute
-                // has held at zero longer than the delay lines and the rings.
+                // WP USB3b: an output the out-of-step mute has held at zero
+                // longer than the delay lines and the rings is already silent
+                // on the wire, though packets may still arrive (the settle
+                // would fade it again).  The idle case (no packet, no started
+                // timeline) is pipeline_producer_is_streaming()'s now (WP IDLE1).
                 uint32_t fs = audio_state.freq ? audio_state.freq : 48000u;
                 uint32_t flush_us = ((pipeline_max_active_delay_samples() + 512u) * 1000u / fs + 3u) * 1000u;
-                if (!pipeline_wire_silent && ((!usb_audio_stream_active() && !alink_usb.started) ||
-                                              alink_usb_fw_silent_us() > flush_us)) {
+                if (!pipeline_wire_silent && alink_usb_fw_silent_us() > flush_us) {
                     pipeline_latch_mute_silence();
                     pipeline_wire_silent = true;
                 }

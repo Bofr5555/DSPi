@@ -285,6 +285,9 @@ int32_t usb_audio_decode_packet(const uint8_t *data, uint16_t data_len);
 uint32_t usb_audio_packet_samples(uint16_t len);
 void usb_audio_flush_ring(void);   // Discard stale ring data + reset gap timestamp
 bool usb_audio_stream_active(void); // Packets arriving within the gap threshold
+#if DSPI_ALINK_USB
+bool usb_audio_packets_arriving(void); // Endpoint arrivals within the gap threshold (phase mode bypasses the stock decode)
+#endif
 
 // Exposed in usb_descriptors.h (populated by main.c from the chip unique ID).
 
