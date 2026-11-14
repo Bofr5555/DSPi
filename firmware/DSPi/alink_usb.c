@@ -25,6 +25,8 @@
 #include "usb_audio.h"
 #include "usb_audio_ring.h"   // USB_RING_MAX_PKT
 #include "audio_input.h"
+#include "dac_hw_mute.h"
+#include "flash_storage.h"
 #include "pico/stdlib.h"
 
 #include "hardware/gpio.h"
@@ -176,10 +178,12 @@ void alink_usb_port_write_silence(uint32_t k) {
     block_done();
 }
 
-void alink_usb_port_actuate(float hz, float trim, bool ff_trim) {
-    if (ff_trim) input_servo_apply_trim(hz, trim);
+void alink_usb_port_actuate(float hz, float trim, bool ff_trim, float slew) {
+    if (ff_trim) input_servo_apply_trim_slew(hz, trim, slew);
     else input_servo_apply(hz, 0);
 }
+
+void alink_usb_port_preset(float ppm) { input_servo_preset(ppm); }
 
 void alink_usb_port_park(void) { input_servo_reset(); }
 float alink_usb_port_vcxo_ppm(void) { return soft_vcxo_current_ppm(); }
@@ -292,16 +296,73 @@ static void refresh_limits(void) {
                     output_latency_ring_span());
 }
 
+// The DAC's hardware mute while out of step (WP USB3).  Asserted once the
+// soft mute has faded the output to silence (never before: dac_hw_mute.h), so
+// the anchor's prepare_pipeline_reset() finds the hold already elapsed and
+// drains at once; complete_pipeline_reset() keeps it asserted for the anchor
+// (alink_usb_fw_keep_dac_mute()); the anchor releases it after the start, and
+// this releases it when the unit stops being out of step another way (mode 1,
+// a rejected host).  Not after a soft re-anchor: the outputs keep running.
+static bool dac_held;
+
+static void dac_hold_update(void) {
+    // Released meanwhile (a reset bracket's completion): not ours any more.
+    if (dac_held && !dac_hw_mute_is_asserted()) dac_held = false;
+    bool oos = alink_usb_out_of_step(&alink_usb);
+    if (oos && !dac_held && !alink_usb.started && !dac_hw_mute_is_asserted() && pipeline_mute_is_silent()) {
+        // Only a pin nobody else holds: then the lifecycle is ours to end.
+        dac_hw_mute_assert();
+        dac_held = dac_hw_mute_is_asserted();   // false when the feature is off
+    } else if (!oos && dac_held && !alink_usb.prefilling && !preset_loading) {
+        // In step another way (mode 1 written, a rejected host, a rate or D the
+        // phase lock cannot run): nothing will anchor, so release it here.
+        dac_held = false;
+        dac_hw_mute_release();
+    }
+}
+
+void alink_usb_fw_dac_released(void) { dac_held = false; }
+
+bool alink_usb_fw_keep_dac_mute(void) {
+    if (!alink_usb_out_of_step(&alink_usb)) return false;
+    dac_held = true;
+    return true;
+}
+
 void alink_usb_fw_service(void) {
     if (alink_usb.mode != ALINK_USB_MODE_OFF) refresh_limits();
     alink_usb_service(&alink_usb, to_ms_since_boot(get_absolute_time()));
     alink_usb_fb_nominal = alink_usb_nominal_feedback(&alink_usb);
+    dac_hold_update();
 }
 
-void alink_usb_fw_stop(void) {
+void alink_usb_fw_stop(bool release_dac) {
     alink_usb_stop(&alink_usb, ALINK_USB_RS_DISABLED);
     alink_usb_fb_nominal = false;
+    // Mode 0 written while USB plays: release the mute held out of step.  A
+    // source switch leaves the pin to its own reset bracket (released by its
+    // completion or the new source's prefill), so it must not release here.
+    if (dac_held && release_dac) dac_hw_mute_release();
+    dac_held = false;
 }
+
+// The stored host rate (WP USB3), V27 block reserved bytes.
+bool alink_usb_fw_seed_persist_due(void) {
+    uint8_t s[ALINK_USB_SEED_LEN];
+    if (active_input_source != INPUT_SOURCE_USB) return false;
+    return alink_usb_seed_save_due(&alink_usb, s);
+}
+
+void alink_usb_fw_seed_persist(void) {
+    uint8_t s[ALINK_USB_SEED_LEN];
+    if (!alink_usb_seed_save_due(&alink_usb, s)) return;
+    // Counted as done even if the write fails: no retry loop on bad flash.
+    preset_save_alink_usb_seed(s);
+    alink_usb_seed_saved(&alink_usb, s);
+}
+
+void alink_usb_fw_seed_load(const uint8_t s[ALINK_USB_SEED_LEN]) { alink_usb_seed_load(&alink_usb, s); }
+void alink_usb_fw_seed_bytes(uint8_t s[ALINK_USB_SEED_LEN]) { alink_usb_seed_bytes(&alink_usb, s); }
 
 bool alink_usb_fw_anchor_ready(void) {
     float wait = alink_usb_anchor_wait(&alink_usb);
@@ -320,7 +381,7 @@ uint32_t alink_usb_fw_ring_target(uint32_t fs, uint32_t target, uint32_t cap) {
 bool alink_usb_fw_set_config(const uint8_t p[ALINK_USB_CFG_LEN]) {
     refresh_limits();
     bool ok = alink_usb_set_config(&alink_usb, p);
-    if (ok && alink_usb.mode == ALINK_USB_MODE_OFF) alink_usb_fw_stop();
+    if (ok && alink_usb.mode == ALINK_USB_MODE_OFF) alink_usb_fw_stop(active_input_source == INPUT_SOURCE_USB);
     return ok;
 }
 
@@ -382,6 +443,6 @@ void alink_usb_fw_get_diag(uint8_t o[ALINK_USB_DIAG_LEN]) {
 
 bool alink_usb_fw_clear_diag(uint8_t v) {
     if (!alink_usb_clear_diag(&alink_usb, v)) return false;
-    for (int i = 0; i < 16; i++) alink_usb_tb.ev[i] = 0;
+    for (unsigned i = 0; i < sizeof(alink_usb_tb.ev) / sizeof(alink_usb_tb.ev[0]); i++) alink_usb_tb.ev[i] = 0;
     return true;
 }

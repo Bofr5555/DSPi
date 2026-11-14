@@ -37,8 +37,20 @@ void alink_usb_fw_deliver(uint32_t frame, const uint8_t *data, uint16_t len);
 
 // Main loop, every pass while USB is the input source.
 void alink_usb_fw_service(void);
-// The input source leaves USB.
-void alink_usb_fw_stop(void);
+// The input source leaves USB (release_dac false: its reset bracket owns the
+// DAC mute), or mode 0 was written (true).
+void alink_usb_fw_stop(bool release_dac);
+// complete_pipeline_reset(): true = keep the DAC's hardware mute asserted, the
+// USB phase anchor follows and releases it (WP USB3).
+bool alink_usb_fw_keep_dac_mute(void);
+// The anchor released the DAC mute after the start (main.c).
+void alink_usb_fw_dac_released(void);
+// The stored host rate (WP USB3): main loop, flash bracket like core_vreg's
+// persist (the write re-anchors a phase timeline; only due while idle).
+bool alink_usb_fw_seed_persist_due(void);
+void alink_usb_fw_seed_persist(void);
+void alink_usb_fw_seed_load(const uint8_t s[ALINK_USB_SEED_LEN]);
+void alink_usb_fw_seed_bytes(uint8_t s[ALINK_USB_SEED_LEN]);
 // The anchor's start: true when the outputs should start now (waits the
 // last millisecond in place).
 bool alink_usb_fw_anchor_ready(void);

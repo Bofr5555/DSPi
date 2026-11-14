@@ -122,7 +122,9 @@ typedef struct {
 #define ALINK_USB_SOF_LOST_MS      50u
 #define ALINK_USB_READY_PPM        1.0f      // VCXO within this of the feed-forward: anchor
 #define ALINK_USB_EST_HALF         8000u     // estimator anchors rotate every 8 s: span 8-16 s
-#define ALINK_USB_EST_MIN          2000u     // estimate used from a 2 s span
+#define ALINK_USB_EST_MIN          2000u     // the dual-anchor estimate from a 2 s span
+#define ALINK_USB_EST_QUICK        250u      // quick estimate: two blocks of this many frames (WP USB3)
+#define ALINK_USB_EST_QUICK_MIN    60u       // clean pairs needed in each block
 #define ALINK_USB_TICK_US          75000u    // = INPUT_SERVO_TICK_US
 #define ALINK_USB_EVENT_MIN_MS     250u
 #define ALINK_USB_GAP_MUTE_MS      20u       // a stream gap mutes this long, then fades back in
@@ -132,6 +134,21 @@ typedef struct {
 #define ALINK_USB_DIAG_LEN         64
 #define ALINK_USB_STOP_FRAMES      16u       // a GAP this close before alt 0 was the stream's end
 #define ALINK_USB_DECODE_MARGIN    16u       // D - (cap + margin) is the hold threshold
+// WP USB3: getting out-of-step units locked quicker.
+#define ALINK_USB_SLEW_PPM         0.5f      // per tick: input_servo's audible-safe slew (6.7 ppm/s)
+#define ALINK_USB_FAST_SLEW_PPM    2.0f      // per tick while muted out of step in mode 2 (26.7 ppm/s)
+#define ALINK_USB_FAST_MIN_PPM     4.0f      // ... and the VCXO more than this off the feed-forward
+#define ALINK_USB_FAST_SETTLE_MS   300u      // after a fast step: the outputs' receivers settle before the anchor
+#define ALINK_USB_SOFT_FADE_MS     12u       // soft re-anchor: the soft mute's fade (8 ms) before a correction
+#define ALINK_USB_RIDE_KEEP_US     20        // ride-through return within this: estimator anchors kept (USB2 N1)
+// The stored host rate (seed), EXT_ALINK_USB_STATUS flags bit 5; persisted in
+// the V27 block's reserved bytes.  Saved when it moved by this much.
+#define ALINK_USB_SEED_LEN         3
+#define ALINK_USB_SEED_SAVE_PPM    2.0f
+#define ALINK_USB_SEED_IDLE_MS     10000u    // no stream for this long before a save (the write re-anchors)
+#define ALINK_USB_SEED_SPAN        8000u     // and a rate estimate over at least this many frames
+#define ALINK_USB_SEED_GAP_MS      600000u   // at most one save per 10 minutes
+#define ALINK_USB_SEED_SAVES_MAX   3u        // and three per boot
 
 // t48: 48 ticks per microsecond, 48000 per frame.
 #define ALINK_USB_T48_FRAME        48000u
@@ -158,7 +175,7 @@ typedef struct {
     // IRQ (WP USB2): the OUT arm flag and TinyUSB events by DCD_EVENT_* id
     // ([1] bus reset, [2] unplugged, [4] suspend, [5] resume).
     volatile bool     out_wait;
-    volatile uint32_t ev[16];   // indexed by event id without a mask: ids run to USBD_EVENT_FUNC_CALL (8)
+    volatile uint32_t ev[16];   // by event id, no mask: usb_audio.c asserts DCD_EVENT_COUNT <= 16 (USB2 N3)
 } alink_usb_tb_t;
 
 // One SOF.  f11: SOF frame number; now: t48 at the call; since: t48 ticks
@@ -225,11 +242,26 @@ typedef struct {
     uint32_t last_n;
     bool     seeded, valid;
     float    ppm;               // host SOF rate against the unit's crystal, + = host fast
+    // WP USB3, quick estimate: the means of two consecutive blocks of
+    // ALINK_USB_EST_QUICK frames of clean pairs (frame offset x and time
+    // residual y = t - t0 - x * 48000 from the seed pair).  Averaging some 250
+    // pairs per block makes it as good after 0.5 s (about 0.1 ppm RP2350,
+    // 0.3 ppm RP2040) as the two single anchors are after 2 s; it is used until
+    // their span reaches ALINK_USB_EST_MIN.
+    uint32_t q_n0, q_t0;
+    uint16_t q_cnt[2];
+    int32_t  q_x[2], q_y[2];
+    bool     quick;             // ppm is the quick estimate
+    bool     q_off;             // no quick estimate (rebased: ppm kept from before)
+    bool     rebase;            // the next pair after rebase_t restarts the anchors, ppm and valid kept (USB2 N1)
+    uint32_t rebase_t;
 } alink_usb_est_t;
 
 void alink_usb_est_reset(alink_usb_est_t *e);
 // One clean pair (n, t48).  Repeated pairs are ignored.
 void alink_usb_est_sample(alink_usb_est_t *e, uint32_t n, uint32_t t);
+// Frames the rate estimate spans (0: none).
+uint32_t alink_usb_est_span(const alink_usb_est_t *e);
 
 // ---------------------------------------------------------------------------
 // Engine
@@ -296,7 +328,18 @@ typedef struct {
     uint32_t stream_samples;
     // Counters (from boot)
     uint32_t anchors, reanchors, gaps, missed, late, unstamped, sync_pulses;
-    // SYNC_PULSE (bench builds): frame to pulse at, armed in the ISR by the port
+    // WP USB3: faster locking.
+    uint32_t now_ms;                         // the latest service call
+    uint32_t settle_ms;                      // no anchor before this (after a fast VCXO step)
+    bool     settling;
+    bool     soft;                           // a soft re-anchor is verifying (no drain)
+    uint32_t soft_ms;                        // its corrections wait for the fade until this
+    bool     seed_ok;                        // a stored host rate exists
+    bool     seed_used;                      // it preset the VCXO (status flags bit 5)
+    float    seed_ppm;
+    uint8_t  seed_saves;                     // this boot
+    uint32_t seed_save_ms;
+    uint32_t idle_ms;                        // no stream since then (0: a stream plays)
 } alink_usb_t;
 
 void alink_usb_init(alink_usb_t *us);
@@ -316,6 +359,25 @@ bool alink_usb_phase_possible(const alink_usb_t *us, uint32_t fs);
 // The ring target while USB is the source: the phase prefill when the phase
 // lock runs, else `target` unchanged (output_latency_apply()).
 uint32_t alink_usb_ring_target(alink_usb_t *us, uint32_t fs, uint32_t target, uint32_t cap, uint32_t span);
+
+// Owner decision 2026-11-14 (WP USB3): mode 2 with the phase lock possible
+// and the unit not playing on its timeline (before the first anchor, after a
+// time-base loss, while anchoring or re-anchoring).  The service keeps the
+// output soft-muted while this holds; the firmware also keeps the DAC's
+// hardware mute asserted (main.c), so the anchor needs no new hold.
+// Not out of step: modes 0/1, a rejected host, a configuration that cannot
+// phase-lock (it plays rate-locked, as before), PENDING (automatic re-anchor
+// off: plays while the servo pulls the error in), a holdover.
+bool alink_usb_out_of_step(const alink_usb_t *us);
+
+// The stored host rate (WP USB3): 3 bytes, int16 LE in 0.01 ppm and a check
+// byte (0xA5 ^ lo ^ hi); all zero = none.  load: at boot from the directory;
+// save_due: the firmware writes the directory (flash; re-anchors, so only
+// when idle) when it returns true, with the bytes to store, then calls saved.
+void alink_usb_seed_load(alink_usb_t *us, const uint8_t s[ALINK_USB_SEED_LEN]);
+void alink_usb_seed_bytes(const alink_usb_t *us, uint8_t s[ALINK_USB_SEED_LEN]);
+bool alink_usb_seed_save_due(alink_usb_t *us, uint8_t s[ALINK_USB_SEED_LEN]);
+void alink_usb_seed_saved(alink_usb_t *us, const uint8_t s[ALINK_USB_SEED_LEN]);
 
 // Packets pass through the engine (alink_usb_deliver) instead of the stock path.
 static inline bool alink_usb_engaged(const alink_usb_t *us) { return us->started || us->prefilling; }
@@ -382,9 +444,13 @@ void     alink_usb_port_write_packet(const alink_usb_pkt_t *p, uint32_t off, uin
 // Copy the packet's bytes (the USB ring slot is reused) and return the copy.
 const void *alink_usb_port_keep(const alink_usb_pkt_t *p);
 void     alink_usb_port_write_silence(uint32_t k);
-// ff_trim: the feed-forward plus `trim` (input_servo_apply_trim); false: the
-// feed-forward plus the fill servo on slot 0 (input_servo_apply).
-void     alink_usb_port_actuate(float hz, float trim, bool ff_trim);
+// ff_trim: the feed-forward plus `trim` (input_servo_apply_trim_slew, at most
+// `slew` ppm per tick); false: the feed-forward plus the fill servo on slot 0
+// (input_servo_apply, its own 0.5 ppm slew).
+void     alink_usb_port_actuate(float hz, float trim, bool ff_trim, float slew);
+// Set the VCXO to ppm at once (the stored host rate, WP USB3): only while
+// nothing is audible (mode 2 muted, or no stream).
+void     alink_usb_port_preset(float ppm);
 void     alink_usb_port_park(void);                     // input_servo_reset()
 float    alink_usb_port_vcxo_ppm(void);
 uint8_t  alink_usb_port_apply(const alink_apply_op_t *op);

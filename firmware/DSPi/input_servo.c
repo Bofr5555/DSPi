@@ -60,7 +60,7 @@
 #define SERVO_FILL_KP2_PPM       4.0f    // added slope beyond +-2 buffers
 #define SERVO_FILL_KI_PPM        5.0e-5f // ppm per tick per buffer
 #define SERVO_FILL_ICLAMP_PPM    3.0f    // bounds the static residual held
-#define SERVO_SLEW_PPM_PER_TICK  0.5f    // ~6.7 ppm/s at INPUT_SERVO_TICK_US
+#define SERVO_SLEW_PPM_PER_TICK  INPUT_SERVO_SLEW_PPM_PER_TICK    // ~6.7 ppm/s at INPUT_SERVO_TICK_US
 
 // Fill target in buffer units, read live from the latency option.
 static inline float servo_fill_target(void) {
@@ -164,6 +164,16 @@ void input_servo_apply(float actual_freq, int fill_slot) {
 }
 
 void input_servo_apply_trim(float actual_freq, float trim_ppm) {
+    input_servo_apply_trim_slew(actual_freq, trim_ppm, SERVO_SLEW_PPM_PER_TICK);
+}
+
+void input_servo_preset(float ppm) {
+    last_cmd_ppm = ppm;
+    fill_integral_ppm = 0.0f;
+    soft_vcxo_set_ppm(ppm);
+}
+
+void input_servo_apply_trim_slew(float actual_freq, float trim_ppm, float slew) {
     if (actual_freq < 20000.0f || actual_freq > 200000.0f) return;
     uint32_t freq_nom = audio_state.freq;
     if (freq_nom == 0) return;
@@ -179,10 +189,10 @@ void input_servo_apply_trim(float actual_freq, float trim_ppm) {
     // target if the input falls back to it.
     fill_integral_ppm = 0.0f;
     fill_smooth = servo_fill_target();
-    if (ppm > last_cmd_ppm + SERVO_SLEW_PPM_PER_TICK)
-        ppm = last_cmd_ppm + SERVO_SLEW_PPM_PER_TICK;
-    else if (ppm < last_cmd_ppm - SERVO_SLEW_PPM_PER_TICK)
-        ppm = last_cmd_ppm - SERVO_SLEW_PPM_PER_TICK;
+    if (ppm > last_cmd_ppm + slew)
+        ppm = last_cmd_ppm + slew;
+    else if (ppm < last_cmd_ppm - slew)
+        ppm = last_cmd_ppm - slew;
     last_cmd_ppm = ppm;
 #if DSPI_CLOCK_DIAG
     diag_servo.actual_freq  = actual_freq;

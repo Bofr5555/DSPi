@@ -29,7 +29,8 @@ RP2350-only: CLICK (the RP2040's fixed-point pipeline has no click injection) an
   `firmware/tests/test_alink_usb.c` (`test_mode0_stock`) checks that the engine never actuates, writes, mutes or sends
   in mode 0, and a `-DDSPI_ALINK_USB=OFF` build has exactly the base image's RAM (99104 B `.data`).
 - **Mode 1 (rate lock)**: the host's SOF rate against the unit's crystal (two clean SOF anchors 8-16 s apart, used from
-  a 2 s span) is the VCXO's feed-forward. During pull-in (slew 0.5 ppm per 75 ms tick, as every input servo) the
+  a 2 s span; before that a quick block estimate from 0.5 s, section 3a) is the VCXO's feed-forward. During pull-in
+  (slew 0.5 ppm per 75 ms tick, as every input servo; mode 2's muted pull-in is faster, section 3a) the
   asynchronous feedback still keeps the ring fill; once the VCXO is within 2 ppm of the feed-forward the unit reports
   exactly nominal feedback and, while a stream plays, the fill servo (the S/PDIF slave's) holds the fill. With no
   stream (alt 0: the ring is empty) the VCXO stays on the feed-forward alone: the fill term would pull it off by the
@@ -144,11 +145,52 @@ K340 that matters for its thermal and 1.20 V margin story; mode 1 and mode 0 idl
 Re-anchors: a phase error beyond 2 samples (`AUTO_REANCHOR`; otherwise phase state 3 and the servo pulls it in), a new D
 or mode, any other reset of the output rings (`complete_pipeline_reset()`: preset load, flash write, output type
 switch, rate change), and a time-base jump (SOF lost for 50 ms or a gap over 1 s: the estimator restarts, the held VCXO
-makes the next pull-in immediate, so it re-anchors about 2.1 s after the bus returns).
+makes the next pull-in immediate, so it re-anchors about 0.5 s after the bus returns: the quick estimate, section 3a).
 
 The servo, once per 75 ms: `input_servo_apply_trim(host rate, PI(e))` with `e = F_arr - (next_w - fill) - D` and the
 alink's gains (`ALINK_PHASE_KP_PPM` etc., `alink_phase_servo()`). D is in samples, so the alink's thresholds (0.5 to verify,
 2 to re-anchor) are samples here.
+
+## 3a. Out of step: muted, and locked quickly (WP USB3)
+
+**Muted while out of step** (owner decision 2026-11-14). `alink_usb_out_of_step()`: mode 2, the phase lock possible
+(48/96 kHz, D in range, host not rejected) and the unit not playing on its timeline (before the first anchor after
+power-up, after a time-base loss, anchoring, verifying, re-anchoring). The service then refreshes the soft mute every
+pass, a stream included; the audio fades in only once phase-locked. `alink_usb.c` also asserts the DAC's hardware mute
+(`dac_hw_mute`) as soon as the soft mute has reached silence (only a pin nobody else holds), so the anchor's
+`prepare_pipeline_reset()` finds the hold elapsed and drains at once; `complete_pipeline_reset()` keeps the pin asserted
+when a USB anchor follows (`alink_usb_fw_keep_dac_mute()`), so a preset load or flash write costs one DAC hold, not two;
+the anchor releases it after the start; leaving mode 2 or becoming not out of step another way (a rejected host, a
+rate or D the phase lock cannot run) releases it. Not muted: modes 0/1, a rejected host and a CONFIG unit (they play as
+before), PENDING (`AUTO_REANCHOR` clear: it plays while the servo pulls the error in), and a holdover (the timeline
+continues).
+
+**Locked quickly.** What a lock waited for, and what it waits for now:
+
+| Step | Before | WP USB3 |
+|---|---|---|
+| First rate estimate | 2 s (two single SOF anchors) | 0.5 s: the means of two 250-frame blocks of clean SOF pairs (`est_quick`); the dual-anchor estimate takes over at 2 s |
+| VCXO pull-in | 6.7 ppm/s from 0 | starts at the stored host rate (below) at once; else, muted and more than 4 ppm off, 26.7 ppm/s (2 ppm per tick), then 300 ms for the outputs' receivers to settle |
+| After a time-base loss | estimator restart, 2 s, and a stale pre-absence clean pair could seed it (garbage rate, a reset, 2 s more) | only fresh clean pairs (under 50 ms old) seed it: 0.5 s; the VCXO held its trim |
+| DAC mute hold (K340: 100 ms) | at every anchor | already elapsed (held while out of step) |
+| Phase error 3-64 samples | full re-anchor: hold, drain, prefill, start, verify, release | soft: mute, 12 ms fade, whole-sample corrections with the outputs running, verify (about 15 ms) |
+
+**The stored host rate.** `alink_usb_seed_*`: the V27 block's three reserved bytes (int16 LE in 0.01 ppm, check byte
+`0xA5 ^ lo ^ hi`; zero = none, so no directory version change and no migration). The unit writes them itself
+(`alink_usb_fw_seed_persist()` in the main loop's flash bracket, like `core_vreg`'s persist) once the rate is settled
+over 8 s or more, no stream has played for 10 s and the rate moved 2 ppm from the stored one; at most every 10 minutes
+and three times a boot. In mode 2 the write re-anchors (muted, nothing playing). At the next start with the VCXO parked
+and nothing audible (mode 2, or mode 1 without a stream) the VCXO is set to it at once (`input_servo_preset()`,
+STATUS flags bit 5). "Per host" in the sense the unit can know: a USB device cannot tell hosts apart before their SOF,
+and 0.5 s after it the quick estimate knows the rate anyway; what the stored value buys is a VCXO that is already there
+when the SOF starts. Another host costs the slew from the stored rate.
+
+**The audio-link receiver** (`alink_input.c`) takes the muted fast pull-in too (2 ppm per tick while pulling in with
+the output silent and more than 4 ppm off, 300 ms settling): start-up 2.0-2.6 s from any offset up to 50 ppm and 4.1 s
+at 100 ppm (2.0-8.6 s and 14.9 s before; `tools/alink_phase_sim`). Its long rate window (2 s) and the rest of its lock
+path are unchanged: a quick estimate needs its rate measurement (`alink_ring_clock.h`, shared with the sender's tests)
+changed, and a stored rate needs a directory field (the V26 alink block has one reserved byte left, so a directory
+version bump and a migration); both are left for a follow-up (no RAM growth either way). Its DAC hold already runs during its pull-in (the loss asserts it).
 
 ## 4. Apply at frame, CLICK, SYNC_PULSE
 
@@ -183,4 +225,5 @@ RAM). Figures per build: WP USB1 report.
   and the status layout.
 - `tools/alink_usb_sim/run.sh`: two units on one host with the real engine and alink_phase code, modelled SOF and hub
   jitter, ISR latency, packet completion and re-arm, main-loop passes, USB ring, VCXO, rings and asynchronous feedback.
-  Scenarios and figures in the WP USB1 report and `usb_direct_bench.md` section 5.
+  Scenarios and figures in the WP USB1 report and `usb_direct_bench.md` section 7; since WP USB3 every mode-2 scenario
+  also checks that no stream sample is heard out of step, and the L scenarios print `LOCKTIME` lines.

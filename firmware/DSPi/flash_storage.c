@@ -704,10 +704,14 @@ _Static_assert(FLASH_ALINK_CONFIG_VERSION == 1 && FLASH_ALINK_PHASE_VERSION == 1
 // V27 alink USB-direct block (WP USB1): EXT_ALINK_USB mode, flags, D.  Stored
 // on every platform so a directory round-trips; DSPI_ALINK_USB builds use it.
 #define FLASH_ALINK_USB_VERSION 1
+// WP USB3: the three reserved bytes hold the settled host rate (int16 LE in
+// 0.01 ppm and a check byte, alink_usb_seed_*); zero, as every older firmware
+// wrote them, is "none", so the block version stays 1.  Written on its own by
+// preset_save_alink_usb_seed() (cfg untouched) and kept by the full save.
 typedef struct __attribute__((packed)) {
     uint8_t version;                         // FLASH_ALINK_USB_VERSION; 0 = never saved
     uint8_t cfg[4];                          // mode, flags, d (u16 LE)
-    uint8_t reserved[3];
+    uint8_t seed[3];                         // the stored host rate (V27 reserved before WP USB3)
 } FlashAlinkUsbConfig;                       // 8 bytes
 #define FLASH_OUTPUT_LATENCY_CONFIG_VERSION 1
 
@@ -5047,12 +5051,31 @@ uint8_t preset_save_output_config(void) {
 #if DSPI_ALINK_USB
     dir_cache.alink_usb.version = FLASH_ALINK_USB_VERSION;
     alink_usb_fw_store(dir_cache.alink_usb.cfg);
+    alink_usb_fw_seed_bytes(dir_cache.alink_usb.seed);
 #endif
     dir_cache.spdif_rx_pin = dir_cache.output_config.spdif_rx_pin;
     limiter_to_dir();
     if (dir_flush() != 0) return PRESET_ERR_FLASH_WRITE;
     return PRESET_OK;
 }
+
+#if DSPI_ALINK_USB
+// WP USB3: the settled USB host rate alone, in the V27 block's seed bytes; the
+// stored EXT_ALINK_USB configuration and everything else stay as saved.  A
+// block never saved gets version 1 with cfg zero (d 0: implausible, so the
+// load keeps the defaults for it and takes only the seed).  Main loop, inside
+// the flash write bracket.
+uint8_t preset_save_alink_usb_seed(const uint8_t seed[3]) {
+    dir_ensure();
+    if (dir_cache.alink_usb.version != FLASH_ALINK_USB_VERSION) {
+        memset(&dir_cache.alink_usb, 0, sizeof(dir_cache.alink_usb));
+        dir_cache.alink_usb.version = FLASH_ALINK_USB_VERSION;
+    }
+    memcpy(dir_cache.alink_usb.seed, seed, sizeof(dir_cache.alink_usb.seed));
+    if (dir_flush() != 0) return PRESET_ERR_FLASH_WRITE;
+    return PRESET_OK;
+}
+#endif
 
 uint8_t preset_get_active(void) {
     dir_ensure();
@@ -5368,8 +5391,10 @@ void preset_load_alink_config(void) {
     alink_phase_store_defaults(alink_phase_store);
 #if DSPI_ALINK_USB
     // V27 alink USB block (WP USB1): implausible values keep the defaults.
-    if (dir_cache_valid && dir_cache.alink_usb.version == FLASH_ALINK_USB_VERSION)
+    if (dir_cache_valid && dir_cache.alink_usb.version == FLASH_ALINK_USB_VERSION) {
         alink_usb_fw_load(dir_cache.alink_usb.cfg);
+        alink_usb_fw_seed_load(dir_cache.alink_usb.seed);    // WP USB3; invalid bytes: none
+    }
 #endif
     if (!dir_cache_valid || c->version != FLASH_ALINK_CONFIG_VERSION) return;
     // EXT_ALINK_PHASE (WP LK6): ranges here, the d_local limits when it is used.

@@ -174,6 +174,11 @@ static void sender_fill(sender_t *s, const scenario_t *sc, uint64_t words) {
 #define MUTE_HOLD_MS        5u
 #define SERVO_TICK_US       75000u
 #define PROBE_US            1000u
+// WP USB3 (alink_input.c, input_servo.h): the muted pull-in slew.
+#define PULL_IN_FAST_SLEW_PPM          2.0f
+#define PULL_IN_FAST_MIN_PPM           4.0f
+#define PULL_IN_SETTLE_US              300000u
+#define INPUT_SERVO_SLEW_PPM_PER_TICK  0.5f
 
 enum { PH_SEARCH, PH_LOCKED, PH_RELOCK };
 
@@ -206,6 +211,7 @@ typedef struct {
     uint64_t servo_last_us;
     float last_cmd, fill_smooth, fill_int, last_ff;
     bool pull_in;
+    uint64_t fast_settle_us;        // WP USB3: no anchor before this (0 none)
     // Main loop (main.c ALINK block)
     bool preset_loading, prefilling;
     // Output side
@@ -558,13 +564,13 @@ static void phase_verify(rx_t *r) {
 
 // input_servo_apply_trim() / input_servo_apply(): feed-forward plus a trim,
 // slew-limited; the soft VCXO moves in 0.11 ppm steps.
-static void servo_actuate(rx_t *r, float hz, float trim) {
+static void servo_actuate(rx_t *r, float hz, float trim, float slew) {
     float ff = (hz / (float)r->fs - 1.0f) * 1e6f;
     if (ff > 2000.0f || ff < -2000.0f) return;
     r->last_ff = ff;
     float cmd = ff + trim;
-    if (cmd > r->last_cmd + 0.5f) cmd = r->last_cmd + 0.5f;
-    if (cmd < r->last_cmd - 0.5f) cmd = r->last_cmd - 0.5f;
+    if (cmd > r->last_cmd + slew) cmd = r->last_cmd + slew;
+    if (cmd < r->last_cmd - slew) cmd = r->last_cmd - slew;
     r->last_cmd = cmd;
     double q = cmd / 0.11;
     r->vcxo_ppm = 0.11 * (double)(int64_t)(q < 0 ? q - 0.5 : q + 0.5);
@@ -583,7 +589,14 @@ static bool phase_servo_tick(rx_t *r, float hz) {
         if (act == ALINK_PHASE_ACT_REANCHOR) alink_phase_pi_reset(&r->ph.pi);
         else if (r->ph.state == ALINK_PHASE_LOCKED || r->ph.state == ALINK_PHASE_PENDING) trim = alink_phase_servo(&r->ph, e);
     }
-    servo_actuate(r, hz, trim);
+    // Pull-in before the anchor with the output silent: nothing is audible,
+    // so the VCXO may move faster (WP USB3); the normal slew everywhere else.
+    float v0 = (float)r->vcxo_ppm, off = r->last_ff - v0;
+    bool fast = r->pull_in && !r->ph.started && r->preset_loading &&
+                (off > PULL_IN_FAST_MIN_PPM || off < -PULL_IN_FAST_MIN_PPM);
+    servo_actuate(r, hz, trim, fast ? PULL_IN_FAST_SLEW_PPM : INPUT_SERVO_SLEW_PPM_PER_TICK);
+    float dv = (float)r->vcxo_ppm - v0;
+    if (dv > 1.0f || dv < -1.0f) r->fast_settle_us = (r->now_us + PULL_IN_SETTLE_US) | 1u;
     return true;
 }
 
@@ -599,7 +612,7 @@ static void fill_servo(rx_t *r, float hz) {
     r->fill_int += err * 5.0e-5f;
     if (r->fill_int > 3.0f) r->fill_int = 3.0f;
     if (r->fill_int < -3.0f) r->fill_int = -3.0f;
-    servo_actuate(r, hz, p + r->fill_int);
+    servo_actuate(r, hz, p + r->fill_int, INPUT_SERVO_SLEW_PPM_PER_TICK);
 }
 
 static void update_clock_servo(rx_t *r) {
@@ -708,6 +721,12 @@ static void poll(rx_t *r) {
         if (alink_phase_active(&r->ph) && !(r->relocked && !r->meas.long_valid)) {
             r->pull_in = !(r->meas.long_valid && r->last_ff != 0.0f && fabs(r->vcxo_ppm - r->last_ff) < 1.0);
             rate_ready = !r->pull_in;
+            // WP USB3: after a fast pull-in step the receivers settle first
+            // (still pulling in: rows dropped).
+            if (rate_ready && r->fast_settle_us) {
+                if ((int64_t)(r->now_us - r->fast_settle_us) < 0) r->pull_in = true, rate_ready = false;
+                else r->fast_settle_us = 0;
+            }
         }
     }
     if (locked && r->preset_loading && !r->prefilling && rate_ready) {
@@ -934,6 +953,18 @@ static void write_wav(const scenario_t *sc, const probe_log_t *log) {
 
 static void run_scenario(const scenario_t *sc) {
     printf("\n== %s\n", sc->name);
+    // Every scenario from its own random sequence (WP USB3): a change in one
+    // scenario, or a filtered run, no longer moves the others' figures.
+    // ALINK_PHASE_SIM_SALT picks other sequences (default 7).  Known: the two
+    // 60 s holdover scenarios' "resume without a re-anchor" and "latency
+    // 9-10 s after" checks are marginal (WP USB3 report: they fail for 7 of 16
+    // salts at bofr-main ebdf538 and 7 of 16 with WP USB3): after 60 s on a
+    // held VCXO the resume can need a third whole-frame correction.
+    rs = 0x9E3779B97F4A7C15ull;
+    for (const char *c = sc->name; *c; c++) rs = (rs ^ (uint8_t)*c) * 0x100000001B3ull;
+    const char *salt = getenv("ALINK_PHASE_SIM_SALT");
+    rs ^= (salt ? strtoull(salt, NULL, 0) : 7u) * 0x9E3779B97F4A7C15ull;
+    if (!rs) rs = 1;
     printf("   L%u %u Hz C %u, sender %+.0f ppm; rx A %+.0f ppm boot %.2f s, rx B %+.0f ppm boot %.2f s; mode %u, D %u\n",
            sc->cls, rate_hz(sc->rate), sc->c, sc->sender_ppm, sc->rx_ppm[0], sc->boot_s[0], sc->rx_ppm[1],
            sc->boot_s[1], sc->mode, sc->d_local);
@@ -953,6 +984,13 @@ static void run_scenario(const scenario_t *sc) {
         free(r[i].snd.ring);
         if (trace) printf("    rx %c: e_s %+.4f integ %+.3f trim %+.3f last_cmd %+.3f hz %.4f\n", 'A' + i, r[i].ph.pi.e_s,
                           r[i].ph.pi.integ, r[i].ph.pi.trim, r[i].last_cmd, alink_meas_hz(&r[i].meas));
+    }
+    // WP USB3: start-up time, boot to audible and phase-locked.
+    for (int i = 0; i < NRX; i++) {
+        unsigned j = 0;
+        while (j < log[i].n && !log[i].aud[j]) j++;
+        if (j < log[i].n)
+            printf("   rx %c: audible and phase-locked %.2f s after boot\n", 'A' + i, j * PROBE_US * 1e-6 - sc->boot_s[i]);
     }
     // Skew: both audible and phase-locked at the same instant, the last 10 s.
     unsigned n = log[0].n, from = n > 10000 ? n - 10000 : 0;
@@ -1122,6 +1160,9 @@ int main(int argc, char **argv) {
         // applied twice and the budget ran out into a re-anchor), no re-anchor.
         { "60 s holdover with 0.5 ppm VCXO drift on B (negative correction)", 1, 1, 8, 0, { 30, -25 }, { 0.0, 0.8 },
           { 0, 10.0 }, { 0, 70.0 }, 1, 128, 100.0, 95.0, 0, 0.1, 0, 0, 0.5 },
+        // WP USB3: pull-in from far off (the muted fast slew).
+        { "pull-in: receivers +58 and -100 ppm off the sender", 1, 1, 8, 0, { 58, -100 }, { 0.0, 0.4 }, { 0, 0 },
+          { 0, 0 }, 1, 128, 40.0, 35.0, 0, 0.1, 0, 0, 0 },
     };
     for (unsigned i = 0; i < sizeof(sc) / sizeof(sc[0]); i++) {
         if (only && !strstr(sc[i].name, only)) continue;
