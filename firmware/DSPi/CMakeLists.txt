@@ -280,6 +280,41 @@ if (DSPI_ALINK_USB)
     endif()
 endif()
 
+# -- WP SCOPE1 -- scope marker, TEST BUILDS ONLY (off by default).
+# -DALINK_SCOPE_MARKER=ON: the marker on GPIO 22 (Pico pin 29), the bench pin;
+# -DALINK_SCOPE_MARKER_GPIO=<pin> picks another (fallback GPIO 21, Pico pin 27)
+# and also turns it on.  The pin rises when output sample index M (a multiple of
+# ALINK_SCOPE_MARKER_N, a power of two, default 4096 = 11.7 Hz at 48 kHz) on the
+# shared time base (USB S in EXT_ALINK_USB mode 2, or the alink frame F) is
+# fetched for the I2S/S/PDIF output.  Optional ALINK_SCOPE_MARKER_LOCK_GPIO=<pin>:
+# high while phase-locked (no default).  Documentation/Bench/scope_marker.md.
+option(ALINK_SCOPE_MARKER "Test only: GPIO marker on the shared time base (GPIO 22 unless ALINK_SCOPE_MARKER_GPIO)" OFF)
+set(ALINK_SCOPE_MARKER_GPIO "" CACHE STRING "Test only: GPIO of the time-base marker (empty: 22 with ALINK_SCOPE_MARKER=ON, else none)")
+set(ALINK_SCOPE_MARKER_LOCK_GPIO "" CACHE STRING "Test only: GPIO high while phase-locked (empty = none)")
+set(ALINK_SCOPE_MARKER_N "4096" CACHE STRING "Test only: marker period in samples (power of two, 256..32768)")
+set(_scope_pin "${ALINK_SCOPE_MARKER_GPIO}")
+if (ALINK_SCOPE_MARKER AND _scope_pin STREQUAL "")
+    set(_scope_pin 22)
+endif()
+if (NOT _scope_pin STREQUAL "")
+    if (DSPI_ALINK_DECODE_CORE1)
+        message(FATAL_ERROR "the scope marker needs the alink decode on Core 0 (DSPI_ALINK_DECODE_CORE1=OFF)")
+    endif()
+    if (DSPI_ALINK_USB AND "${DSPI_ALINK_USB_GPIO}" STREQUAL "${_scope_pin}")
+        message(FATAL_ERROR "scope marker GPIO ${_scope_pin} is also DSPI_ALINK_USB_GPIO: pick one")
+    endif()
+    if ("${ALINK_SCOPE_MARKER_LOCK_GPIO}" STREQUAL "${_scope_pin}")
+        message(FATAL_ERROR "scope marker and lock pin are both GPIO ${_scope_pin}")
+    endif()
+    target_sources(DSPi PRIVATE scope_marker.c)
+    target_compile_definitions(DSPi PRIVATE ALINK_SCOPE_MARKER_GPIO=${_scope_pin}
+        ALINK_SCOPE_MARKER_N=${ALINK_SCOPE_MARKER_N}u)
+    if (NOT ALINK_SCOPE_MARKER_LOCK_GPIO STREQUAL "")
+        target_compile_definitions(DSPi PRIVATE ALINK_SCOPE_MARKER_LOCK_GPIO=${ALINK_SCOPE_MARKER_LOCK_GPIO})
+    endif()
+    message(STATUS "WP SCOPE1 scope marker: GPIO ${_scope_pin}, lock GPIO '${ALINK_SCOPE_MARKER_LOCK_GPIO}', N ${ALINK_SCOPE_MARKER_N} (test build)")
+endif()
+
 target_include_directories(DSPi PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}/generated
@@ -297,6 +332,9 @@ if (RELEASE)
             message(FATAL_ERROR "RELEASE build refused: ${_bench} is a bench option and must be OFF")
         endif()
     endforeach()
+    if (ALINK_SCOPE_MARKER OR NOT ALINK_SCOPE_MARKER_GPIO STREQUAL "")   # -- WP SCOPE1 --
+        message(FATAL_ERROR "RELEASE build refused: the scope marker (ALINK_SCOPE_MARKER*) is a test option")
+    endif()
     # Variant suffix of the published file name: platform, MIDI, non-default
     # core voltage (K340: rp2350-midi-vreg1200).  Override with
     # -DRELEASE_VARIANT=<name>.
