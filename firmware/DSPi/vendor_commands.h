@@ -33,17 +33,8 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
 // from every transport; nothing per-transport to implement.
 // ----------------------------------------------------------------------------
 
-typedef enum {
-    CTRL_SOURCE_USB  = 0,
-    CTRL_SOURCE_UART = 1,
-    CTRL_SOURCE_I2C  = 2,
-    CTRL_SOURCE_GPIO = 3,   // internal Control Surfaces engine (main loop); not a
-                            // wire transport.  The Control Surfaces tick dispatches
-                            // through vendor_dispatch_get/set with this source so its
-                            // writes are tagged PARAM_SRC_GPIO.
-    CTRL_SOURCE_MIDI = 4,   // USB MIDI SysEx tunnel (DSPI_USB_MIDI builds only;
-                            // midi_control.c).  Writes are tagged PARAM_SRC_MIDI.
-} CtrlSource;
+// CtrlSource (and the per-transport command table) lives in transport_gate.h.
+#include "transport_gate.h"
 
 typedef enum {
     CTRL_DISPATCH_OK          = 0,  // handled; GET response captured

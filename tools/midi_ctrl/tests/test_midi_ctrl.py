@@ -146,6 +146,14 @@ class ClientAgainstFake(unittest.TestCase):
         self.assertEqual(self.c.set(mc.REQ_EXTENSION, mc.EXT_CROSSFEED_PAIR_MAP, payload=k340).status, mc.ST_OK)
         self.assertEqual(self.c.get(mc.REQ_EXTENSION, mc.EXT_CROSSFEED_PAIR_MAP).payload, k340)
         self.assertEqual(len(self.c.get(mc.REQ_EXTENSION, mc.EXT_CORE_VREG).payload), 16)
+        # FWSEC1: over MIDI, SET / TRIAL above 1.20 V are refused; 1.20 V, the
+        # build default (0) and TRIAL_END / AUTO / CLEAR are accepted.
+        def vreg(op, val):
+            return self.c.set(mc.REQ_EXTENSION, mc.EXT_CORE_VREG, payload=bytes([op, val])).status
+        self.assertEqual(vreg(0, 0x0E), mc.ST_ERROR)
+        self.assertEqual(vreg(1, 0x0F), mc.ST_ERROR)
+        for op, val in ((0, 0x0D), (0, 0), (1, 0x0D), (2, 0), (3, 1), (4, 0)):
+            self.assertEqual(vreg(op, val), mc.ST_OK, (op, val))
         feats = struct.unpack("<I", self.c.get(mc.REQ_EXTENSION, mc.EXT_NOTIFY_FEATURES).payload)[0]
         self.assertTrue(feats & mc.NOTIFY_FEAT_BULK_SOURCE)
         self.assertTrue(feats & mc.NOTIFY_FEAT_CLIP_EVENT)
@@ -246,7 +254,8 @@ class Scripts(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("firmware fixes: 0x00000001 BULK_DB_POWF", out)
         rc, out = self.run_main(mc, ["enter-bootloader", "--yes", "--fake"])
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 1)                      # FWSEC1: USB vendor only
+        self.assertIn("status=BLOCKED", out)
 
     def test_measure(self):
         import measure

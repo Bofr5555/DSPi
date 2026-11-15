@@ -13,7 +13,8 @@ exercise midi_ctrl.py, measure.py and soak.py without a device:
     0xA2 / 0xA3 sessions, 0x0F (RTA bands-all) larger than 132 bytes;
   * a small command set: 0x7F platform, 0xD2/0xD3 master volume (with a
     PARAM_CHANGED notification, src MIDI), 0xA0/0xA1 bulk (BULK_INVALIDATED
-    after a SET, src MIDI), 0x50 status, 0xB0/0xB2 stats, 0xF0 bootloader, 0x00
+    after a SET, src MIDI), 0x50 status, 0xB0/0xB2 stats, 0xF0 bootloader
+    (BLOCKED, as the firmware's FWSEC1 gate answers over MIDI), 0x00
     extension channel (EXT_LIST, pair map, core-voltage status, notify
     feature flags);
   * optional alink block 0x8000-0x800A and events 0xE1 / 0xE2
@@ -312,7 +313,6 @@ class FakeDevice:
         self.seq = 0
         self.inject = []            # statuses returned (once each) before real handling
         self.requests = 0
-        self.in_bootloader = False
         self.iface_config = []      # (bReq, payload) of 0xF5 / 0xF7 received
         self.chunk_get = False
         self.chunk_set = None       # bytes received so far, or None
@@ -470,8 +470,8 @@ class FakeDevice:
             elif breq == mc.REQ_GET_USB_ERROR_STATS:
                 data = bytes(16)
             elif breq == mc.REQ_ENTER_BOOTLOADER:
-                self.in_bootloader = True
-                data = b"\x01"
+                # FWSEC1: bootloader entry is USB-vendor only; MIDI gets BLOCKED.
+                return self._reply(tag, True, mc.ST_BLOCKED)
             else:
                 return self._reply(tag, True, mc.ST_ERROR)
             if cap:
@@ -533,6 +533,13 @@ class FakeDevice:
             return self._reply(tag, False, mc.ST_ERROR)
         if sub == mc.EXT_CROSSFEED_PAIR_MAP:
             self.pair_map = bytes(payload)
+        elif sub == mc.EXT_CORE_VREG:
+            # FWSEC1: over MIDI, SET / TRIAL take at most 1.20 V (0x0D);
+            # SET 0 = build default.  Ops 2..4 are allowed.
+            op, val = payload[0], payload[1]
+            if op > 4 or (op in (0, 1) and val > 0x0D) or (op == 0 and val and val < 0x0D) \
+                    or (op == 1 and val < 0x0C) or (op == 3 and val > 1):
+                return self._reply(tag, False, mc.ST_ERROR)
         elif sub == mc.EXT_IDENTIFY:
             secs, tone = payload[0], payload[1]
             if payload[2] or payload[3] or (tone != mc.IDENTIFY_TONE_NONE and tone >= 9):

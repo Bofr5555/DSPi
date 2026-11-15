@@ -30,7 +30,6 @@
 #include "control_surfaces.h"   // CsMacro sizes MIDI_TX_COPY_MAX
 #include "pico/stdlib.h"
 #include "tusb.h"
-#include "device/usbd_pvt.h"    // usbd_edpt_busy (bootloader-entry flush)
 #endif
 
 #include <string.h>
@@ -73,7 +72,6 @@ static const mf_mfr_id_t g_id = {
 #define DISPATCH_RETRY_US    50000u       // transient-status retry window (as UART)
 #define BULK_TOUCH_BYTES     64u          // refresh the bulk lock this often
 #define TX_STALL_US          400000u      // host stopped reading a bulk reply
-#define BOOT_FLUSH_US        200000u      // max wait for the 0xF0 reply to leave
 #define CHUNK_SESSION_US     3000000u     // idle chunk session reaped (USB's stale window)
 #define BULK_TOTAL           ((uint32_t)WIRE_BULK_PARAMS_SIZE)
 
@@ -102,8 +100,6 @@ static struct {
     uint8_t  bReq;
     uint16_t wValue, wIndex, wLen;
     uint32_t retry_start;
-    uint8_t  boot_phase;    // REQ_ENTER_BOOTLOADER flush sequence
-    uint32_t boot_t0;
 } pending;
 
 // Chunked bulk sessions (0xA2 / 0xA3), the USB vendor path's semantics
@@ -352,41 +348,6 @@ static void parse_rx(void) {
 // Dispatch
 // ---------------------------------------------------------------------------
 
-// REQ_ENTER_BOOTLOADER never returns (reset_usb_boot), so the reply is sent
-// first and given time to leave: wait for the IN endpoint to go idle (TX
-// FIFO empty), queue the reply, wait for the host to take it (bounded), then
-// dispatch.  This is the one deliberate wait-across-polls in the module.
-static void dispatch_bootloader(void) {
-    switch (pending.boot_phase) {
-        case 0:
-            if (usbd_edpt_busy(0, MIDI_IN_ENDPOINT)) return;
-            tx_copy[0] = 1;   // same payload as the USB/UART handler
-            start_tx(pending.tag, MF_RESP_GET, CTRL_STATUS_OK, tx_copy, 1, false);
-            pump_tx();
-            pending.boot_phase = 1;
-            pending.boot_t0 = time_us_32();
-            return;
-        case 1:
-            if (tx.active) pump_tx();
-            if ((tx.active || usbd_edpt_busy(0, MIDI_IN_ENDPOINT)) &&
-                (uint32_t)(time_us_32() - pending.boot_t0) < BOOT_FLUSH_US)
-                return;
-            pending.boot_phase = 2;
-            /* fall through */
-        default: {
-            const uint8_t *rd = NULL;
-            uint16_t rl = 0;
-            // Only returns on BUSY (a USB control SET in flight, reclaimed
-            // after 100 ms); keep trying, the reply is already out.
-            CtrlDispatchResult r = vendor_dispatch_get(CTRL_SOURCE_MIDI, pending.bReq,
-                                                       pending.wValue, pending.wIndex,
-                                                       pending.wLen, &rd, &rl);
-            if (r != CTRL_DISPATCH_BUSY) pending.active = false;
-            return;
-        }
-    }
-}
-
 static bool retry_pending(CtrlDispatchResult res) {
     bool retryable = (res == CTRL_DISPATCH_BUSY) ||
                      (pending.is_get && res == CTRL_DISPATCH_BULK_LOCKED);
@@ -473,10 +434,8 @@ static void try_dispatch(void) {
     }
     // Like USB: the first non-chunk request ends an open chunk session.
     if (!is_chunk_req(pending.bReq)) chunk_close();
-    if (pending.is_get && pending.bReq == REQ_ENTER_BOOTLOADER) {
-        dispatch_bootloader();
-        return;
-    }
+    // REQ_ENTER_BOOTLOADER is refused (BLOCKED) by the dispatcher on this
+    // transport (transport_gate.h, FWSEC1), so it needs no reply-first path.
 
     CtrlDispatchResult res;
     const uint8_t *rd = NULL;

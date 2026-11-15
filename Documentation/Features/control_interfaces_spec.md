@@ -27,7 +27,8 @@ external transports through a transport-neutral orchestrator inside the firmware
 (Builds with `DSPI_USB_MIDI` add a fourth, the USB MIDI SysEx tunnel
 (`CTRL_SOURCE_MIDI`), which carries the UART frame of section 3 inside SysEx;
 see `usb_midi_control_spec.md`. It rides on USB and follows the USB rules,
-so the refusals of 1.2 do not apply to it.)
+so the self-configuration refusals of 1.2.1 do not apply to it; the
+dangerous-operation refusals of 1.2.2 do.)
 
 Every transport parses its own wire framing into the same
 `bRequest` / `wValue` / `wIndex` / `wLength` shape and hands it to the same
@@ -36,15 +37,17 @@ matters most for integrators:
 
 > **Full parity.** Every vendor command works identically over USB, UART, and
 > I2C: EQ, matrix routing, presets, master volume, input selection, the bulk
-> get/set of all parameters (`0xA0` / `0xA1`), and even bootloader entry
-> (`0xF0`). Any command added to the firmware in the future is automatically
-> available on all three transports with nothing per-transport to implement.
+> get/set of all parameters (`0xA0` / `0xA1`). Any command added to the
+> firmware in the future is automatically available on all three transports
+> with nothing per-transport to implement. The exceptions are listed in 1.2.
 
 The full opcode catalogue lives in `Documentation/commands.md`. This spec covers
 only the framing, status, and behavior that are specific to the external
 transports.
 
-### 1.2 The one exception: USB-only self-configuration
+### 1.2 The exceptions: USB-only commands
+
+#### 1.2.1 Self-configuration
 
 Two commands are refused on the external transports:
 
@@ -59,6 +62,26 @@ read the interface config (`0xF6` / `0xF8`) and status (`0xF9`), but it can neve
 reconfigure, move the pins of, change the baud/address of, or disable the very
 transport it is talking on. It cannot lock itself out. Interface configuration
 is a one-time setup step performed over USB.
+
+(The chunked bulk commands `0xA2` / `0xA3` are refused too; they exist only for
+the WinUSB 4 KB control cap, and UART / I2C use plain `0xA0` / `0xA1`.)
+
+#### 1.2.2 Dangerous operations (OD-SECh, WP FWSEC1)
+
+Refused on every transport except the USB vendor path (EP0): UART, I2C, the
+Control Surfaces engine and the USB MIDI channel (`usb_midi_control_spec.md`
+4.5).
+
+| Command | Off the USB vendor path |
+|---------|-------------------------|
+| `REQ_ENTER_BOOTLOADER` `0xF0` | `BLOCKED`, never run; the device stays up. |
+| `REQ_EXTENSION` `0x00` / `EXT_CORE_VREG` (`0x0002`) OUT, `SET` or `TRIAL` above 1.20 V | `ERROR` (the value is refused, as an out-of-range one is). `SET` 0 (build default) and values up to 1.20 V, `TRIAL_END`, `AUTO` and `CLEAR` are accepted. |
+
+Over USB nothing changes: bootloader entry, core voltages up to 1.30 V and the
+firmware's own escalation to 1.25 V (`extension_channel_spec.md` 2.3). Anything
+on the UART / I2C bus, and any application with MIDI access, could otherwise
+take the device off the bus or push its core past the RP2350's 1.21 V absolute
+maximum. Firmware before FWSEC1 ran `0xF0` on every transport.
 
 Everything else, including the two GET-config commands and the status readback,
 is available on every transport.
@@ -292,7 +315,7 @@ shared `CTRL_STATUS_*` codes:
 | `0x00` | `CTRL_STATUS_OK` | Success. On a GET, `len` bytes of payload follow. |
 | `0x01` | `CTRL_STATUS_BUSY` | The device could not service the request yet (a USB control SET was in flight). Retry the whole request shortly. |
 | `0x02` | `CTRL_STATUS_ERROR` | Unknown command or a bad parameter; the handler rejected it. |
-| `0x03` | `CTRL_STATUS_BLOCKED` | USB-only command (`0xF5` / `0xF7`) attempted over this transport. |
+| `0x03` | `CTRL_STATUS_BLOCKED` | USB-only command (`0xF5` / `0xF7` / `0xA2` / `0xA3`, or `0xF0` bootloader entry; 1.2) attempted over this transport. |
 | `0x04` | `CTRL_STATUS_BULK_LOCKED` | The shared bulk buffer is owned by another transport. Retry shortly. |
 | `0x05` | `CTRL_STATUS_CRC_ERROR` | The request failed CRC16; it was not dispatched. Resend. |
 | `0x06` | `CTRL_STATUS_OVERSIZE` | A non-bulk payload exceeded 64 bytes. |
