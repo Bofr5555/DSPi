@@ -44,7 +44,9 @@ host development: `./run.sh midi_ctrl.py alink --fake-alink receiver`.
 USB node (`DSPI_USB_DEV`, for `--vendor`), no network. Nothing here plays
 audio: audio during `soak.py` comes from the coordinator's guarded player.
 `set 0xA1` / `set 0xA3`, `measure.py --allow-bulk-set` and `enter-bootloader`
-change the device; use them only on a unit the owner designated. The MIDI
+change the device (firmware with the FWSEC1 transport gate answers
+`enter-bootloader` over MIDI with `BLOCKED`, and refuses `EXT_CORE_VREG` SET /
+TRIAL above 1.20 V there; use the USB vendor interface for both); use them only on a unit the owner designated. The MIDI
 channel follows the USB vendor path, so `set 0xF5` / `set 0xF7` (UART / I2C
 interface config, persisted to flash) are accepted too: never send them to a
 unit; their acceptance is covered by the firmware host test

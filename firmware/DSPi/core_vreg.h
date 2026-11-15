@@ -100,6 +100,22 @@ extern volatile bool    core_vreg_req_pending;
 extern volatile uint8_t core_vreg_req_op;
 extern volatile uint8_t core_vreg_req_value;
 
+// Off the USB vendor path (USB MIDI, UART, I2C, Control Surfaces; OD-SECh,
+// WP FWSEC1) SET and TRIAL take at most CORE_VREG_OFF_USB_CAP (1.20 V, inside
+// the RP2350's 1.21 V absolute maximum); SET 0 (the build default) is always
+// allowed.  TRIAL_END, AUTO and CLEAR are allowed everywhere.  Over the USB
+// vendor path CORE_VREG_CAP and the AUTO_CAP self-escalation are unchanged.
+// Checked at staging time in addition to core_vreg_request_valid(); pure, so
+// it is host-tested (firmware/tests/test_transport_gate.c).  `usb_vendor` is
+// true only for the USB vendor (EP0) path.
+#define CORE_VREG_OFF_USB_CAP  ((uint8_t)VREG_VOLTAGE_1_20)
+static inline bool core_vreg_request_transport_ok(bool usb_vendor, uint8_t op, uint8_t value) {
+    if (usb_vendor) return true;
+    if (op == CORE_VREG_OP_SET || op == CORE_VREG_OP_TRIAL)
+        return value <= CORE_VREG_OFF_USB_CAP;
+    return true;
+}
+
 // Main loop: performs a staged request.  Returns true when the directory must
 // be written; the caller then brackets core_vreg_persist() with the flash
 // mute/teardown helpers.

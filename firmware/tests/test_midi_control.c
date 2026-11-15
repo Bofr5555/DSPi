@@ -1,5 +1,5 @@
 // Host test for midi_control.c: the TinyUSB MIDI glue, pending slot, bulk
-// lock, retry window, notifications and bootloader ordering, against mocks
+// lock, retry window, notifications and the bootloader refusal, against mocks
 // of TinyUSB's MIDI FIFOs, the dispatcher, the bulk lock and the notify ring.
 // Built by run.sh like every test_*.c (host cc, no Pico SDK).
 #define MIDI_CTRL_HOST_TEST 1
@@ -73,15 +73,13 @@ static uint8_t ctrl_status_from_dispatch(CtrlDispatchResult r) {
 // --- dispatcher ---
 static int busy_left = 0;              // return BUSY this many times first
 static bool busy_forever = false;
-static int get_calls = 0, set_calls = 0, boot_calls = 0;
+static int get_calls = 0, set_calls = 0, boot_calls = 0;   // boot: 0xF0 reached the dispatcher
 static uint8_t last_set_payload[64];
 static uint16_t last_set_len;
 static uint8_t last_breq;
 static bool bulk_applied = false;
-static bool boot_reply_seen_before_dispatch = false;
 static uint8_t resp7[7] = { 1, 1, 0x16, 4, 1, 6, 0 };
 static uint8_t resp132[200];
-static int host_replies_seen(void);
 
 static CtrlDispatchResult vendor_dispatch_get(CtrlSource src, uint8_t bReq, uint16_t wv, uint16_t wi,
                                               uint16_t wl, const uint8_t **rd, uint16_t *rl) {
@@ -93,8 +91,7 @@ static CtrlDispatchResult vendor_dispatch_get(CtrlSource src, uint8_t bReq, uint
     if (busy_left > 0) { busy_left--; return CTRL_DISPATCH_BUSY; }
     if (bReq == REQ_ENTER_BOOTLOADER) {
         boot_calls++;
-        boot_reply_seen_before_dispatch = host_replies_seen() > 0;
-        return CTRL_DISPATCH_OK;   // the real one never returns
+        return CTRL_DISPATCH_BLOCKED;   // ctrl_cmd_refused(): USB vendor only (FWSEC1)
     }
     if (bReq == REQ_GET_ALL_PARAMS) {
         if (!vendor_bulk_try_acquire(src)) return CTRL_DISPATCH_BULK_LOCKED;
@@ -191,7 +188,6 @@ static bool tud_midi_packet_write(const uint8_t p[4]) {
     memcpy(txq[tx_level++], p, 4);
     return true;
 }
-static bool usbd_edpt_busy(uint8_t rhport, uint8_t ep) { (void)rhport; (void)ep; return tx_level > 0; }
 
 #include "midi_frame.c"
 #include "midi_control.c"
@@ -278,11 +274,6 @@ static void host_ingest(void) {
         }
     }
     host_pkts = 0;
-}
-static int host_replies_seen(void) {
-    usb_in(tx_level);       // what is in flight reaches the host during the reset wait
-    host_ingest();
-    return n_replies;
 }
 
 // One main-loop iteration: USB OUT, poll, USB IN (drain `in_pkts`), host parse.
@@ -634,27 +625,28 @@ static void test_notify(void) {
 }
 
 static void test_bootloader(void) {
+    // WP FWSEC1: 0xF0 goes through the dispatcher like any GET, which refuses
+    // it on this transport; the device answers BLOCKED and never reboots.  No
+    // OK reply is sent ahead of the dispatch any more.
     reset_world();
-    // Something still in flight: the bootloader reply waits for an idle EP.
     push_notify((const uint8_t *)"\2\3\0\1\0\0\0\0", 8);
     host_send(0x71, MF_TYPE_GET, REQ_ENTER_BOOTLOADER, 0, 0, NULL);
-    run(3, 0, 100);                 // host not reading: EP stays busy
-    CHECK(boot_calls == 0, "not dispatched while the EP is busy");
-    run(5, 64, 1000);
-    CHECK(boot_calls == 1, "dispatched once the reply left");
-    CHECK(boot_reply_seen_before_dispatch, "reply delivered before the reboot");
+    run(10, 64, 1000);
+    CHECK(boot_calls == 1, "0xF0 dispatched once");
+    int blocked = 0, ok = 0;
+    for (int i = 0; i < n_replies; i++) {
+        if (replies[i].tag != 0x71) continue;
+        if (replies[i].status == CTRL_STATUS_BLOCKED && replies[i].type == MF_RESP_GET) blocked++;
+        if (replies[i].status == CTRL_STATUS_OK) ok++;
+    }
+    CHECK(blocked == 1 && ok == 0, "0xF0 reply = BLOCKED, never OK");
+    // The channel keeps working afterwards.
+    host_send(0x72, MF_TYPE_GET, 0x7F, 0, 0, NULL);
+    run(10, 64, 1000);
     int found = 0;
     for (int i = 0; i < n_replies; i++)
-        if (replies[i].tag == 0x71 && replies[i].status == 0 && replies[i].len == 1 && replies[i].payload[0] == 1)
-            found = 1;
-    CHECK(found, "0xF0 reply = OK, 1 byte (1)");
-
-    // Host never reads: dispatch anyway after the bounded wait.
-    reset_world();
-    host_send(0x72, MF_TYPE_GET, REQ_ENTER_BOOTLOADER, 0, 0, NULL);
-    run(2, 64, 100);
-    run(10, 0, 50000);
-    CHECK(boot_calls >= 1, "bounded wait");
+        if (replies[i].tag == 0x72 && replies[i].status == CTRL_STATUS_OK && replies[i].len == 7) found = 1;
+    CHECK(found, "next request answered");
 }
 
 int main(void) {

@@ -1473,6 +1473,8 @@ or one `SET_ALL_PARAMS`), confirm via readback, **then** `PRESET_SAVE` to a slot
   bootloader** (`RPI-RP2`). It is no longer the DSPi and answers no vendor commands until a UF2
   is flashed and it reboots back into the application. This command does not itself write flash;
   it jumps to the ROM bootloader.
+* **USB vendor path only** (fork, WP FWSEC1): over UART, I2C and USB MIDI the dispatcher answers
+  `BLOCKED` and nothing happens (`Features/control_interfaces_spec.md` 1.2.2).
 * **Bridge handling.** Gate strictly behind explicit user confirmation; there is no undo from the
   host side. Expect the device handle to disappear immediately after the ACK; the host must
   release it and wait for the mass-storage device (to drive the update) and, later, for the DSPi

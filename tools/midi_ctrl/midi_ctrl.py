@@ -811,6 +811,12 @@ def cmd_bootloader(args) -> int:
             return 1
     c = open_client(args)
     rep = c.get(REQ_ENTER_BOOTLOADER)
+    if rep.status == ST_BLOCKED:
+        # Firmware with the per-transport gate (FWSEC1) enters the bootloader
+        # only over the USB vendor path (control_interfaces_spec.md 1.2).
+        print("status=BLOCKED: this firmware enters the bootloader only over the USB vendor "
+              "interface (e.g. tools/dspi_poke), not over MIDI")
+        return 1
     print(f"status={rep.status_name} payload={rep.payload.hex()} (device now reboots)")
     return 0 if rep.status == ST_OK else 1
 

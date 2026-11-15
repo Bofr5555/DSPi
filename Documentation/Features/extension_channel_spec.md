@@ -117,6 +117,7 @@ Vreg codes are the same on both chips: `0x0C` = 1.15 V, `0x0D` = 1.20 V, `0x0E` 
 | 4 | `CLEAR` | ignored | Forget the hang count and the last trial failure. |
 
 - **Refused (STALL / `ERROR`):** an unknown op, a voltage outside 1.15-1.30 V, or a `SET` below the build default. A device built with `DSPI_VREG_MV=1200` (K340) never boots below 1.20 V, even if an earlier build stored 1.15 V.
+- **Per transport (OD-SECh, WP FWSEC1):** off the USB vendor path (USB MIDI, UART, I2C, Control Surfaces) `SET` and `TRIAL` take at most `0x0D` (1.20 V); above it they are refused with `ERROR` (`control_interfaces_spec.md` 1.2.2). `SET` 0 (the build default), `TRIAL_END`, `AUTO` and `CLEAR` are accepted everywhere. The USB vendor path keeps the full window up to 1.30 V, and the automatic raising below is unaffected. A host doing a calibration above 1.20 V must use the USB vendor interface.
 - **Automatic raising:** after two watchdog hangs in one power session the device raises its stored voltage by one step (+50 mV), up to 1.25 V.
 
 ### 2.4 `EXT_NOTIFY_FEATURES` (0x0003)
@@ -739,6 +740,7 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 
 - 2026-11-13: the alink USB-direct block (WP USB1, 2.9): `0x8010` `EXT_ALINK_USB`, `0x8011` `EXT_ALINK_USB_STATUS`, event `0xE3` and `EXT_NOTIFY_FEATURES` bit 4; `EXT_FRAME_COUNTER` grows to 20 bytes with `time_base` and `bus_frame`; `EXT_APPLY_AT_FRAME` byte 12 selects the time base; `0x8005`/`0x8006` and bit 3 also on builds without the alink. Range `0x8010`-`0x801F` assigned.
 
+- 2026-11-15: `EXT_CORE_VREG` `SET` / `TRIAL` above 1.20 V refused off the USB vendor path (WP FWSEC1, OD-SECh; 2.3). Not announced by a feature bit; a refused request answers `ERROR` as an out-of-range value always did.
 - 2026-11-06: introduced. Replaces the fork's squatted opcodes `0x02` (`REQ_CROSSFEED_PAIR_MAP`), `0x4F` (`REQ_SET_CORE_VREG`) and `0x6F` (`REQ_GET_CORE_VREG`), which are removed with no aliases.
 - 2026-11-06: `0x0003` `EXT_NOTIFY_FEATURES` added (bit 0 `NOTIFY_FEAT_BULK_SOURCE`).
 - 2026-11-12: `EXT_NOTIFY_FEATURES` bit 1 `NOTIFY_FEAT_CLIP_EVENT` and the clip event `0xE0`; fork event IDs `0xE0`-`0xEF`.

@@ -672,9 +672,13 @@ static bool ext_handle_set(uint16_t id, const uint8_t *p, uint16_t len) {
         case EXT_CORE_VREG:
             // {op, value} (core_vreg.h).  An invalid op, a voltage outside
             // the hard window or below the build default is refused (STALL),
-            // not clamped.  Deferred to the main loop, which owns the flash
-            // bracket.
+            // not clamped; so is SET / TRIAL above 1.20 V off the USB vendor
+            // path (ERROR on that transport).  Deferred to the main loop,
+            // which owns the flash bracket.
             if (!core_vreg_request_valid(p[0], p[1])) return false;
+            // FWSEC1: off the USB vendor path SET / TRIAL stop at 1.20 V.
+            if (!core_vreg_request_transport_ok(_active_source == CTRL_SOURCE_USB,
+                                                p[0], p[1])) return false;
             core_vreg_req_op = p[0];
             core_vreg_req_value = p[1];
             __dmb();
@@ -5004,35 +5008,20 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
 // TinyUSB machinery is involved for external transports.
 // ----------------------------------------------------------------------------
 
-// Commands refused on the external transports.  Interface self-configuration
-// is USB-only so an external controller can never reconfigure (and lock
-// itself out of) its own transport; the chunked bulk commands exist solely
-// for the Windows/WinUSB 4 KB control cap, and UART/I2C (which have no size
-// cap) must use plain 0xA0/0xA1 instead of holding chunk sessions open.
-static bool ctrl_cmd_usb_only(uint8_t bRequest) {
-    return bRequest == REQ_SET_UART_CONFIG ||
-           bRequest == REQ_SET_I2C_CONFIG ||
-           bRequest == REQ_GET_ALL_PARAMS_CHUNK ||
-           bRequest == REQ_SET_ALL_PARAMS_CHUNK;
-}
-
-// USB MIDI (DSPI_USB_MIDI) rides on USB, so it follows the USB vendor path's
-// rules, not UART/I2C's: interface self-configuration (0xF5 / 0xF7) is
-// allowed because a MIDI host cannot lock itself out of USB, and
-// REQ_RTA_GET_BANDS_ALL answers out of bulk_param_buf under the bulk lock
-// (the MIDI channel has no 132-byte reply cap).  The chunked 0xA2 / 0xA3 are
-// served by midi_control.c's own chunk sessions and never reach the
-// dispatcher.  Macros, so a default build preprocesses to the old tokens.
+// Commands refused on the external transports (UART, I2C, Control Surfaces,
+// USB MIDI): ctrl_cmd_refused() in transport_gate.h, host-tested.  USB MIDI
+// rides on USB and follows the USB vendor path's rules for interface
+// self-configuration (0xF5 / 0xF7); bootloader entry (0xF0) is USB-vendor only
+// on every build (FWSEC1).
+//
+// REQ_RTA_GET_BANDS_ALL answers out of bulk_param_buf under the bulk lock for
+// USB MIDI (the MIDI channel has no 132-byte reply cap).  A macro, so a
+// default build preprocesses to the old tokens.
 #ifdef DSPI_USB_MIDI
-#define CTRL_CMD_REFUSED(src, b) \
-    (ctrl_cmd_usb_only(b) && \
-     !((src) == CTRL_SOURCE_MIDI && \
-       ((b) == REQ_SET_UART_CONFIG || (b) == REQ_SET_I2C_CONFIG)))
 #define CTRL_BULK_GET(src, b) \
     ((b) == REQ_GET_ALL_PARAMS || \
      ((src) == CTRL_SOURCE_MIDI && (b) == REQ_RTA_GET_BANDS_ALL))
 #else
-#define CTRL_CMD_REFUSED(src, b) ctrl_cmd_usb_only(b)
 #define CTRL_BULK_GET(src, b)    ((b) == REQ_GET_ALL_PARAMS)
 #endif
 
@@ -5055,7 +5044,7 @@ CtrlDispatchResult vendor_dispatch_get(CtrlSource src, uint8_t bRequest,
                                        const uint8_t **resp_data, uint16_t *resp_len) {
     if (src == CTRL_SOURCE_USB) return CTRL_DISPATCH_ERROR;  // USB uses the TinyUSB path
     if (usb_set_busy())         return CTRL_DISPATCH_BUSY;
-    if (CTRL_CMD_REFUSED(src, bRequest)) return CTRL_DISPATCH_BLOCKED;
+    if (ctrl_cmd_refused(src, bRequest)) return CTRL_DISPATCH_BLOCKED;
 
     bool bulk = CTRL_BULK_GET(src, bRequest);
     if (bulk && !vendor_bulk_try_acquire(src)) return CTRL_DISPATCH_BULK_LOCKED;
@@ -5094,7 +5083,7 @@ CtrlDispatchResult vendor_dispatch_set(CtrlSource src, uint8_t bRequest,
     (void)wIndex;   // SET handlers carry sub-params in wValue only (matches USB)
     if (src == CTRL_SOURCE_USB) return CTRL_DISPATCH_ERROR;
     if (usb_set_busy())         return CTRL_DISPATCH_BUSY;
-    if (CTRL_CMD_REFUSED(src, bRequest)) return CTRL_DISPATCH_BLOCKED;
+    if (ctrl_cmd_refused(src, bRequest)) return CTRL_DISPATCH_BLOCKED;
 
     if (bRequest == REQ_SET_ALL_PARAMS) {
         if (!vendor_is_bulk_set(bRequest, wLength)) return CTRL_DISPATCH_ERROR;

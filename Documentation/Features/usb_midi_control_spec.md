@@ -217,10 +217,14 @@ The pending request goes through `vendor_dispatch_get/set(CTRL_SOURCE_MIDI,
 internally for 50 ms before being reported. Status codes are the shared
 `CTRL_STATUS_*` set (`control_interfaces_spec.md` 3.4).
 
-**Command set: parity with the USB vendor path.** The MIDI channel rides on
-USB and is meant to behave like the normal USB vendor control channel, not like
-the external UART / I2C links. Every opcode that is source-dependent in the
-firmware is treated as follows:
+**Command set: parity with the USB vendor path, except the dangerous
+operations.** The MIDI channel rides on USB and is meant to behave like the
+normal USB vendor control channel, not like the external UART / I2C links. The
+exceptions are bootloader entry and core voltages above 1.20 V, which only the
+USB vendor path may use (4.5, decided under OD-SECh, WP FWSEC1): any process
+with MIDI access, and a browser page holding Web MIDI SysEx permission, can
+reach this channel without a driver. Every opcode that is source-dependent in
+the firmware is treated as follows:
 
 | Opcode | USB vendor path | UART / I2C | USB MIDI | Why |
 |---|---|---|---|---|
@@ -230,8 +234,9 @@ firmware is treated as follows:
 | `0xA3` `SET_ALL_PARAMS_CHUNK` | allowed | `BLOCKED` | **allowed** | Same: sequential chunks from offset 0 land in `bulk_param_buf`, the chunk completing the struct applies it like `0xA1`. Out of order or past the end: `ERROR`, restart at 0. A session ends with the first non-chunk request, after 3 s idle, or on unplug, as on USB. Lock held by another transport: `BULK_LOCKED` (USB: STALL). |
 | `0x0F` `RTA_GET_BANDS_ALL` | allowed | `ERROR` (over the 132-byte cap) | **allowed** | MIDI has no reply cap; answered zero-copy out of `bulk_param_buf` under the bulk lock, like `0xA0`. |
 | `0x82` `GET_CLOCK_DIAG` (`DSPI_CLOCK_DIAG` bench builds only) | full packet | zero bytes if over 132 | zero bytes if over 132 | The one remaining difference: the packet lives in a handler-local buffer the external copy path caps at 132 bytes. Bench-only; not worth a second large buffer. |
-| `0xF0` `ENTER_BOOTLOADER` | allowed | allowed (reply lost) | allowed, reply flushed first (4.5) | |
-| `0x00` `EXTENSION` (`extension_channel_spec.md`) | allowed; refusal = STALL | allowed; refusal = `ERROR` | **allowed**; refusal = `ERROR` | Same dispatcher, no special casing: `wValue` = sub-command, GET/SET frame type = IN/OUT. An unknown sub-command, the wrong direction or a wrong OUT length is refused. |
+| `0xF0` `ENTER_BOOTLOADER` | allowed | **`BLOCKED`** | **`BLOCKED`** | USB vendor path only (4.5). Firmware before FWSEC1: allowed on every transport. |
+| `0x00` `EXTENSION` (`extension_channel_spec.md`) | allowed; refusal = STALL | allowed; refusal = `ERROR` | **allowed**; refusal = `ERROR` | Same dispatcher: `wValue` = sub-command, GET/SET frame type = IN/OUT. An unknown sub-command, the wrong direction or a wrong OUT length is refused. |
+| `0x00` / `EXT_CORE_VREG` (`0x0002`) OUT | `SET` / `TRIAL` up to 1.30 V | `SET` / `TRIAL` up to **1.20 V**, above: `ERROR` | `SET` / `TRIAL` up to **1.20 V**, above: `ERROR` | 1.25 V and 1.30 V exceed the RP2350's 1.21 V absolute maximum (`extension_channel_spec.md` 2.3). `SET` 0 (build default), `TRIAL_END`, `AUTO` and `CLEAR` are allowed on every transport; the firmware's own escalation to 1.25 V is unaffected. |
 | everything else | allowed | allowed | allowed | Same dispatcher. |
 
 `0xA0` / `0xA1` remain the recommended bulk commands over MIDI (no size cap, one
@@ -272,14 +277,26 @@ the packet's `seq` byte and re-reads `0xA0`. After opening the port a client
 may receive a few notifications queued before it opened; treat them like any
 other.
 
-### 4.5 Bootloader entry (`GET 0xF0`)
+### 4.5 Dangerous operations: bootloader entry and high core voltages
 
-The command handler resets into the bootloader and never returns, so the MIDI
-path sends the reply itself first: it waits for the MIDI IN endpoint to be
-idle, queues the reply (`82 00 01 00 01`, OK with the byte `1`, as on USB),
-waits up to 200 ms for the host to take it, then dispatches. The device then
-leaves the bus. An iPhone cannot flash the DSPi; an app should say so before
-sending `0xF0`.
+Decided under OD-SECh (WP FWSEC1). The gate is in the dispatcher
+(`transport_gate.h`, `core_vreg.h`), so it covers UART, I2C and the Control
+Surfaces engine as well as MIDI; only the USB vendor path (EP0) is exempt.
+
+* **`GET 0xF0` is refused** with status `BLOCKED` (`0x03`) and the device stays
+  on the bus. It goes through the dispatcher like any other request; there is
+  no reply-first path any more. Firmware updates are started from a computer
+  over the USB vendor interface (`firmware_update.md`). An iPhone or iPad
+  cannot flash the DSPi anyway; an app should not offer bootloader entry over
+  MIDI. Older firmware (before FWSEC1) answered OK and rebooted, so a client
+  must treat `OK` as "the device is leaving the bus" and `BLOCKED` as "use the
+  USB vendor interface".
+* **`EXT_CORE_VREG` `SET` and `TRIAL` above 1.20 V (`0x0D`) are refused** with
+  `ERROR`, like any invalid value. `SET` with value 0 (the build default),
+  `TRIAL_END`, `AUTO` and `CLEAR` are accepted. The range above 1.20 V, which
+  needs the typed `OVERVOLT` confirmation in the console, is a computer-only
+  operation over the USB vendor path, which keeps the 1.30 V limit.
+* `0xF5` / `0xF7` stay allowed over MIDI (4.2).
 
 ### 4.6 Flash writes
 
@@ -308,12 +325,13 @@ late. Use generous timeouts (hundreds of ms) and retry idempotent GETs.
 | File | Role |
 |---|---|
 | `midi_frame.{c,h}` | Pure codec: CRC, 7-bit packing, encoder (frame to SysEx / packets), decoder (SysEx to request events). No SDK headers; built by `firmware/tests/run.sh`. |
-| `midi_control.{c,h}` | TinyUSB glue, pending slot, dispatch, TX pump, notifications, bootloader flush. |
+| `midi_control.{c,h}` | TinyUSB glue, pending slot, dispatch, TX pump, notifications. |
 | `usb_descriptors.{c,h}` | Interface / endpoint numbers, IAD + MIDI template, string 4, `bcdDevice`. |
 | `tusb_config.h` | `CFG_TUD_MIDI 1`, RX FIFO 256 B, TX FIFO 512 B, EP buffer 64 B. |
-| `vendor_commands.{c,h}` | `CTRL_SOURCE_MIDI = 4`; notify source mapping; USB-path command set for MIDI (`CTRL_CMD_REFUSED`, `CTRL_BULK_GET`, `0x0F` zero-copy). |
+| `vendor_commands.{c,h}` | notify source mapping; `CTRL_BULK_GET`, `0x0F` zero-copy; the `EXT_CORE_VREG` transport check (`core_vreg_request_transport_ok`, `core_vreg.h`). |
+| `transport_gate.h` | `CtrlSource` (`CTRL_SOURCE_MIDI = 4`); the per-transport command table `ctrl_cmd_refused()` (USB-path command set for MIDI, `0xF0` refused off the USB vendor path). Pure; host-tested. |
 | `notify.h` | `PARAM_SRC_MIDI = 10`; `NOTIFY_CONSUMER_MIDI`. |
-| `firmware/tests/test_midi_frame.c`, `test_midi_control.c` | Host tests (codec; glue against TinyUSB / dispatcher mocks). |
+| `firmware/tests/test_midi_frame.c`, `test_midi_control.c`, `test_transport_gate.c` | Host tests (codec; glue against TinyUSB / dispatcher mocks; the per-transport command and core-voltage table). |
 
 ## 7. Tests
 
@@ -333,7 +351,14 @@ late. Use generous timeouts (hundreds of ms) and retry idempotent GETs.
   contention), CRC and version errors, foreign SysEx, bulk SET with
   back-pressure, `BULK_LOCKED`, lock release on CRC error / timeout / unplug,
   bulk GET with a slow host and with a stalled host, `BUSY` retry window,
-  pipelined requests, notification ordering, bootloader reply ordering.
+  pipelined requests, notification ordering, `0xF0` answered `BLOCKED` with
+  no reboot and no early OK.
+* `test_transport_gate` (and `test_transport_gate_nomidi`, the same with
+  `DSPI_USB_MIDI` off): `0xF0` refused on MIDI, UART, I2C and GPIO and allowed
+  on USB; every other opcode keeps its previous verdict on every source;
+  `EXT_CORE_VREG` `SET` / `TRIAL` above 1.20 V refused off USB, 1.20 V and
+  `SET 0` accepted, `TRIAL_END` / `AUTO` / `CLEAR` accepted everywhere, USB
+  never refused by the transport rule.
 
 `scripts/check_usb_config.py <DSPi.elf>` (stdlib, no toolchain) replays
 TinyUSB's SET_CONFIGURATION driver binding over the configuration descriptor in
@@ -387,7 +412,12 @@ crosses one; that padding is a layout effect of the existing linker script.
    `DSPI_USB_MIDI_MFR_ID`; hosts then match it. Weeb Labs' choice.
 2. **Command set (decided 2026-11-03).** Parity with the USB vendor path:
    `0xF5`, `0xF7`, `0xA2`, `0xA3` and `0x0F` are allowed over MIDI (4.2). The
-   only remaining difference is `0x82` on bench builds.
+   only remaining difference is `0x82` on bench builds, plus item 5.
+5. **Dangerous operations (OD-SECh, decided 2026-11-15, WP FWSEC1).** `0xF0`
+   and `EXT_CORE_VREG` `SET` / `TRIAL` above 1.20 V are USB-vendor-path only
+   (4.5). No BOOTSEL-button requirement (it needs RAM-resident code and
+   glitches audio). The owner has been asked to confirm that iPhone and iPad
+   never need either.
 3. **`bcdDevice` 0x0205** for MIDI builds (decided 2026-11-03).
 4. **Notification opt-in.** Always on while configured. A host that never opens
    the port leaves up to 512 bytes of stale notifications queued.
