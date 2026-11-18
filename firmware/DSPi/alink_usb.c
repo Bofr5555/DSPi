@@ -308,17 +308,22 @@ static uint32_t silent_since;               // out of step with the soft mute at
 
 static void dac_hold_update(void) {
     // Released meanwhile (a reset bracket's completion): not ours any more.
-    if (dac_held && !dac_hw_mute_is_asserted()) dac_held = false;
+    // The latch, not the pin: the signal generator may hold an idle hold open
+    // on the pin while it plays (WP FWSIGGEN); the hold is still ours.
+    if (dac_held && !dac_hw_mute_latched()) dac_held = false;
     bool oos = alink_usb_out_of_step(&alink_usb);
     if (oos && pipeline_mute_is_silent()) {
         if (!silent_since) silent_since = time_us_32() | 1u;
     } else {
         silent_since = 0;
     }
-    if (oos && !dac_held && !alink_usb.started && !dac_hw_mute_is_asserted() && pipeline_mute_is_silent()) {
-        // Only a pin nobody else holds: then the lifecycle is ours to end.
-        dac_hw_mute_assert();
-        dac_held = dac_hw_mute_is_asserted();   // false when the feature is off
+    if (oos && !dac_held && !alink_usb.started && !dac_hw_mute_is_asserted() && !dac_hw_mute_latched() &&
+        pipeline_mute_is_silent()) {
+        // Only a pin nobody else holds: then the lifecycle is ours to end.  An
+        // idle hold: the clocks keep running (WP FWSIGGEN: the generator may
+        // open it while it plays).
+        dac_hw_mute_assert_idle();
+        dac_held = dac_hw_mute_latched();       // false when the feature is off
     } else if (!oos && dac_held && !alink_usb.prefilling && !preset_loading) {
         // In step another way (mode 1 written, a rejected host, a rate or D the
         // phase lock cannot run): nothing will anchor, so release it here.
@@ -337,6 +342,8 @@ void alink_usb_fw_policy_load(uint8_t b) { alink_usb_policy_load(&alink_usb, b);
 bool alink_usb_fw_keep_dac_mute(void) {
     if (!alink_usb_out_of_step(&alink_usb)) return false;
     dac_held = true;
+    // The outputs are running again: what stays latched is an idle hold now.
+    dac_hw_mute_mark_idle();
     return true;
 }
 

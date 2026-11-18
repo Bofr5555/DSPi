@@ -184,6 +184,9 @@ static uint32_t cycles_target;               // 0 = infinite
 static uint8_t  walk_pos;                    // bit index of current walk channel
 static bool     walk_on;
 static uint8_t  stop_reason = SIGGEN_STOP_NONE;
+// START accepted, the engine waits for the DAC to open (WP FWSIGGEN,
+// siggen_dac.h): reported as FADE_IN, cancelled by any stop.
+static bool     start_wait = false;
 static volatile bool notify_pending = false;
 static uint8_t  notify_state, notify_reason;
 
@@ -898,6 +901,21 @@ void siggen_render(int32_t (*bufs)[AUDIO_BUFFER_SAMPLES], uint32_t sample_count,
     }
 }
 
+// A block the output rings refused (WP FWSIGGEN): silence on the generator's
+// channels, no engine time.  See process_input_block().
+DSP_TIME_CRITICAL
+#if PICO_RP2350
+void siggen_hold(float (*bufs)[AUDIO_BUFFER_SAMPLES], uint32_t sample_count)
+#else
+void siggen_hold(int32_t (*bufs)[AUDIO_BUFFER_SAMPLES], uint32_t sample_count)
+#endif
+{
+    if (!siggen_running || sample_count == 0) return;
+    for (int o = 0; o < NUM_OUTPUT_CHANNELS; o++)
+        if ((cfg.channel_mask >> o) & 1u)
+            memset(bufs[o], 0, sample_count * sizeof(samp_t));
+}
+
 // ---------------------------------------------------------------------------
 // Control / config (cold, flash-resident)
 // ---------------------------------------------------------------------------
@@ -1237,6 +1255,24 @@ bool siggen_stage_config(const void *payload, uint16_t len) {
     return true;
 }
 
+static void cancel_start_wait(uint8_t reason) {
+    start_wait = false;
+    stop_reason = reason;
+    notify_state = SIGGEN_STATE_IDLE;
+    notify_reason = reason;
+    notify_pending = true;
+    flush_notify();
+}
+
+bool siggen_wants_output(void) { return start_wait || siggen_running; }
+
+void siggen_output_gate(bool ready) {
+    if (start_wait && ready) {
+        start_wait = false;
+        start_engine();
+    }
+}
+
 bool siggen_control(uint8_t action) {
     switch (action) {
     case SIGGEN_CTL_START:
@@ -1248,11 +1284,18 @@ bool siggen_control(uint8_t action) {
             swap_pending = true;
             stop_reason = SIGGEN_STOP_RECONFIG;
             fade_dir = -1;
-        } else {
+        } else if (siggen_output_ready_now()) {
+            start_wait = false;
             start_engine();
+        } else {
+            // The DAC is held muted: siggen_output_gate() starts the engine
+            // once the generator has opened it (no host stream needed).
+            start_wait = true;
+            stop_reason = SIGGEN_STOP_NONE;
         }
         return true;
     case SIGGEN_CTL_STOP:
+        if (start_wait) { cancel_start_wait(SIGGEN_STOP_HOST); return true; }
         if (!siggen_running) return true;
         swap_pending = false;
         if (eng_state == SIGGEN_STATE_GAP) {
@@ -1264,6 +1307,7 @@ bool siggen_control(uint8_t action) {
         }
         return true;
     case SIGGEN_CTL_STOP_NOW:
+        if (start_wait) cancel_start_wait(SIGGEN_STOP_HOST);
         swap_pending = false;
         if (siggen_running) {
             mark_stopped(SIGGEN_STOP_HOST);
@@ -1276,6 +1320,7 @@ bool siggen_control(uint8_t action) {
 }
 
 void siggen_stop_immediate(uint8_t reason) {
+    if (start_wait) cancel_start_wait(reason);
     swap_pending = false;
     if (siggen_running) {
         mark_stopped(reason);
@@ -1296,7 +1341,8 @@ void siggen_get_status(SiggenStatus *out) {
     memset(out, 0, sizeof(*out));
     out->version = SIGGEN_CFG_VERSION;
     // wire state derives the fade overlay: rising = FADE_IN, falling = FADE_OUT
-    if (eng_state == SIGGEN_STATE_IDLE)      out->state = SIGGEN_STATE_IDLE;
+    if (start_wait)                          out->state = SIGGEN_STATE_FADE_IN;
+    else if (eng_state == SIGGEN_STATE_IDLE) out->state = SIGGEN_STATE_IDLE;
     else if (fade_dir > 0)                   out->state = SIGGEN_STATE_FADE_IN;
     else if (fade_dir < 0)                   out->state = SIGGEN_STATE_FADE_OUT;
     else                                     out->state = eng_state;

@@ -214,6 +214,15 @@ void siggen_render(int32_t (*bufs)[AUDIO_BUFFER_SAMPLES], uint32_t sample_count,
                    uint32_t sample_rate_hz);
 #endif
 
+// A block the output rings refused: zero the generator's channels without
+// advancing the engine, so its samples stay locked to the DAC frames (WP
+// FWSIGGEN).  Called instead of siggen_render() for that block.
+#if PICO_RP2350
+void siggen_hold(float (*bufs)[AUDIO_BUFFER_SAMPLES], uint32_t sample_count);
+#else
+void siggen_hold(int32_t (*bufs)[AUDIO_BUFFER_SAMPLES], uint32_t sample_count);
+#endif
+
 // Main-loop service: applies staged configs and emits deferred notifications.
 void siggen_service(void);
 
@@ -222,6 +231,15 @@ void siggen_service(void);
 // paced by the slot-0 consumer fill level.  Implemented in audio_pipeline.c
 // (needs the input buffers and consumer-fill internals).
 void siggen_pump(void);
+
+// DAC hardware-mute ownership (WP FWSIGGEN, siggen_dac.h).  True while a
+// START waits for the DAC or the generator runs.
+bool siggen_wants_output(void);
+// Main loop, once per pass: the DAC is open for the generator; starts an
+// engine whose START waited for it.
+void siggen_output_gate(bool ready);
+// Provided by main.c (and the host tests): may a START play at once?
+bool siggen_output_ready_now(void);
 
 // Hard-stop without fade and clear staged state.  For preset load / factory
 // reset paths (audio is already muted there).  Safe to call when idle.

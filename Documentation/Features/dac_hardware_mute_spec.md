@@ -269,6 +269,22 @@ Both flash completion paths must release the mute they asserted. `complete_flash
 
 All lifecycle helpers early-exit (treating the hold as already elapsed) if the feature is disabled or no pin is claimed.
 
+### 4.4a Idle holds and the signal generator (WP FWSIGGEN)
+
+A lifecycle mute is either a **bracket** (`dac_hw_mute_assert()`: a reset is
+about to stop, or has just restarted, the output clocks) or an **idle hold**
+(`dac_hw_mute_assert_idle()`, or `dac_hw_mute_mark_idle()` on a latched bracket
+whose clocks run again: the unit waits for a source, e.g. the USB phase mode out
+of step). While the signal generator plays it sets
+`dac_hw_mute_siggen_override(true)`: an idle hold then does not drive the pin.
+Brackets, the post-restart release dwell and the test pulse always win. A bracket
+asserted while the override holds an idle hold open re-arms a full `hold_ms`
+(the DAC was playing); releasing an idle hold whose pin is open skips the release
+dwell. `dac_hw_mute_latched()` reports the latch whatever the pin shows (the
+alink_usb hold tracks its latch with it), `dac_hw_mute_bracket_active()` tells the
+generator to wait. Owner of the override: `siggen_dac.h` /
+`siggen_dac_service()`; see test_signals_spec.md section 9.3.
+
 ### 4.5 Pin claim / validation
 
 `dac_hw_mute_set_config()` validates:

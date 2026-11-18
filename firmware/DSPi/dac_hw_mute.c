@@ -96,6 +96,17 @@ static bool s_asserted = false;
  * asserted indefinitely regardless of diagnostic-test deadlines. */
 static bool s_lifecycle_asserted = false;
 
+/* WP FWSIGGEN.  s_lifecycle_idle: the latched lifecycle mute is an IDLE
+ * hold (dac_hw_mute_assert_idle() / dac_hw_mute_mark_idle(): clocks run, the
+ * unit only waits for a source, e.g. the USB phase mode out of step), not a
+ * reset bracket that is about to stop or has just restarted the clocks.  Any
+ * plain dac_hw_mute_assert() turns the latch back into a bracket.
+ * s_siggen_override: the signal generator owns the outputs; while set, an
+ * idle hold does not drive the pin.  A bracket, a release dwell or a test
+ * pulse always wins over it. */
+static bool s_lifecycle_idle = false;
+static bool s_siggen_override = false;
+
 /* Asynchronous pre-clock-stop hold deadline.  0 = no hold armed (feature
  * disabled or hold_ms == 0).  When non-zero, dac_hw_mute_hold_elapsed()
  * reports the hold incomplete until time_us_64() reaches the deadline.
@@ -209,7 +220,8 @@ static void refresh_pin_assertion(void) {
         return;
     }
 
-    bool should_assert = s_lifecycle_asserted ||
+    bool idle_open = s_siggen_override && s_lifecycle_idle;
+    bool should_assert = (s_lifecycle_asserted && !idle_open) ||
                          (s_lifecycle_release_us != 0) ||
                          (s_test_release_us != 0);
     drive_pin(should_assert ? muted_level() : unmuted_level());
@@ -285,6 +297,7 @@ void dac_hw_mute_init(const DacHwMuteConfig *cfg) {
         memset(&s_cfg, 0, sizeof(s_cfg));
         s_asserted = false;
         s_lifecycle_asserted = false;
+        s_lifecycle_idle = false;
         s_lifecycle_hold_us = 0;
         s_lifecycle_release_us = 0;
         s_test_release_us = 0;
@@ -307,6 +320,9 @@ void dac_hw_mute_init(const DacHwMuteConfig *cfg) {
      * the (possibly changed) polarity.  When not carrying a mute this is the
      * original behavior: everything zeroed and the pin left un-muted. */
     s_asserted = false;
+    /* A carried mute keeps its kind (idle or bracket); the override flag is
+     * the generator's and survives a config re-apply. */
+    if (!carry_assert) s_lifecycle_idle = false;
     s_lifecycle_asserted = carry_assert;
     s_lifecycle_hold_us = 0;
     s_lifecycle_release_us = 0;
@@ -371,12 +387,16 @@ void dac_hw_mute_assert(void) {
      * re-arming each call would push the deadline forward forever so it
      * could never elapse.  A new lifecycle assert supersedes any previous
      * delayed lifecycle release. */
-    if (!s_lifecycle_asserted) {
+    /* An idle hold opened by the generator override (WP FWSIGGEN) has the
+     * pin un-muted: the DAC is playing, so this bracket needs a full hold of
+     * its own, armed once (s_asserted is true after the refresh below). */
+    if (!s_lifecycle_asserted || !s_asserted) {
         s_lifecycle_hold_us = (s_cfg.hold_ms == 0)
             ? 0
             : make_deadline_us((uint64_t)s_cfg.hold_ms * 1000ull);
     }
     s_lifecycle_asserted = true;
+    s_lifecycle_idle = false;
     s_lifecycle_release_us = 0;
     refresh_pin_assertion();
     /* No busy-wait: the hold is enforced asynchronously by the caller
@@ -388,17 +408,56 @@ void dac_hw_mute_release(void) {
     if (s_cfg.enabled == 0 || !s_pin_claimed) return;
     if (!s_lifecycle_asserted) return;
 
+    /* An idle hold the generator override has open (WP FWSIGGEN): the pin is
+     * already un-muted and the DAC playing, so a release dwell would mute it
+     * mid-signal instead of covering a clock restart. */
+    bool pin_open = !s_asserted;
     s_lifecycle_asserted = false;
+    s_lifecycle_idle = false;
     /* End the hold episode so the next assert arms a fresh deadline and
      * dac_hw_mute_hold_elapsed() does not report a stale (already-passed)
      * hold from this lifecycle. */
     s_lifecycle_hold_us = 0;
-    if (s_cfg.release_ms == 0) {
+    if (s_cfg.release_ms == 0 || pin_open) {
         s_lifecycle_release_us = 0;
     } else {
         s_lifecycle_release_us =
             make_deadline_us((uint64_t)s_cfg.release_ms * 1000ull);
     }
+    refresh_pin_assertion();
+}
+
+void dac_hw_mute_assert_idle(void) {
+    if (s_cfg.enabled == 0 || !s_pin_claimed) return;
+    /* A bracket already latched stays a bracket. */
+    if (s_lifecycle_asserted) return;
+    s_lifecycle_hold_us = (s_cfg.hold_ms == 0)
+        ? 0
+        : make_deadline_us((uint64_t)s_cfg.hold_ms * 1000ull);
+    s_lifecycle_asserted = true;
+    s_lifecycle_idle = true;          /* before the refresh: no blip under the override */
+    s_lifecycle_release_us = 0;
+    refresh_pin_assertion();
+}
+
+void dac_hw_mute_mark_idle(void) {
+    if (!s_lifecycle_asserted) return;
+    s_lifecycle_idle = true;
+    refresh_pin_assertion();
+}
+
+bool dac_hw_mute_latched(void) {
+    return s_lifecycle_asserted;
+}
+
+bool dac_hw_mute_bracket_active(void) {
+    if (s_cfg.enabled == 0 || !s_pin_claimed) return false;
+    return (s_lifecycle_asserted && !s_lifecycle_idle) || s_lifecycle_release_us != 0;
+}
+
+void dac_hw_mute_siggen_override(bool on) {
+    if (s_siggen_override == on) return;
+    s_siggen_override = on;
     refresh_pin_assertion();
 }
 

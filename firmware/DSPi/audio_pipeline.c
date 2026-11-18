@@ -22,6 +22,7 @@
 #include "flash_storage.h"
 #include "pdm_generator.h"
 #include "siggen.h"
+#include "siggen_pump.h"
 #include "rta.h"
 #include "upmix.h"
 #include "tube.h"
@@ -532,8 +533,16 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // Test-signal injection: replaces the matrix mix on generator channels
     // before per-output processing and the Core 1 dispatch, so every output
     // slot still advances by the same sample_count (alignment preserved).
-    if (siggen_running)
-        siggen_render(buf_out, sample_count, sample_rate_hz);
+    // Only into an admitted block (WP FWSIGGEN): a refused block vanishes
+    // from every ring while the delay lines still advance by it, so a
+    // generator rendered into it would play sample_count frames early from
+    // then on.  Held (silence on its channels, engine not advanced), the
+    // block's zeros fill the delay-line slot the ring drops and the
+    // generator's sample-to-DAC-frame mapping holds.
+    if (siggen_running) {
+        if (rings_admit) siggen_render(buf_out, sample_count, sample_rate_hz);
+        else             siggen_hold(buf_out, sample_count);
+    }
 
     // ========== PASS 5-7: Per-Output EQ + Gain + Delay + Output ==========
     // Slot finalization mode for THIS packet (see output_s24.h): in-place S24
@@ -1030,8 +1039,16 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // Test-signal injection: replaces the matrix mix on generator channels
     // before per-output processing and the Core 1 dispatch, so every output
     // slot still advances by the same sample_count (alignment preserved).
-    if (siggen_running)
-        siggen_render(buf_out, sample_count, sample_rate_hz);
+    // Only into an admitted block (WP FWSIGGEN): a refused block vanishes
+    // from every ring while the delay lines still advance by it, so a
+    // generator rendered into it would play sample_count frames early from
+    // then on.  Held (silence on its channels, engine not advanced), the
+    // block's zeros fill the delay-line slot the ring drops and the
+    // generator's sample-to-DAC-frame mapping holds.
+    if (siggen_running) {
+        if (rings_admit) siggen_render(buf_out, sample_count, sample_rate_hz);
+        else             siggen_hold(buf_out, sample_count);
+    }
 
     // ========== PASS 5-7: Per-Output EQ + Gain + Delay + Output ==========
     // PDM output index
@@ -1949,44 +1966,31 @@ static void update_buffer_watermarks(void) {
 // full pipeline, so inter-slot alignment and the delay-line write index
 // advance exactly as they do for a real input source.
 void siggen_pump(void) {
-    if (!siggen_running) return;
-
-    // Never pump while the pipeline is owned by someone else: an input
-    // source actively delivering blocks, a pending source change, an output
-    // type switch rebuilding the slots, or a flash operation (preset mute).
-    //
-    // preset_loading needs care: it is only ever cleared by the block path
-    // consuming preset_mute_counter (preset_mute_gain_step), which needs
-    // blocks to flow.  In USB mode with no host stream the pump is the only
-    // block source, so refusing on preset_loading would deadlock - boot (or
-    // a stream-restart resync) leaves preset_loading latched until the next
-    // host stream, and a started generator sits in FADE_IN forever, silent.
-    // Pump through the mute instead: blocks render muted until the counter
-    // clears, then the generator fades in.  (Actual preset loads stop the
-    // generator via siggen_stop_immediate, so !siggen_running already gates
-    // those.)  Non-USB sources keep the refusal: their preset_loading
-    // doubles as the lock-acquisition / prefill handshake signal
-    // (main-loop SPDIF/I2S blocks) and must not be consumed by the pump.
-    if (preset_loading && active_input_source != INPUT_SOURCE_USB) return;
-    // No slot instance yet means usb_sound_card_init() has not run.
-    if (input_source_change_pending ||
-        output_type_switch_in_progress || spdif_instance_ptrs[0] == NULL)
-        return;
-    bool streaming =
-        (active_input_source == INPUT_SOURCE_USB && usb_audio_stream_active()) ||
-        (input_source_is_spdif(active_input_source) &&
-         spdif_input_get_state() == SPDIF_INPUT_LOCKED) ||
-        (active_input_source == INPUT_SOURCE_I2S &&
-         i2s_input_get_state() == I2S_INPUT_RUNNING);
-    if (streaming) return;
+    // Gate and pacing rule: siggen_pump.h (host-tested).  preset_loading is
+    // pumped through on USB: it is only ever cleared by the block path
+    // consuming preset_mute_counter, and with no host stream the pump is the
+    // only block source (boot or a stream-restart resync would otherwise
+    // leave a started generator silent in FADE_IN).  Actual preset loads stop
+    // the generator via siggen_stop_immediate.  WP FWSIGGEN: an input that
+    // owns the rings is the whole producer set of main.c (ADAT, alink and the
+    // USB phase-mode timeline included), not only USB / S/PDIF / I2S: each
+    // of those would otherwise be topped up by a second producer.
+    siggen_pump_gate_t g = {
+        .running = siggen_running,
+        .source_owns_rings = pipeline_source_owns_rings(),
+        .preset_loading = preset_loading,
+        .source_is_usb = active_input_source == INPUT_SOURCE_USB,
+        .source_change_pending = input_source_change_pending,
+        .type_switch = output_type_switch_in_progress,
+        .slots_ready = spdif_instance_ptrs[0] != NULL,   // usb_sound_card_init() ran
+    };
+    if (!siggen_pump_may_run(&g)) return;
 
     // Bounded top-up per call to keep the main loop responsive; the loop
     // spins fast enough to sustain any supported rate.  Blocks stay within
     // the producer cap, or the fill overshoots the target by a whole block.
     const uint32_t n = output_ring_block_cap;
-    for (int b = 0; b < 2; b++) {
-        if (slot_fill_at_target(0))
-            break;
+    for (uint32_t b = 0; siggen_pump_wants_block(slot_ring_fill_frames(0), output_ring_target_frames, b); b++) {
         int n_in = active_input_channel_count();
         for (int k = 0; k < n_in; k++)
             memset(input_bufs[k], 0, n * sizeof(input_bufs[0][0]));
