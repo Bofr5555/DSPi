@@ -26,6 +26,7 @@
 #include "usb_audio_ring.h"   // USB_RING_MAX_PKT
 #include "audio_input.h"
 #include "dac_hw_mute.h"
+#include "siggen.h"
 #include "flash_storage.h"
 #include "pico/stdlib.h"
 
@@ -349,6 +350,7 @@ bool alink_usb_fw_keep_dac_mute(void) {
 
 void alink_usb_fw_service(void) {
     if (alink_usb.mode != ALINK_USB_MODE_OFF) refresh_limits();
+    alink_usb.siggen_exempt = siggen_wants_output();   // WP FWSIGGEN: out-of-step soft mute
     alink_usb_service(&alink_usb, to_ms_since_boot(get_absolute_time()));
     alink_usb_fb_nominal = alink_usb_nominal_feedback(&alink_usb);
     dac_hold_update();

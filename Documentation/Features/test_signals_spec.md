@@ -536,12 +536,23 @@ kinds of situation:
 Before WP FWSIGGEN the generator did not touch the pin. On USB in mode 0 (the
 K340 default) the pin is released by every completed reset and nothing asserts it
 on stream stop, so with no stream it is open and the generator was audible. In the
-USB phase mode out of step with no host the idle hold kept the DAC muted: the
-generator played into a muted DAC.
+USB phase mode out of step with no host the generator was silenced twice: the
+out-of-step **soft mute** (`alink_usb_core.c` `alink_usb_service()`, refreshed on
+every main-loop pass; it is part of the output gain, applied after the
+generator's injection) multiplied its samples by zero, and the idle hold kept the
+DAC pin muted as well.
 
 Now the generator owns the pin while it plays (`siggen_dac.h`, glue
 `siggen_dac_service()` in main.c, once per main-loop pass):
 
+0. While `siggen_wants_output()` (a START waiting or the generator running) and
+   no host stream is selected (alt 0), the USB phase mode does not refresh its
+   out-of-step soft mute (`alink_usb_t.siggen_exempt`, set by
+   `alink_usb_fw_service()` before every pass). Programme audio is silence then
+   (no stream), so only the generator's own samples become audible. With a
+   stream selected the out-of-step mute stays and the generator is inaudible
+   until the unit is in step. When the generator goes idle the mute is refreshed
+   again on the next pass.
 1. `START` with the pin open (mode 0) starts at once, as before.
 2. `START` with an idle hold: the generator sets the override
    (`dac_hw_mute_siggen_override(true)`); the idle hold stays latched but no
@@ -556,16 +567,25 @@ Now the generator owns the pin while it plays (`siggen_dac.h`, glue
    stays for its tail: one slot ring plus the longest active output delay
    (`SIGGEN_DAC_TAIL_BASE_US` = 15 ms + delay). Then it goes off: an idle hold
    still latched mutes the pin again (the previous behaviour is back); one that
-   ended meanwhile leaves it open. Releasing an idle hold that the override has
-   open skips the release dwell (the DAC is already playing).
+   ended meanwhile leaves it open. That re-mute is a fresh mute edge, so it
+   re-arms `hold_ms`: a bracket that follows within the hold waits it out.
+   Releasing an idle hold that the override has open skips the release dwell
+   (the DAC is already playing).
+5. A completed reset that keeps the mute for the phase anchor
+   (`dac_hw_mute_mark_idle()` at the clock restart) arms the restart's release
+   dwell (`release_ms`) first, so the override can open the pin no sooner than
+   `release_ms` after the clocks restart.
 
 S/PDIF, ADAT, alink and I2S-slave inputs without lock keep their
 mute-until-lock: that mute is a reset bracket whose completion is the prefill
 handshake, and the pump refuses there (`preset_loading`), so the generator stays
 silent on an unlocked non-USB source, as before. Host test:
 `firmware/tests/test_siggen_dac.c` (real `dac_hw_mute.c`: open, settle, play,
-tail, restore; a hold that ends meanwhile; a bracket during play; a bracket at
-`START`; `STOP` while waiting; feature off; test pulse).
+tail, restore; a hold that ends meanwhile; a bracket during play; the release
+dwell after a kept-mute restart; a fresh hold after the re-mute; a bracket at
+`START`; `STOP` while waiting; feature off; test pulse) and
+`firmware/tests/test_alink_usb.c` (`test_out_of_step`: no soft mute while the
+generator plays with no stream, muted with a stream and after it).
 
 ---
 

@@ -280,7 +280,10 @@ of step). While the signal generator plays it sets
 Brackets, the post-restart release dwell and the test pulse always win. A bracket
 asserted while the override holds an idle hold open re-arms a full `hold_ms`
 (the DAC was playing); releasing an idle hold whose pin is open skips the release
-dwell. `dac_hw_mute_latched()` reports the latch whatever the pin shows (the
+dwell. `dac_hw_mute_mark_idle()` arms the restart's release dwell when the
+pin is muted, so an override cannot open it sooner than `release_ms` after the
+clock restart; turning the override off re-mutes a latched idle hold and re-arms
+`hold_ms` from that edge. `dac_hw_mute_latched()` reports the latch whatever the pin shows (the
 alink_usb hold tracks its latch with it), `dac_hw_mute_bracket_active()` tells the
 generator to wait. Owner of the override: `siggen_dac.h` /
 `siggen_dac_service()`; see test_signals_spec.md section 9.3.
