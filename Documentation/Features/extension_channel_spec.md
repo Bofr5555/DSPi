@@ -1,10 +1,12 @@
 # Extension Channel (`REQ_EXTENSION`, 0x00)
 
-*Last updated: 2026-11-13*
+*Last updated: 2026-11-18*
 *Status: implemented on the bofr fork, HW-untested; the alink block (2.8) is specified, not implemented*
 *Platforms: RP2040 + RP2350*
 
 The vendor opcode space is almost full, and features developed outside Weeb Labs should not claim opcodes that upstream may assign later. The extension channel puts all of them behind a single opcode, `0x00`, and selects the feature with `wValue`. The fork's owner is asking Weeb Labs to reserve `0x00` for this purpose.
+
+On firmware of the 1.1.7 generation (the paged protocol) the same sub-commands, with the same IDs and payloads, are also reached through the fork's private page `0xE0`. Section 1.3 defines both envelopes and how a host chooses between them. Sections 1.1 and 1.2 describe the 1.1.6 envelope (`REQ_EXTENSION`, `bRequest` 0x00); everything from section 2 on is the same in both.
 
 ---
 
@@ -45,6 +47,136 @@ IN replies are truncated to `wLength` like every other DSPi GET. On UART / I2C /
 | `0x0001`-`0x7FFF` | Features coordinated with Weeb Labs. Every assigned ID is listed in section 2. An ID is never reused for a different meaning. |
 | `0x8000`-`0x80FF` | This fork's private blocks, assigned by the fork; an ID is never reused for a different meaning. `0x8000`-`0x800F` the alink block (2.8), `0x8010`-`0x801F` the alink USB-direct block (2.9). Firmware without a block and stock firmware refuse its IDs. |
 | `0x8100`-`0xFFFF` | Experimental or private. Never shipped in a release build; hosts must not depend on them. |
+
+### 1.3 Envelopes
+
+*Specified 2026-11-18 (WP FWPG0, PLAN-PG decision OD-PGc). The 1.1.7-generation envelope is not implemented yet: the tunnel is WP FWPG2, the legacy stack WP FWPG3, USB MIDI and the sender WP FWPG4, all on the port of this fork onto upstream 1.1.7. Upstream reference: `release/v1.1.7` at `103ba37` (`firmware/DSPi/vendor/`, `Documentation/Features/vendor_protocol_migration_guide.md`, cited below as "the guide").*
+
+An envelope is how a request reaches an extension sub-command: which `bRequest`, which `wIndex` and what a refusal looks like. The sub-commands themselves do not depend on it. **In every envelope the sub-command ID is `wValue`, the payloads and replies are byte-identical, `EXT_LIST` returns the same bytes, and the rules of section 2 apply unchanged.** That covers every assigned ID, `0x0000`-`0x0006` and `0x8000`-`0x8012`, and every ID assigned later. Ext notifications (`0xE0`-`0xE3`) and `EXT_NOTIFY_FEATURES` are not requests and are the same on every generation.
+
+The firmware generations and the envelopes each one has:
+
+| Generation | Firmware | 1.1.6 envelope (`REQ_EXTENSION` 0x00, page 0) | 1.1.7 envelope (page `0xE0`, tunnel `0xE010`) |
+|---|---|---|---|
+| G1s | stock upstream 1.1.6 and older | none: STALL / `ERROR` | none |
+| G1b | this fork, 1.1.6 generation (`bofr-main` up to the tag `bofr-116-final`), and the alink sender of that line | **yes** (1.1, 1.2) | none: refused by the page guard (1.3.6) |
+| G2s | stock upstream 1.1.7 | none: page 0 refuses everything (`VC_ERR_UNKNOWN`) | none: page `0xE0` is absent (`VC_ERR_UNKNOWN`) |
+| G2b | this fork ported onto 1.1.7 (dual-stack) | **yes, on the legacy stack** (1.3.3), while the legacy stack is switched on | **yes** (1.3.2) |
+
+#### 1.3.1 The two envelopes side by side
+
+| Field | 1.1.6 envelope | 1.1.7 envelope (the tunnel) |
+|---|---|---|
+| Command ID | none (opcode `0x00`) | `0xE010`: page `0xE0`, command `0x10` |
+| `bmRequestType` | `0xC1` IN (read), `0x41` OUT (write) | `0xC1` GET, `0x41` SET (same values) |
+| `bRequest` | `0x00` | `0x10` |
+| `wValue` | sub-command ID | sub-command ID (unchanged) |
+| `wIndex` | `0x0002` (high byte 0 = page 0; UART / I2C / MIDI hosts may send `0x0000`) | `0xE002` on USB, on the wire `02 E0`; on UART / I2C / MIDI the high byte must be `0xE0`, the low byte may be `0x00` (the firmware reads only the high byte, guide 3.1) |
+| `wLength` | IN: reply buffer size. OUT: the sub-command's exact length | the same |
+| Payload / reply | section 2 | section 2, byte-identical |
+| Refusal on USB | STALL | STALL, reason in `SYS.LAST_RESULT` (1.3.4) |
+| Refusal on UART / I2C / USB MIDI | status `ERROR` (`0x02`) | status = the `VC_ERR_*` code (`0x10`-`0x1A`), **never `0x02` or `0x03`** |
+
+Example SETUP packets (bytes: `bmRequestType`, `bRequest`, `wValue`, `wIndex`, `wLength`, each 16-bit field little-endian), reading `EXT_LIST` with room for 32 IDs:
+
+```
+1.1.6 envelope   C1 00 00 00 02 00 40 00
+1.1.7 envelope   C1 10 00 00 02 E0 40 00
+```
+
+and writing the K340 crossfeed pair map (2.2) through the tunnel: `41 10 01 00 02 E0 04 00`, data `02 13 00 00`.
+
+#### 1.3.2 The tunnel `0xE010` (1.1.7 generation)
+
+Upstream 1.1.7 reserves pages `0xE0`-`0xEF` for forks and ports and never allocates them (guide, page map; upstream `vendor_command_overhaul_plan.md`). This fork uses page **`0xE0`**, named `EXT`, revision **1**. It holds exactly one command, `0x10`, the tunnel. Commands `0x11`-`0xFF` of page `0xE0` and pages `0xE1`-`0xEF` are unassigned: the fork will not use them without a new revision of this section, and today they answer `VC_ERR_UNKNOWN` like any absent command. New extensions get a new sub-command ID inside the tunnel (section 4), never a new paged command.
+
+- **GET and SET.** The tunnel has both directions. A GET runs the sub-command's IN form, a SET its OUT form, exactly as `0xC1` / `0x41` do on `REQ_EXTENSION`.
+- **The row the dispatcher sees.** Upstream's dispatcher checks a command's row before any handler runs (guide 5.1). The tunnel's row is: address kind `VC_A_INDEX` (24; every 16-bit `wValue` passes the dispatcher, the tunnel checks the ID itself), GET length `VC_LEN_VAR` (the reply length depends on the sub-command, at most 64 bytes), SET length 1 to 64 bytes (every sub-command with an OUT form takes 1 to 16 bytes today), flags 0. So `SYS.COMMAND_INFO` (`0x0113`, `wValue` `0xE010`) answers `00 00 FF FF 01 40 18 03`. **No `VC_F_*` flag is set on the tunnel:** a flag applies to a whole command, and the tunnel carries sub-commands with different rules; the per-transport rules are checked inside it (1.3.7).
+- **The tunnel's own checks**, after the row's and in this order, each refusing with its code (1.3.4): the ID is in `EXT_LIST` (or is `0x0000` itself), else `VC_ERR_ADDRESS`; the ID has a form for this direction, else `VC_ERR_DIRECTION`; a SET's length equals the sub-command's exact length (2.x), else `VC_ERR_LENGTH`. Then the sub-command's handler runs; it is the same code as on `REQ_EXTENSION`.
+- **`wLength` on a GET.** Over USB a GET must ask for a non-zero length (a control read with `wLength` 0 has no data stage and returns nothing); ask for the documented size, or 64 for `EXT_LIST`. Over UART, I2C and MIDI `wLength` 0 means "the whole reply", as everywhere on 1.1.7 (guide 7.1). Replies are truncated to `wLength` and only ever extended at the end, as section 2 says.
+- **`SYS.LAST_RESULT`.** Every tunnel request is recorded like any paged request: command ID `0xE010`, the direction, the result and `wValue` = the sub-command ID. A host that matches ID, direction and `wValue` before trusting the code (guide 5.2) therefore matches the sub-command too.
+- **Where a USB refusal lands** (guide 5.1): a GET STALLs its data stage. A SET whose length is outside the row's 1-64 bytes STALLs at SETUP; the tunnel's own checks and the handler run after the data stage, so their refusals STALL the status stage. This differs from the 1.1.6 envelope, which STALLs ID and length problems at SETUP (1.1). A host treats a STALL at any stage as "refused" and reads `SYS.LAST_RESULT` for the reason.
+- **Busy.** Over UART, I2C and MIDI a tunnel request that arrives while a USB transfer holds the shared buffers is answered `VC_ERR_BUSY` by the dispatcher, as for every paged command; retry it. Nothing in the tunnel itself answers `VC_ERR_BUSY` today.
+
+#### 1.3.3 The 1.1.6 envelope on the dual-stack port (G2b)
+
+The port keeps page 0 for hosts that speak only 1.1.6 (older console builds, the ESP32 front panel over UART, `dspi_poke`, a DSPi Link 1.2 hub): a legacy stack answers the 1.1.6 opcodes on page 0 and dispatches them onto the paged handlers (PLAN-PG section 1.10). `REQ_EXTENSION` `0x00` is one of them and reaches **the same sub-command handlers** as the tunnel, so both envelopes give the same replies and the same effects, and a write through one is seen by a read through the other.
+
+- **Refusals on page 0 keep the 1.1.6 shape:** STALL on USB, status `ERROR` (`0x02`) on UART, I2C and MIDI (1.1), because the hosts using page 0 know only that. `0x02` is answered **only** to a page-0 request, never to a paged one. Hosts must not rely on `SYS.LAST_RESULT` for page-0 requests.
+- **The switch.** The legacy stack has a persisted on/off switch, on by default (WP FWPG3). With it off, page 0 refuses everything as stock 1.1.7 does (`VC_ERR_UNKNOWN`), `REQ_EXTENSION` included, and only the tunnel is left. The switch never affects the tunnel.
+- **The page guard is replaced, not extended.** On the 1.1.6 line the page guard refuses every nonzero page, `0xE0` included, which is correct there: that line has no tunnel. On the port, upstream's dispatcher refuses unknown pages itself (`VC_ERR_UNKNOWN`); page 0 goes to the legacy stack and page `0xE0` to the tunnel.
+- **A dropped page is the one hazard (PLAN-PG R10d).** On a direct link the page byte is honoured. Behind anything that drops it (this fork's hub before WP PGHUB0, the Swift hub before WP PGSWHUB0, an unknown relay) a tunnel request would reach the legacy stack as the 1.1.6 opcode `0x10`, `SET_SUBHARM`, which stock 1.1.7 would have refused. So a G2b board is never used behind such a relay, and a host sends the tunnel only on a link that carries the page.
+- **What G1b had, G2b keeps on page 0:** the same refusal stages as 1.1 (ID and length at SETUP), `EXT_LIST` as the contract, and the per-transport rules of 2.3 (1.3.7).
+
+#### 1.3.4 Refusals on the tunnel (`VC_ERR_*`)
+
+The tunnel refuses with upstream's result codes (`vc_ctrl.h`, guide 5.3): over USB a STALL with the code in `SYS.LAST_RESULT`, over UART, I2C and USB MIDI the code as the response's status byte. It **never** answers `0x02` or `0x03`: upstream retired both and a DSPi Link 1.3 bridge stops using a device that answers them. Each refusal "Refused (STALL / `ERROR`)" in section 2 maps to one code:
+
+| Code | Name | When the tunnel answers it |
+|---|---|---|
+| `0x10` | `VC_ERR_UNKNOWN` | from the dispatcher, not the tunnel: page `0xE0` or command `0x10` is absent (stock 1.1.7, a build without the tunnel), or a command of page `0xE0` other than `0x10` |
+| `0x11` | `VC_ERR_DIRECTION` | the sub-command has no form for this direction: a SET of `EXT_LIST`, `EXT_NOTIFY_FEATURES`, `EXT_RESET_INFO`, `EXT_FIRMWARE_FIXES`, `EXT_ALINK_USB_STATUS`, or a direction a build does not have (2.8) |
+| `0x12` | `VC_ERR_LENGTH` | a SET whose length is not the sub-command's exact length (and, from the dispatcher, a SET of 0 or more than 64 bytes) |
+| `0x13` | `VC_ERR_ADDRESS` | the sub-command ID (`wValue`) is not listed in `EXT_LIST`: unknown, private-experimental, or a block this build lacks (for example the alink IDs on a build without the alink). "The list is the contract" (2.1) holds: a host never sends an unlisted ID |
+| `0x14` | `VC_ERR_VALUE` | the handler rejects a payload field: an unknown op, a voltage outside the window or below the build default (2.3), a `tone_output` out of range, a nonzero reserved byte or undefined flag bit, an out-of-range mode, delay or slot. Any refusal not named in another row is this code |
+| `0x15` | `VC_ERR_UNSUPPORTED` | the value is valid but this build cannot do it: `tx_pin` on a build without `REPEATER`, `los_pin` without `LOS_PIN` (2.8.3) |
+| `0x16` | `VC_ERR_BLOCKED` | not allowed on this transport: `EXT_CORE_VREG` `SET` or `TRIAL` above 1.20 V off the USB vendor path (1.3.7) |
+| `0x17` | `VC_ERR_BUSY` | from the dispatcher only (1.3.2) |
+| `0x18` | `VC_ERR_STATE` | not allowed in the current state: an identify tone while the signal generator runs (2.5), an apply op while one is pending or the queue is full, an op that needs a lock without one, a rate or channel change while an apply is pending (2.8, 2.9) |
+| `0x19` | `VC_ERR_PIN_INVALID` | an alink pin that is neither `0xFF` nor a header GPIO, or two set pins that are equal (2.8.3) |
+| `0x1A` | `VC_ERR_PIN_IN_USE` | an alink pin the live configuration already uses for something else (2.8.3) |
+
+The check order is the dispatcher's (unknown, direction, blocked, length, address; guide 5.1), then the tunnel's (ID, direction, length; 1.3.2), then the handler's. A refused request changes nothing, in both envelopes (2.8: "refused writes change nothing"). A refusal is not a reason to retry, except `VC_ERR_BUSY` (guide 5.8). A crossfeed pair map that is invalid is still **ignored, not refused** (2.2): the tunnel answers `VC_OK`, as the 1.1.6 envelope ACKs it.
+
+#### 1.3.5 Transports
+
+| Transport | 1.1.6 envelope on G2b (legacy stack) | Tunnel on G2b | Source in `SYS.LAST_RESULT` |
+|---|---|---|---|
+| USB vendor (EP0) | yes, STALL | yes, STALL + `LAST_RESULT` | `CTRL_SOURCE_USB` |
+| USB MIDI (`DSPI_USB_MIDI`) | yes, `ERROR` | yes: the SysEx frame is a UART frame and carries `wIndex` (`usb_midi_control_spec.md`), so page `0xE0` arrives unchanged; status = `VC_ERR_*` | `CTRL_SOURCE_MIDI` (added by the port, WP FWPG1) |
+| UART, I2C | yes, `ERROR` | yes, status = `VC_ERR_*` | `CTRL_SOURCE_UART`, `CTRL_SOURCE_I2C` |
+| Control Surfaces (internal) | n/a | n/a (calls the handlers through `vc_set` / `vc_get` if it ever needs them, as source `CTRL_SOURCE_GPIO`, which counts as off-USB) | `CTRL_SOURCE_GPIO` |
+
+**The alink sender** (`firmware/DSPi-Sender`, same VID:PID) on the port answers `SYS.PROTOCOL_INFO`, `SYS.PLATFORM`, its vendor subset on the paged stack, the tunnel with its own `EXT_LIST` (the IDs of 2.8 a sender serves), and keeps page 0 with `REQ_EXTENSION` (WP FWPG4). Every rule of this section applies to it.
+
+#### 1.3.6 Discovery: how a host finds the extensions, and which envelope it uses
+
+**Step 1, the generation (guide 4.2-4.4).** A host first sends `SYS.PROTOCOL_INFO` (GET `0x0110`, 16 bytes; USB SETUP `C1 10 00 00 02 01 10 00`).
+
+- It answers 16 bytes starting `DSPi` with major 1: the device is **paged** (G2s or G2b). Go to step 2.
+- It STALLs (USB) or answers status `0x02` (UART, I2C, MIDI): the device is **1.1.6 generation** (G1s or G1b). Read `REQ_GET_PLATFORM` as before, then step 3.
+
+The probe is safe on every generation: 1.1.6 firmware has no IN handler for `bRequest` `0x10`, and this fork's 1.1.6 line refuses any request with a nonzero page before it looks at the opcode (page guard, `control_interfaces_spec.md` 1.2.3, WP PAGEGUARD).
+
+**Step 2, paged device.** Read `SYS.PAGE_LIST` (`0x0111`). If it lists `{0xE0, revision}` (on G2b: the pair `E0 01`, after upstream's pages and before the diagnostics page `0xF0` of a debug build, since the list is ascending; `SYS.PROTOCOL_INFO` byte 6 counts page `0xE0`), the device has the tunnel. `SYS.PAGE_COMMANDS` (`0x0112`, `wValue` `0x00E0`) then shows command `0x10` with a GET and a SET: byte 2 bit 0 and byte 34 bit 0 set, all else 0. Read **`EXT_LIST` through the tunnel** (GET `0xE010`, `wValue` 0, `wLength` 64): its reply is the list of section 2.1, byte-identical to what `REQ_EXTENSION` answers on the same build. If page `0xE0` is not listed (G2s), the device has no extensions; do not send `0xE010` at all (it would answer `VC_ERR_UNKNOWN`). A host never probes the tunnel by sending it and waiting for a STALL (guide 4.7).
+
+**Step 3, 1.1.6-generation device.** Read `EXT_LIST` with `REQ_EXTENSION` `0x00` (1.1). A STALL or `ERROR` means G1s, no extensions; a reply means G1b, and the list is the contract.
+
+**Which envelope a host uses:**
+
+| Host | On G1b | On G2b |
+|---|---|---|
+| A paged host (this fork's console from the PLAN-PG port on, any host that probed and found page `0xE0`) | `REQ_EXTENSION` 0x00 (it has found a 1.1.6-generation device) | **the tunnel `0xE010` only**, never page 0 (PLAN-PG OD-PGd: one code path per generation; the legacy stack is for legacy hosts) |
+| A 1.1.6-only host (older console builds, the ESP32 front panel, `dspi_poke`, any host that never sends the probe) | `REQ_EXTENSION` 0x00 | `REQ_EXTENSION` 0x00 through the legacy stack, while it is switched on |
+
+The generation is decided per connection and again after every reconnect, firmware update or bootloader return; it is never cached by serial number. A host does not mix envelopes on one connection.
+
+**Never send `0xE010` to a 1.1.6-generation device.** On this fork's 1.1.6 line with the page guard (every image offered since WP PAGEGUARD) it is refused at once (STALL, status `0x02`), harmlessly. On an older image without the guard, and on stock 1.1.6, the page byte is ignored and a SET `0xE010` would run the 1.1.6 opcode `0x10`, `SET_SUBHARM`, with the extension's payload. Only a device that answered the probe as paged and listed page `0xE0` gets tunnel requests.
+
+**Through DSPi Link** (the network protocol), the hub's device object decides instead of a probe (PLAN-PG section 1.1 steps 5-6):
+
+- A **DSPi Link 1.2 hub** classifies by `bRequest` and cannot be trusted with a page: the client speaks 1.1.6 only, so on G2b it uses `REQ_EXTENSION` 0x00 through the legacy stack. Extensions there are admin-only, as on G1b today.
+- A **DSPi Link 1.3 upstream hub** lists a paged device with `protocol`; the client reaches the extensions through `0xE010`. Page `0xE0` is absent from that hub's command table, so the hub treats it as `config` in both directions: admin-only. A refused (`DENIED`) `EXT_LIST` read means "no extension channel" to the client.
+- **This fork's hub** forwards the page. For a client with hello minor 3 or higher it passes `0xE010` through; for a client with minor 2 or lower (and its own internal requests) it turns a `REQ_EXTENSION` 0x00 request into `0xE010` with the same `wValue` and payload when the device lists page `0xE0`, so an older client reaches G2b's extensions without knowing the tunnel.
+
+#### 1.3.7 Per-transport rules (FWSEC1) on both stacks
+
+The rules of 2.3 and `control_interfaces_spec.md` 1.2.2 (WP FWSEC1, OD-SECh) hold on the port in both envelopes. USB MIDI, UART, I2C and Control Surfaces are all **off the USB vendor path**:
+
+- **`EXT_CORE_VREG`** (2.3): off the USB vendor path a `SET` or a `TRIAL` with a vreg code above `0x0D` (1.20 V) is refused: `VC_ERR_BLOCKED` on the tunnel, `ERROR` on the legacy stack. `SET` 0, `TRIAL_END`, `AUTO` and `CLEAR`, and `SET` / `TRIAL` up to 1.20 V, are accepted everywhere. A request outside the hard window is `VC_ERR_VALUE` on every transport (checked first). The check is inside the tunnel's SET path, per sub-command and op (a `VC_F_*` flag would block every tunnel SET); `core_vreg_request_transport_ok()` stays the one rule both stacks call.
+- **Bootloader entry:** on the paged stack `SYS.ENTER_BOOTLOADER` (`0x0130`) carries `VC_F_SET_USB_ONLY`, so it is refused off USB with `VC_ERR_BLOCKED`, USB MIDI included (upstream's flag, this fork's policy). On the legacy stack the 1.1.6 opcode `0xF0` is gated the same way (`ERROR` off USB). It is not an extension, but a host relying on this section's transports should know that a calibration above 1.20 V and a firmware update both need the USB vendor interface.
+- **The K340 at 1.20 V:** a build with `DSPI_VREG_MV=1200` never boots below 1.20 V on either generation (2.3); the port keeps the selection in the same flash bytes.
+
 
 ## 2. Sub-commands
 
@@ -704,6 +836,8 @@ Reading it after an event tells the causes apart: a host suspend or reset shows 
 | USB MIDI (`DSPI_USB_MIDI`) | yes; same dispatcher, no special casing | `ERROR` |
 | UART / I2C control interfaces | yes; same dispatcher | `ERROR` |
 
+This table is the 1.1.6 envelope. On firmware of the 1.1.7 generation the tunnel `0xE010` reaches the same handlers on every transport, with `VC_ERR_*` refusals, and the 1.1.6 envelope is served by the legacy stack; see 1.3.5 for both.
+
 The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip event (2.4.1) reaches every notification consumer. `EXT_NOTIFY_FEATURES` only describes notification behaviour; it sends nothing itself.
 
 ## 4. Implementation map
@@ -725,10 +859,13 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 | `alink_usb.{c,h}`, `alink_usb/alink_usb_core.{c,h}` | the alink USB-direct block (WP USB1, 2.9): `EXT_ALINK_USB*` IDs in `config.h`, the 0x8005/0x8006 time-base dispatch in `vendor_commands.c`, `NOTIFY_FEAT_ALINK_USB` and `notify_push_alink_usb()` in `notify.{c,h}`, the V27 directory block in `flash_storage.c`, the SOF and packet-stamp hooks in `usb_audio.c`, the anchor in `main.c`; `Documentation/Features/alink_usb.md`; host tests `firmware/tests/test_alink_usb.c`, simulation `tools/alink_usb_sim/` |
 | `firmware/DSPi-Sender/sender_vendor.c` | the sender build's alink block (WP LK4): 0x0003, 0x8000-0x8002, 0x8005, 0x8007-0x800A; `sender_alink.c` holds the `EXT_ALINK_TX` / `EXT_ALINK_CTRL_MSG` parsing and the RATE scheduling |
 
+**On the 1.1.7 generation** (WP FWPG2, FWPG3): `vendor/pages/ext.def` (page `0xE0`, revision 1, the tunnel row `0x10`), `vendor/vc_page_ext.c` (the tunnel handler: ID, direction and length checks, then the same `ext_handle_get()` / `ext_handle_set()` as above, mapping each refusal to its `VC_ERR_*` code per 1.3.4), `vendor/vc_legacy.c` / `vc_legacy_custom.c` (the legacy front, which routes page-0 `REQ_EXTENSION` to the same handlers). Until those WPs land the rows above describe the only implementation.
+
 **Adding a sub-command:** pick the next free ID (`0x0001`-`0x7FFF` only after agreeing it with Weeb Labs; an alink sub-command takes the next free ID from `0x800B`, an alink USB-direct one from `0x8013`). Add it to `config.h`, to `ext_ids[]` in ascending order and to `ext_set_len()` if it has an OUT form, then add cases to `ext_handle_set()` / `ext_handle_get()` and a row to section 2.
 
 ## 5. History
 
+- 2026-11-18: WP FWPG0 (PLAN-PG OD-PGc): section 1.3 "Envelopes": the 1.1.7-generation envelope (private page `0xE0`, tunnel command `0xE010`, `wValue` = sub-command ID, payloads and IDs unchanged), the 1.1.6 envelope on the dual-stack port, refusals as `VC_ERR_*` on the tunnel (never `0x02` / `0x03`), discovery through `SYS.PAGE_LIST` and `EXT_LIST` in both envelopes, the FWSEC1 rules on both stacks, and how a host chooses. Specification only; no firmware implements the tunnel yet (WP FWPG2).
 - 2026-11-15: WP USB3b: lock error in mode 2 (`EXT_ALINK_USB` byte 4 `on_lock_error`, STATUS flags bit 6, `0xE3` reasons 10/11, DIAG `lock_errors`); RP2350 SOF readings with `SOF_TIMESTAMP_RAW` behind `_LAST` repaired instead of ending the time base (DIAG `bad_sof_readings`); DIAG layout version 2; phase re-anchors counted as phase, leaving mode 2 counted as stop.
 - 2026-11-14: WP USB3: mode 2 stays muted while out of step (2.9.2); the rate estimate after 0.5 s, a muted fast pull-in, the stored host rate in the V27 block's reserved bytes (STATUS flags bit 5), soft re-anchors for errors up to 64 samples (2.9.2); ride-through returns beyond 20 us restart the estimator's anchors, how to read `max_isr_quiet_us` (2.9.6, review usb2 N1, N2).
 
