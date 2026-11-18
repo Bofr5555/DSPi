@@ -26,6 +26,7 @@
 #include "soft_vcxo.h"
 #include "usb_descriptors.h"
 #include "build_info.h"
+#include "vendor_page_guard.h"
 
 // Extension IDs of the alink block (extension_channel_spec.md 2.8).
 #define EXT_ALINK_INFO          0x8000
@@ -392,6 +393,12 @@ static bool handle_get(uint8_t rhport, tusb_control_request_t const *req) {
 
 bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const *req) {
     if (stage == CONTROL_STAGE_SETUP) {
+        // WP PAGEGUARD (vendor_page_guard.h): the sender shares the DSPi
+        // VID:PID, so a paged firmware-1.1.7 client may find it.  STALL any
+        // non-zero wIndex high byte (incl. the SYS.PROTOCOL_INFO probe)
+        // before any opcode, or it would run the old one with that number
+        // (0xF0 bootloader, output-config save).
+        if (vendor_page_refused(req->wIndex)) return false;
         if (req->bRequest == MS_VENDOR_CODE) {
             if (req->bmRequestType_bit.direction == TUSB_DIR_IN && req->wIndex == 7)
                 return tud_control_xfer(rhport, req, (void *)(uintptr_t)desc_ms_os_20, (uint16_t)desc_ms_os_20_len);

@@ -14,6 +14,7 @@
 #include "notify.h"
 #include "config.h"
 #include "control_surfaces.h"   // CsMacro sizes TX_COPY_MAX
+#include "vendor_page_guard.h"  // WP PAGEGUARD
 
 #include "pico/stdlib.h"
 #include "hardware/uart.h"
@@ -270,6 +271,18 @@ static void header_complete(void) {
     to_bulk = false;
     payload_pos = 0;
     deferred_status = CTRL_STATUS_OK;
+
+    // WP PAGEGUARD (vendor_page_guard.h): a non-zero wIdxH is a paged
+    // firmware-1.1.7 request (incl. the SYS.PROTOCOL_INFO probe).  Consume
+    // the rest of the frame without storing it and answer ERROR (0x02, how
+    // 1.1.7 says a 1.1.6 device answers the probe): no bulk lock, no dispatch.
+    if (vendor_page_refused(wIndex)) {
+        discard = true;
+        deferred_status = CTRL_STATUS_ERROR;
+        crc_pos = 0;
+        rx_state = (rx_is_get || wLen == 0) ? RX_CRC : RX_PAYLOAD;
+        return;
+    }
 
     if (rx_is_get) { crc_pos = 0; rx_state = RX_CRC; return; }  // GET: no payload
     if (wLen == 0) { crc_pos = 0; rx_state = RX_CRC; return; }
