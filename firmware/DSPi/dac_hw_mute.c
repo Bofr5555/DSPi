@@ -442,6 +442,15 @@ void dac_hw_mute_assert_idle(void) {
 
 void dac_hw_mute_mark_idle(void) {
     if (!s_lifecycle_asserted) return;
+    /* The clocks have just restarted (complete_pipeline_reset() keeping the
+     * mute for the USB phase anchor, the orphan restart).  An idle hold may be
+     * opened by the generator override, so the restart gets its release dwell
+     * here, exactly as dac_hw_mute_release() would give it: the pin cannot
+     * open sooner than release_ms after the restart (review fwsiggen F2).
+     * Armed whenever the pin is muted, so a START that comes later inside the
+     * dwell waits too (dac_hw_mute_bracket_active()). */
+    if (s_asserted && s_cfg.release_ms != 0 && s_cfg.enabled != 0 && s_pin_claimed)
+        s_lifecycle_release_us = make_deadline_us((uint64_t)s_cfg.release_ms * 1000ull);
     s_lifecycle_idle = true;
     refresh_pin_assertion();
 }
@@ -457,8 +466,15 @@ bool dac_hw_mute_bracket_active(void) {
 
 void dac_hw_mute_siggen_override(bool on) {
     if (s_siggen_override == on) return;
+    bool was_open = !s_asserted;
     s_siggen_override = on;
     refresh_pin_assertion();
+    /* Override off re-mutes a latched idle hold: that is a fresh mute edge, so
+     * the DAC's ramp starts now and a bracket that follows must wait a full
+     * hold_ms from here, not the long-elapsed one of the original assert
+     * (review fwsiggen F3).  assert() does not re-arm on an asserted pin. */
+    if (!on && was_open && s_asserted && s_lifecycle_asserted && s_cfg.hold_ms != 0)
+        s_lifecycle_hold_us = make_deadline_us((uint64_t)s_cfg.hold_ms * 1000ull);
 }
 
 uint16_t dac_hw_mute_hold_ms(void) {

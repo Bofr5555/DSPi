@@ -876,8 +876,11 @@ void alink_usb_service(alink_usb_t *us, uint32_t now_ms) {
         event_service(us, now_ms);
     }
     // Owner decision 2026-11-14: muted while out of step in mode 2, every
-    // pass (the request is refreshed, never accumulated).
-    if (alink_usb_out_of_step(us)) alink_usb_port_soft_mute((us->fs / 1000u) * ALINK_USB_ANCHOR_MUTE_MS);
+    // pass (the request is refreshed, never accumulated).  Owner 2026-11-18
+    // (WP FWSIGGEN): not while the signal generator plays with no host stream
+    // (the generator disables the mute itself; nothing else is audible then).
+    if (alink_usb_out_of_step(us) && !(us->siggen_exempt && !us->stream))
+        alink_usb_port_soft_mute((us->fs / 1000u) * ALINK_USB_ANCHOR_MUTE_MS);
 }
 
 static void service_body(alink_usb_t *us, uint32_t now_ms) {

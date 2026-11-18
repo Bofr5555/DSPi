@@ -343,6 +343,11 @@ typedef struct {
     uint32_t last_frame;                     // last packet frame (continuity for unstamped ones)
     // Stream (alt > 0) accounting, EXT_ALINK_USB_STATUS (U6)
     bool     stream;                         // alt > 0
+    // WP FWSIGGEN: the firmware's signal generator owns the outputs (set by the
+    // port before every service pass).  With no stream (alt 0) the out-of-step
+    // soft mute is then not refreshed: programme audio is silence there and
+    // only the generator becomes audible.  A stream keeps the mute.
+    bool     siggen_exempt;
     bool     stream_seen;                    // a packet of this stream was placed
     uint32_t stream_first;                   // N of its first packet
     int32_t  stream_shift;                   // silence inserted - samples dropped since

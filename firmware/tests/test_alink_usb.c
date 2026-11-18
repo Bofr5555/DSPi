@@ -758,6 +758,19 @@ static void test_out_of_step(void) {
     reset_counts();
     run_host(&us, 35.0, 0, 300, true);
     CHECK(n_mute == 300, "mode 2 pull-in: muted every pass (%d of 300)", n_mute);
+    // WP FWSIGGEN: the signal generator plays with no host stream: not muted;
+    // with a stream (alt > 0) the mute stays; mode 2 resumes it when it stops.
+    us.siggen_exempt = true;
+    reset_counts();
+    run_host(&us, 35.0, 300, 400, false);
+    CHECK(n_mute == 0 && alink_usb_out_of_step(&us), "generator, no stream: not muted (%d)", n_mute);
+    reset_counts();
+    run_host(&us, 35.0, 400, 500, true);
+    CHECK(n_mute == 100, "generator with a stream: muted every pass (%d of 100)", n_mute);
+    us.siggen_exempt = false;
+    reset_counts();
+    run_host(&us, 35.0, 500, 600, false);
+    CHECK(n_mute == 100, "generator idle again: muted every pass (%d of 100)", n_mute);
     alink_usb_init(&us);
     alink_usb_limits(&us, 48000, 96, 49, 448);
     us.mode = 1;

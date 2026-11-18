@@ -179,12 +179,60 @@ int main(void) {
     run_us(REL_MS * 1000u + PASS_US);
     CHECK(!muted());
     // The phase anchor keeps the mute after a reset (alink_usb_fw_keep_dac_mute
-    // marks it idle): the generator may open it again.
+    // marks it idle at the clock restart): the generator may open it again, but
+    // only after the restart's release dwell (review fwsiggen F2).
+    dac_hw_mute_assert();
+    run_us(HOLD_MS * 1000u + PASS_US);
+    dac_hw_mute_mark_idle();                 // clocks restarted now
+    uint64_t t_restart = stub_time_us;
+    pass();
+    CHECK(muted() && dac_hw_mute_bracket_active());
+    run_us(REL_MS * 1000u - 2 * PASS_US);
+    CHECK(muted());                          // still inside the dwell
+    while (muted() && stub_time_us - t_restart < 3 * REL_MS * 1000u) pass();
+    CHECK(!muted());
+    CHECK(stub_time_us - t_restart >= REL_MS * 1000u && stub_time_us - t_restart <= REL_MS * 1000u + 2 * PASS_US);
+    // Without the generator the same restart stays muted (the idle hold).
+    setup();
+    dac_hw_mute_assert_idle();
+    run_us(200000u);
     dac_hw_mute_assert();
     run_us(HOLD_MS * 1000u + PASS_US);
     dac_hw_mute_mark_idle();
-    pass();
+    run_us(3 * REL_MS * 1000u);
+    CHECK(muted() && dac_hw_mute_latched());
+
+    // 4b. The generator's tail ends (override off re-mutes the idle hold); a
+    //     bracket 5 ms later must wait a full hold from the re-mute, not the
+    //     long-elapsed hold of the original assert (review fwsiggen F3).
+    setup();
+    dac_hw_mute_assert_idle();
+    run_us(200000u);
+    start();
+    run_us(500000u);
+    CHECK(playing && !muted());
+    want = false;
+    while (!muted() && sd.st != SIGGEN_DAC_IDLE) pass();
+    CHECK(muted() && sd.st == SIGGEN_DAC_IDLE);
+    uint64_t t_remute = stub_time_us;
+    run_us(5000u);
+    dac_hw_mute_assert();                    // anchor prepare / pipeline_reset_ready
+    CHECK(!dac_hw_mute_hold_elapsed());
+    while (!dac_hw_mute_hold_elapsed() && stub_time_us - t_remute < 3 * HOLD_MS * 1000u) pass();
+    CHECK(stub_time_us - t_remute >= HOLD_MS * 1000u && stub_time_us - t_remute <= HOLD_MS * 1000u + 2 * PASS_US);
+    // ... and STOP while START waits re-arms it the same way.
+    setup();
+    dac_hw_mute_assert_idle();
+    run_us(200000u);
+    start();
+    run_us(50000u);
     CHECK(!muted());
+    want = false;
+    pass();
+    CHECK(muted());
+    run_us(5000u);
+    dac_hw_mute_assert();
+    CHECK(!dac_hw_mute_hold_elapsed());
 
     // 5. A bracket in force at START: the generator does not override it and
     //    starts only after the bracket released and the DAC settled.

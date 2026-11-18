@@ -23,7 +23,7 @@ bool identify_request(const uint8_t *p) {
     if (p[2] != 0 || p[3] != 0) return false;
     if (p[1] != IDENTIFY_TONE_NONE) {
         if (p[1] >= NUM_OUTPUT_CHANNELS) return false;
-        if (siggen_running) return false;   // never take over a measurement
+        if (siggen_wants_output()) return false;   // never take over a measurement (incl. a START waiting for the DAC)
     }
     req_seconds = p[0] > IDENTIFY_MAX_S ? IDENTIFY_MAX_S : p[0];
     req_tone = p[1];
@@ -45,7 +45,7 @@ static void start_tone(uint8_t out) {
         .p1           = IDENTIFY_TONE_HZ,
     };
     // Re-checked here: a host may have started the generator since staging.
-    if (siggen_running) return;
+    if (siggen_wants_output()) return;
     if (siggen_stage_config(&c, sizeof(c))) siggen_control(SIGGEN_CTL_START);
 }
 
