@@ -90,6 +90,11 @@ extern volatile uint8_t active_input_source;
 // in main.c beside the pipeline-settle logic that is its other consumer.
 bool pipeline_producer_is_streaming(void);
 
+// True while an input source owns the output rings: it delivers blocks, or
+// keeps its own timeline (the USB phase mode writes silence between streams).
+// The generator's zero-input pump never runs then (WP FWSIGGEN).  main.c.
+bool pipeline_source_owns_rings(void);
+
 // SPDIF RX pin (device-level setting, stored in PresetDirectory)
 extern uint8_t spdif_rx_pin;
 

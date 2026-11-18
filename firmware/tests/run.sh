@@ -10,6 +10,6 @@ trap 'rm -rf "$OUT"' EXIT
 CC="${CC:-cc}"
 for t in "$HERE"/test_*.c; do
   name="$(basename "$t" .c)"
-  "$CC" -std=c11 -Wall -Wextra -Werror -I "$HERE/../DSPi" -I "$HERE/stubs" "$t" -o "$OUT/$name"
+  "$CC" -std=c11 -Wall -Wextra -Werror -I "$HERE/../DSPi" -I "$HERE/stubs" "$t" -o "$OUT/$name" -lm
   "$OUT/$name"
 done

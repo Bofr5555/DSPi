@@ -1,7 +1,7 @@
 # Test Signal Generator Specification
 
 *Status: implemented*
-*Last updated: 2026-10-12*
+*Last updated: 2026-11-18 (WP FWSIGGEN: DAC hardware-mute ownership, pump timing)*
 
 ## 1. Overview
 
@@ -37,8 +37,12 @@ how many samples a slot consumes or produces).
   crossover + PEQ on generator channels. Output trim, master volume, mute, and
   delay still apply (deliberately, for safety and level control).
 - **Runs with no host stream.** When no input source is streaming, the main loop
-  pumps zero-input blocks through the pipeline so the generator keeps playing.
-  When a real source starts streaming again it seamlessly takes over pacing.
+  pumps zero-input blocks through the pipeline so the generator keeps playing,
+  sample-exact against the DAC clock (section 9). When a real source starts
+  streaming again it takes over pacing.
+- **Owns the DAC hardware mute while it plays.** An idle hold of the DAC mute pin
+  (the USB phase mode waiting for a host) is opened by the generator itself and
+  restored after its tail (section 9.3).
 - **Full platform parity.** Both platforms expose the identical wire protocol and
   signal catalogue. RP2350 uses the float audio path; RP2040 uses the Q28
   fixed-point path. The sample kernels fork internally; the protocol does not.
@@ -261,7 +265,7 @@ with no valid config staged, return failure (STALL).
 | `wValue` | Constant | Action |
 |----------|----------|--------|
 | 0 | `SIGGEN_CTL_STOP` | Fade out over `SIGGEN_FADE_MS`, then idle (`stop_reason = HOST`). A stop issued during a silent gap goes idle immediately (no fade needed). |
-| 1 | `SIGGEN_CTL_START` | (Re)start with the applied config. If already running, restarts via fade-out then relaunch (`stop_reason = RECONFIG`). |
+| 1 | `SIGGEN_CTL_START` | (Re)start with the applied config. If already running, restarts via fade-out then relaunch (`stop_reason = RECONFIG`). From idle with the DAC hardware mute held, the engine start waits until the generator has opened the DAC and its un-mute ramp has passed (section 9.3); status reports `FADE_IN` meanwhile, and `STOP`/`STOP_NOW` cancel the wait (`stop_reason = HOST`, IDLE notification). |
 | 2 | `SIGGEN_CTL_STOP_NOW` | Immediate hard stop, no fade (`stop_reason = HOST`). |
 
 ### 4.4 `REQ_SIGGEN_GET_STATUS` (0xA7, IN)
@@ -442,19 +446,126 @@ with `reason = NONE` marks a start; an `IDLE` event carries the stop reason.
 `process_input_block()` normally runs whenever an input source delivers samples.
 When the generator is running and no source is streaming, nothing would call it and
 the outputs would drain to silence. The main loop instead calls `siggen_pump()`
-(`audio_pipeline.c`), which feeds zero-input blocks through the full pipeline.
+(`audio_pipeline.c`, rule in `siggen_pump.h`), which feeds zero-input blocks
+through the full pipeline.
 
-- The pump is paced by the **slot-0 ring fill level** (the same signal the USB
-  feedback servo and the S/PDIF prefill use), topping up to half full. It runs a
-  bounded number of blocks per call to keep the main loop responsive.
+- The pump is paced by the **slot-0 ring fill level** against the output latency
+  target (`output_ring_target_frames`, 2 ms by default): a block of
+  `output_ring_block_cap` frames is written only while the fill is below the
+  target, at most `SIGGEN_PUMP_MAX_BLOCKS` (2) per call so the main loop stays
+  responsive. The fill is re-read before every block.
 - Every pumped block traverses the full pipeline, so the delay-line write index and
   every output slot advance exactly as for a real source; **inter-slot alignment is
   preserved**.
-- The pump refuses to run while the pipeline is owned by someone else: a source
-  actively streaming (`usb_audio_stream_active()`, S/PDIF locked, I2S running), a
-  pending input-source change, an output-type switch in progress, or output
-  slots that are not yet set up (before `usb_sound_card_init()` has run). So starting a real stream **seamlessly takes over
-  pacing** from the pump; the generator keeps playing across the handover.
+- The pump refuses to run while the pipeline is owned by someone else
+  (`pipeline_source_owns_rings()`, main.c): a source delivering blocks (USB
+  stock stream, S/PDIF locked, I2S running, ADAT locked, alink locked or in
+  holdover) or the USB phase mode while it keeps a timeline
+  (`alink_usb_engaged()`: its hold writes silence between streams); also a
+  pending input-source change, an output-type switch in progress, output slots
+  not yet set up, and `preset_loading` on a non-USB source (there it is the
+  lock/prefill handshake). On USB the pump pumps through `preset_loading`: it is
+  the only block source and the mute envelope clears only on blocks.
+
+### 9.1 Timing: sample-exact against the DAC clock
+
+The generator's engine counts samples, not time: a cycle, a gap, a fade and a
+walk dwell are integer sample counts (section 6.4), and the engine advances only
+when a block is rendered. With the pump as the producer, a block is rendered only
+when the DAC's own I2S/S/PDIF DMA has consumed room for it, so the DAC clock alone
+paces the generator. Main-loop jitter changes **when** a block is written, never
+how many frames the generator emits or where they land in the DAC's frame
+sequence. Nothing resamples, and nothing drops or inserts frames while the ring
+does not run dry: generator sample *k* after `START` plays at DAC frame
+*anchor + k* for the whole run, gaps included (`cycles_done` counts each cycle at
+its end, exactly on schedule). Host test: `firmware/tests/test_siggen_timing.c`
+(impulses every 137 ms on their exact frames; log sweeps with gaps sample for
+sample equal to a back-to-back rendering, walked over 3 outputs, under main-loop
+gaps up to 1.9 ms).
+
+**The one slip path** is a ring that runs dry: a main-loop stall longer than the
+ring fill (about the output latency, 2 ms by default). `output_rings_pre_give()`
+then re-anchors the writer (`deficit + pre-write fill` frames of silence, at least
+about one block), so every later generator frame plays that many frames late. It
+is never silent: each episode counts as an underrun (`overruns` / buffer stats,
+the slot ring's `underrun_frames`), and the inserted frames equal exactly the
+counted skip (tested). A measurement that sees no underrun had no slip. Choosing
+a longer output latency (4-8 ms) widens the stall margin for long runs.
+
+A block that the output rings refuse at admission (`output_ring_drops`, e.g. a
+PDM queue that cannot take it) used to be rendered and then dropped, so the
+generator played one block early from then on. Since WP FWSIGGEN the generator
+renders only into admitted blocks; a refused block gets `siggen_hold()` (silence
+on the generator's channels, no engine time), and its zeros fill the delay-line
+slot the rings drop, so the sample-to-frame mapping holds.
+
+With a host stream the stream paces the pipeline (USB async feedback keeps the
+stream on the DAC clock; the USB phase mode phase-locks it, alink-style). A
+stream that starts while the generator plays restarts the outputs
+(`stream_restart_resync_pending`, a pipeline reset): the generator keeps its
+schedule but the DAC frame anchor moves. For a timing measurement keep the host
+side steady for the whole run: either no stream at all or one stream open from
+before `START` to after the last cycle.
+
+Measured on the K340 (2026-11-18, output 3, 5 passes): the one large residual of
+the no-stream run (-81.6 us) was the analyser hopping one carrier period, not a
+firmware slip (the offline analysis found no step in the recordings); the
+remaining smooth +-15-50 us wander is attributed to the USB microphone's own
+clock.
+
+### 9.2 Handover
+
+When a real source starts delivering, `pipeline_source_owns_rings()` turns true and
+the pump stands down at once; injection continues in the source's blocks. When the
+source stops, the pump resumes on the next main-loop pass.
+
+### 9.3 DAC hardware mute ownership
+
+The DAC hardware mute (`dac_hw_mute.c`, `dac_hardware_mute_spec.md`) is held in two
+kinds of situation:
+
+- **Reset brackets**: the pin is asserted before a pipeline reset stops the output
+  clocks and released after the synchronized restart (plus `release_ms`). These
+  always take priority.
+- **Idle holds**: the clocks run and the unit only waits for a source. Today this
+  is the USB phase mode out of step with no host (`alink_usb.c`
+  `dac_hold_update()`, `dac_hw_mute_assert_idle()`), and the mute that
+  `complete_pipeline_reset()` keeps for the phase anchor
+  (`alink_usb_fw_keep_dac_mute()` marks it idle once the clocks run again).
+
+Before WP FWSIGGEN the generator did not touch the pin. On USB in mode 0 (the
+K340 default) the pin is released by every completed reset and nothing asserts it
+on stream stop, so with no stream it is open and the generator was audible. In the
+USB phase mode out of step with no host the idle hold kept the DAC muted: the
+generator played into a muted DAC.
+
+Now the generator owns the pin while it plays (`siggen_dac.h`, glue
+`siggen_dac_service()` in main.c, once per main-loop pass):
+
+1. `START` with the pin open (mode 0) starts at once, as before.
+2. `START` with an idle hold: the generator sets the override
+   (`dac_hw_mute_siggen_override(true)`); the idle hold stays latched but no
+   longer drives the pin. The outputs play silence, so the edge is click-free.
+   The engine starts once the pin is open, no bracket or release dwell is in
+   force, and `max(hold_ms, release_ms)` has passed (the DAC's own un-mute ramp;
+   100 ms on the K340), so the first cycle is not played into the ramp. Status
+   reports `FADE_IN` while it waits.
+3. While it plays, a reset bracket still wins at once: the pin mutes and, because
+   the DAC was playing, a full `hold_ms` is re-armed before any clock stop.
+4. When the generator goes idle (completed, stopped, preset load), the override
+   stays for its tail: one slot ring plus the longest active output delay
+   (`SIGGEN_DAC_TAIL_BASE_US` = 15 ms + delay). Then it goes off: an idle hold
+   still latched mutes the pin again (the previous behaviour is back); one that
+   ended meanwhile leaves it open. Releasing an idle hold that the override has
+   open skips the release dwell (the DAC is already playing).
+
+S/PDIF, ADAT, alink and I2S-slave inputs without lock keep their
+mute-until-lock: that mute is a reset bracket whose completion is the prefill
+handshake, and the pump refuses there (`preset_loading`), so the generator stays
+silent on an unlocked non-USB source, as before. Host test:
+`firmware/tests/test_siggen_dac.c` (real `dac_hw_mute.c`: open, settle, play,
+tail, restore; a hold that ends meanwhile; a bracket during play; a bracket at
+`START`; `STOP` while waiting; feature off; test pulse).
 
 ---
 
@@ -468,6 +579,8 @@ the outputs would drain to silence. The main loop instead calls `siggen_pump()`
 | **Sample-rate change** | The render path reselects the matching precomputed rate row per block; 44.1/48/96 kHz select their own row, other rates use the 48 kHz row. No reconfigure needed. |
 | **Mute / master volume / output trim** | Applied downstream of injection to generator channels (both processed and RAW), so a muted or attenuated output attenuates or silences the generated signal too. Set an output's trim/master volume appropriately before measuring. |
 | **Output-type switch (S/PDIF <-> I2S)** | The pump refuses to run while the switch is in progress; injection resumes on the next normal block. |
+| **DAC hardware mute** | The generator opens an idle hold itself and restores it after its tail; reset brackets keep priority (section 9.3). |
+| **USB stream start while running** | A pipeline reset restarts the outputs: the schedule continues, the DAC frame anchor moves (section 9.1). |
 | **PDM / Core 1 EQ_WORKER** | PDM honors `siggen_raw_mask` like the S/PDIF/I2S path. In Core 1 `EQ_WORKER` mode PDM output is inactive (a platform behavior, not siggen-specific), so a masked PDM channel simply produces nothing in that mode. |
 
 Nothing in these paths changes how many samples any slot consumes or produces, so

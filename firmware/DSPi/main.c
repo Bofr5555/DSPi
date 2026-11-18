@@ -47,6 +47,7 @@
 #include "input_servo.h"
 #include "pdm_generator.h"
 #include "siggen.h"
+#include "siggen_dac.h"
 #include "rta.h"
 #include "tube.h"
 #include "limiter.h"
@@ -996,6 +997,67 @@ static bool usb_source_streaming(void) {
         return alink_usb.started && usb_audio_packets_arriving();
 #endif
     return usb_audio_stream_active();
+}
+
+// The pump's exclusion (siggen_pump.h): every producer of
+// pipeline_service_producer() that is delivering blocks, plus the USB phase
+// mode while it has a timeline (alink_usb_engaged(): its hold writes silence
+// with no packets).  Before WP FWSIGGEN the pump only knew USB, S/PDIF and
+// I2S, so a locked ADAT or alink input and an engaged USB phase timeline were
+// topped up by the pump as a second producer.
+bool pipeline_source_owns_rings(void) {
+    if (active_input_source == INPUT_SOURCE_USB) {
+#if DSPI_ALINK_USB
+        if (alink_usb_engaged(&alink_usb)) return true;
+#endif
+        return usb_audio_stream_active();
+    }
+    if (input_source_is_spdif(active_input_source))
+        return spdif_input_get_state() == SPDIF_INPUT_LOCKED;
+    if (active_input_source == INPUT_SOURCE_I2S)
+        return i2s_input_get_state() == I2S_INPUT_RUNNING;
+#if PICO_RP2350
+    if (active_input_source == INPUT_SOURCE_ADAT)
+        return adat_input_get_state() == ADAT_INPUT_LOCKED;
+#endif
+#if DSPI_ALINK
+    if (active_input_source == INPUT_SOURCE_ALINK)
+        return alink_input_get_state() == ALINK_INPUT_LOCKED ||
+               alink_input_get_state() == ALINK_INPUT_HOLDOVER;
+#endif
+    return false;
+}
+
+// The generator owns the DAC hardware mute while it plays (WP FWSIGGEN,
+// siggen_dac.h): it opens an idle hold (USB phase mode out of step) itself,
+// starts the engine once the DAC is open and settled, and hands the pin back
+// when its tail has left the wire.  Reset brackets keep priority.
+static siggen_dac_t siggen_dac;
+
+static uint32_t siggen_dac_tail_us(void) {
+    uint32_t fs = audio_state.freq ? audio_state.freq : 48000u;
+    return SIGGEN_DAC_TAIL_BASE_US +
+           (uint32_t)((uint64_t)pipeline_max_active_delay_samples() * 1000000u / fs);
+}
+
+bool siggen_output_ready_now(void) {
+    return siggen_dac_ready_now(&siggen_dac, dac_hw_mute_is_asserted(), dac_hw_mute_bracket_active());
+}
+
+static void siggen_dac_service(void) {
+    if (siggen_dac.st == SIGGEN_DAC_IDLE && !siggen_wants_output()) return;   // steady idle: free
+    uint16_t hold = dac_hw_mute_hold_ms(), rel = dac_hw_mute_release_ms();
+    siggen_dac_in_t in = {
+        .want = siggen_wants_output(),
+        .pin_muted = dac_hw_mute_is_asserted(),
+        .bracket = dac_hw_mute_bracket_active(),
+        .now_us = time_us_32(),
+        .settle_us = (uint32_t)(hold > rel ? hold : rel) * 1000u,
+        .tail_us = siggen_dac_tail_us(),
+    };
+    bool ready = siggen_dac_step(&siggen_dac, &in);
+    dac_hw_mute_siggen_override(siggen_dac.override);
+    siggen_output_gate(ready);
 }
 
 // True while something is actually feeding process_input_block(); mirrors the
@@ -2381,6 +2443,7 @@ int main(void) {
         // notifications.  Its blocks are pumped at the delivery points
         // (pipeline_service_producer).  Immediate no-op while idle.
         LOOP_PROF(LP_SIGGEN);
+        siggen_dac_service();
         siggen_service();
 
 

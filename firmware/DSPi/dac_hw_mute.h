@@ -238,6 +238,35 @@ uint16_t dac_hw_mute_release_ms(void);
  * feature disabled (no-op). */
 void dac_hw_mute_release(void);
 
+/* ----- Idle holds and the signal generator (WP FWSIGGEN) ----- */
+
+/* Assert as an IDLE hold: the output clocks keep running and the unit only
+ * waits for a source (USB phase mode out of step).  Same pin, hold and
+ * release semantics as dac_hw_mute_assert(); the difference is that the
+ * signal generator may open an idle hold while it plays.  No-op when a
+ * lifecycle mute is already latched (a bracket stays a bracket). */
+void dac_hw_mute_assert_idle(void);
+
+/* Turn the latched lifecycle mute into an idle hold: a completed reset whose
+ * release is deferred to a later event (complete_pipeline_reset() keeping the
+ * mute for the USB phase anchor) has its clocks running again. */
+void dac_hw_mute_mark_idle(void);
+
+/* The lifecycle latch (assert..release), whatever the pin shows: the generator
+ * override can leave a latched idle hold un-muted on the pin. */
+bool dac_hw_mute_latched(void);
+
+/* A reset bracket (non-idle latch) or a post-restart release dwell is in
+ * force: the generator must not count on an open DAC. */
+bool dac_hw_mute_bracket_active(void);
+
+/* The signal generator owns the outputs (on) or gives them back (off).  While
+ * on, an idle hold does not drive the pin; brackets, release dwells and test
+ * pulses still do.  Off restores whatever is latched: an idle hold that is
+ * still held mutes the pin again.  A bracket asserted while the override has
+ * an idle hold open re-arms a full hold (the DAC was playing). */
+void dac_hw_mute_siggen_override(bool on);
+
 /* ----- Diagnostics / vendor test ----- */
 
 /* Returns true iff hardware mute is currently asserted (pins driven
