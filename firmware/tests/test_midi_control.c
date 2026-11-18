@@ -212,6 +212,13 @@ static void host_send(uint8_t tag, uint8_t type, uint8_t bReq, uint16_t wv, uint
     mf_enc_begin_request(&e, &ID, tag, type, bReq, wv, 0, wl, pl);
     while (mf_enc_packet(&e, 0, host_out[host_out_n])) host_out_n++;
 }
+// As host_send, with an explicit wIndex (paged 1.1.7 requests, PAGEGUARD).
+static void host_send_idx(uint8_t tag, uint8_t type, uint8_t bReq, uint16_t wv, uint16_t wi,
+                          uint16_t wl, const uint8_t *pl) {
+    mf_enc_t e;
+    mf_enc_begin_request(&e, &ID, tag, type, bReq, wv, wi, wl, pl);
+    while (mf_enc_packet(&e, 0, host_out[host_out_n])) host_out_n++;
+}
 static void host_send_raw(const uint8_t *sysex, size_t n) {
     for (size_t i = 0; i < n; i += 3) {
         size_t k = n - i < 3 ? n - i : 3;
@@ -649,6 +656,100 @@ static void test_bootloader(void) {
     CHECK(found, "next request answered");
 }
 
+// WP PAGEGUARD: a non-zero wIndex high byte (a paged firmware-1.1.7 request)
+// is answered ERROR (0x02) without reaching the dispatcher, without taking
+// the bulk lock and without touching an open chunk session; page 0 with
+// either low byte (0 or the vendor interface 2) still works.
+static int last_reply_for(uint8_t tag) {
+    for (int i = n_replies - 1; i >= 0 && i >= n_replies - 64; i--)
+        if (replies[i % 64].tag == tag) return i % 64;
+    return -1;
+}
+static void test_page_guard(void) {
+    reset_world();
+    // The 1.1.7 probe SYS.PROTOCOL_INFO: page 0x01, command 0x10, GET 16 B.
+    host_send_idx(0x30, MF_TYPE_GET, 0x10, 0, 0x0102, 16, NULL);
+    run(10, 64, 100);
+    int r = last_reply_for(0x30);
+    CHECK(r >= 0 && replies[r].status == CTRL_STATUS_ERROR && replies[r].type == MF_RESP_GET &&
+          replies[r].len == 0, "probe answered ERROR (legacy)");
+    CHECK(get_calls == 0 && set_calls == 0, "probe never dispatched");
+
+    // A paged GET whose number is a 1.1.6 bulk GET / bootloader / chunk.
+    const uint8_t gets[] = { REQ_GET_ALL_PARAMS, REQ_ENTER_BOOTLOADER, REQ_GET_ALL_PARAMS_CHUNK,
+                             REQ_RTA_GET_BANDS_ALL, 0x7F };
+    const uint16_t pages[] = { 0x0100, 0x0202, 0x7F00, 0xE002, 0xFFFF };
+    uint8_t tag = 0x31;
+    for (unsigned i = 0; i < sizeof gets; i++) {
+        for (unsigned k = 0; k < sizeof pages / sizeof pages[0]; k++, tag++) {
+            host_send_idx(tag, MF_TYPE_GET, gets[i], 0, pages[k], 64, NULL);
+            run(10, 64, 100);
+            r = last_reply_for(tag);
+            CHECK(r >= 0 && replies[r].status == CTRL_STATUS_ERROR, "paged GET 0x%02X wIndex 0x%04X refused",
+                  gets[i], pages[k]);
+        }
+    }
+    CHECK(get_calls == 0 && boot_calls == 0 && bulk_owner == -1, "no paged GET dispatched / locked");
+
+    // Paged SETs: small, bulk-sized 0xA1 and chunk 0xA3 at offset 0.
+    static uint8_t img[BULK_SIZE];
+    memset(img, 0x5C, sizeof img);
+    memset(bulk_param_buf, 0xEE, BULK_SIZE);
+    const uint8_t one = 1;
+    host_send_idx(0x60, MF_TYPE_SET, 0x30, 0, 0x0202, 1, &one);
+    run(10, 64, 100);
+    host_send_idx(0x61, MF_TYPE_SET, 0x10, 0, 0x0100, 0, NULL);
+    run(10, 64, 100);
+    host_send_idx(0x62, MF_TYPE_SET, REQ_SET_ALL_PARAMS, 0, 0x0502, BULK_SIZE, img);
+    int it = 0;
+    while (last_reply_for(0x62) < 0 && it++ < 5000) step(64, 50);
+    host_send_idx(0x63, MF_TYPE_SET, REQ_SET_ALL_PARAMS_CHUNK, 0, 0x0202, 2048, img);
+    it = 0;
+    while (last_reply_for(0x63) < 0 && it++ < 5000) step(64, 50);
+    for (uint8_t t = 0x60; t <= 0x63; t++) {
+        r = last_reply_for(t);
+        CHECK(r >= 0 && replies[r].status == CTRL_STATUS_ERROR && replies[r].type == MF_RESP_SET,
+              "paged SET tag 0x%02X refused", t);
+    }
+    CHECK(set_calls == 0 && !bulk_applied && bulk_owner == -1 && bulk_param_buf[0] == 0xEE,
+          "no paged SET dispatched, locked or written to the bulk buffer");
+
+    // A paged request in the middle of an open chunk GET session leaves it open.
+    host_send(0x70, MF_TYPE_GET, REQ_GET_ALL_PARAMS_CHUNK, 0, 2048, NULL);
+    run(200, 64, 100);
+    CHECK(bulk_owner == CTRL_SOURCE_MIDI, "session open");
+    host_send_idx(0x71, MF_TYPE_GET, 0x7F, 0, 0x0102, 7, NULL);
+    run(10, 64, 100);
+    r = last_reply_for(0x71);
+    CHECK(r >= 0 && replies[r].status == CTRL_STATUS_ERROR && bulk_owner == CTRL_SOURCE_MIDI,
+          "paged request does not close the chunk session");
+    host_send(0x72, MF_TYPE_GET, REQ_GET_ALL_PARAMS_CHUNK, 2048, 2048, NULL);
+    run(200, 64, 100);
+    r = last_reply_for(0x72);
+    CHECK(r >= 0 && replies[r].status == CTRL_STATUS_OK && replies[r].len == 2048, "session continues");
+    host_send(0x73, MF_TYPE_GET, 0x7F, 0, 0, NULL);   // close it
+    run(10, 64, 100);
+    CHECK(bulk_owner == -1, "closed by a page-0 request");
+
+    // Page 0 still works with either low byte (0 or the vendor interface 2).
+    host_send_idx(0x74, MF_TYPE_GET, 0x7F, 0, 0x0000, 7, NULL);
+    run(10, 64, 100);
+    host_send_idx(0x75, MF_TYPE_GET, 0x7F, 0, 0x0002, 7, NULL);
+    run(10, 64, 100);
+    host_send_idx(0x76, MF_TYPE_GET, 0x7F, 0, 0x00FF, 7, NULL);
+    run(10, 64, 100);
+    for (uint8_t t = 0x74; t <= 0x76; t++) {
+        r = last_reply_for(t);
+        CHECK(r >= 0 && replies[r].status == CTRL_STATUS_OK && replies[r].len == 7,
+              "page-0 GET tag 0x%02X answered", t);
+    }
+    const uint8_t vol[4] = { 0, 0, 0xA0, 0xC1 };
+    host_send_idx(0x77, MF_TYPE_SET, 0xD2, 0, 0x0002, 4, vol);
+    run(10, 64, 100);
+    r = last_reply_for(0x77);
+    CHECK(r >= 0 && replies[r].status == CTRL_STATUS_OK && last_set_len == 4, "page-0 SET applied");
+}
+
 int main(void) {
     test_mount();
     test_get_small();
@@ -662,6 +763,7 @@ int main(void) {
     test_pipelining();
     test_notify();
     test_bootloader();
+    test_page_guard();
     if (failures) {
         fprintf(stderr, "test_midi_control: %d failure(s)\n", failures);
         return 1;

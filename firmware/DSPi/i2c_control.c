@@ -13,6 +13,7 @@
 #include "bulk_params.h"
 #include "control_surfaces.h"           // CsMacro sizes resp_small
 #include "control_surfaces_display.h"   // display instance exclusion
+#include "vendor_page_guard.h"          // WP PAGEGUARD
 
 #include <string.h>
 #include "pico/stdlib.h"
@@ -112,7 +113,15 @@ static void on_receive_byte(uint8_t b) {
             uint8_t  type = rx_header[0];
             uint8_t  breq = rx_header[1];
             uint16_t wlen = hdr_wlen(rx_header);
-            if (type == I2C_CTRL_TYPE_SET && vendor_is_bulk_set(breq, wlen)) {
+            if (vendor_page_refused((uint16_t)(rx_header[4] | (rx_header[5] << 8)))) {
+                // WP PAGEGUARD (vendor_page_guard.h): non-zero wIdxH = a
+                // paged firmware-1.1.7 request (incl. the SYS.PROTOCOL_INFO
+                // probe).  Discard the payload, answer ERROR (0x02, how
+                // 1.1.7 says a 1.1.6 device answers): no bulk lock, no
+                // dispatch.
+                rx_discard = true;
+                rx_discard_status = CTRL_STATUS_ERROR;
+            } else if (type == I2C_CTRL_TYPE_SET && vendor_is_bulk_set(breq, wlen)) {
                 if (vendor_bulk_try_acquire(CTRL_SOURCE_I2C)) {
                     rx_bulk = true;
                 } else {

@@ -19,6 +19,7 @@
 
 #include "midi_control.h"
 #include "midi_frame.h"
+#include "vendor_page_guard.h"  // WP PAGEGUARD (pure; also in the host test)
 
 #ifndef MIDI_CTRL_HOST_TEST
 #include "vendor_commands.h"
@@ -248,6 +249,12 @@ static void on_event(mf_event_t ev) {
     switch (ev) {
         case MF_EV_SET_HEADER:
             dec.dst = NULL;
+            if (vendor_page_refused(dec.wIndex)) {
+                // WP PAGEGUARD: paged 1.1.7 SET; discard the payload, take no
+                // bulk lock, touch no chunk session; answered at MF_EV_REQUEST.
+                dec.deferred_status = CTRL_STATUS_ERROR;
+                break;
+            }
             if (dec.bReq == REQ_SET_ALL_PARAMS_CHUNK) {
                 // Payload lands at bulk_param_buf + offset, like USB.
                 uint32_t off = dec.wValue, n = dec.wLength;
@@ -293,6 +300,15 @@ static void on_event(mf_event_t ev) {
 
         case MF_EV_REQUEST: {
             uint8_t rtype = dec.is_get ? MF_RESP_GET : MF_RESP_SET;
+            if (vendor_page_refused(dec.wIndex)) {
+                // WP PAGEGUARD (vendor_page_guard.h): a non-zero wIndex high
+                // byte is a paged firmware-1.1.7 request (incl. the
+                // SYS.PROTOCOL_INFO probe).  ERROR (0x02) without dispatch,
+                // as on UART / I2C; the parser holds no bulk lock for it.
+                release_parser_bulk();
+                set_pending_status(dec.tag, rtype, CTRL_STATUS_ERROR);
+                break;
+            }
             if (dec.deferred_status != CTRL_STATUS_OK) {
                 release_parser_bulk();
                 set_pending_status(dec.tag, rtype, dec.deferred_status);

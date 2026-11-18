@@ -51,6 +51,7 @@
 #include "input_source_names.h"
 #include "loopback.h"   // DSPI_LOOPBACK glitch counters (self-guarded; empty otherwise)
 #include "core_vreg.h"
+#include "vendor_page_guard.h"   // WP PAGEGUARD: refuse paged (1.1.7) requests
 #include "identify.h"
 #include "reset_info.h"
 
@@ -4813,6 +4814,16 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
     _dispatch_src        = PARAM_SRC_HOST_SET;
 
     if (stage == CONTROL_STAGE_SETUP) {
+        // WP PAGEGUARD (vendor_page_guard.h): a non-zero wIndex high byte is
+        // a paged firmware-1.1.7 request (page:command), including the
+        // SYS.PROTOCOL_INFO probe 0x01:0x10.  STALL it here, before any state
+        // below is touched and before any opcode is looked at, or it would
+        // run the 1.1.6 opcode with the same bRequest number.  A SETUP STALL
+        // means TinyUSB never runs the DATA / ACK stages for it.  (A stale
+        // USB bulk lock this SETUP would otherwise drop is reaped by the next
+        // page-0 SETUP or the 3 s stale window.)
+        if (vendor_page_refused(req->wIndex)) return false;
+
         // EP0 transfers are strictly serialized: a new SETUP means any prior
         // USB control transfer is over, so drop a USB-held bulk lock (covers
         // host-aborted 0xA0/0xA1 transfers whose ACK never fired).  Chunked
@@ -5043,6 +5054,7 @@ CtrlDispatchResult vendor_dispatch_get(CtrlSource src, uint8_t bRequest,
                                        uint16_t wValue, uint16_t wIndex, uint16_t wLength,
                                        const uint8_t **resp_data, uint16_t *resp_len) {
     if (src == CTRL_SOURCE_USB) return CTRL_DISPATCH_ERROR;  // USB uses the TinyUSB path
+    if (vendor_page_refused(wIndex)) return CTRL_DISPATCH_ERROR;   // PAGEGUARD
     if (usb_set_busy())         return CTRL_DISPATCH_BUSY;
     if (ctrl_cmd_refused(src, bRequest)) return CTRL_DISPATCH_BLOCKED;
 
@@ -5080,8 +5092,10 @@ CtrlDispatchResult vendor_dispatch_get(CtrlSource src, uint8_t bRequest,
 CtrlDispatchResult vendor_dispatch_set(CtrlSource src, uint8_t bRequest,
                                        uint16_t wValue, uint16_t wIndex,
                                        const uint8_t *payload, uint16_t wLength) {
-    (void)wIndex;   // SET handlers carry sub-params in wValue only (matches USB)
+    // SET handlers carry sub-params in wValue only (matches USB); wIndex is
+    // only checked for a page (PAGEGUARD).
     if (src == CTRL_SOURCE_USB) return CTRL_DISPATCH_ERROR;
+    if (vendor_page_refused(wIndex)) return CTRL_DISPATCH_ERROR;   // PAGEGUARD
     if (usb_set_busy())         return CTRL_DISPATCH_BUSY;
     if (ctrl_cmd_refused(src, bRequest)) return CTRL_DISPATCH_BLOCKED;
 

@@ -86,6 +86,27 @@ maximum. Firmware before FWSEC1 ran `0xF0` on every transport.
 Everything else, including the two GET-config commands and the status readback,
 is available on every transport.
 
+#### 1.2.3 Paged requests (firmware 1.1.7 protocol, WP PAGEGUARD)
+
+Weeb Labs firmware 1.1.7 addresses a command as page (high byte of `wIndex`,
+`0x01`-`0xFF`) plus command (`bRequest`, `0x10`-`0xFF`). This firmware is
+1.1.6-generation: every command it has is on page 0, and it used to ignore the
+`wIndex` high byte, so a paged request ran the 1.1.6 opcode with the same
+`bRequest` number (some are factory reset and preset save / load / delete). Any
+request with a non-zero `wIndex` high byte is now refused before any opcode is
+looked at and with no side effect (no handler, no bulk lock, no chunk-session
+change): **STALL** at SETUP on the USB vendor path (also on the alink sender,
+which shares the VID:PID), status **`ERROR` (`0x02`)** on UART, I2C and USB MIDI,
+the payload being consumed and discarded. This includes 1.1.7's mandatory probe
+`SYS.PROTOCOL_INFO` (page `0x01`, command `0x10`, USB SETUP
+`C1 10 00 00 02 01 10 00`): a STALL there, or `0x02` on UART / I2C, is exactly
+how the 1.1.7 client update guide says a 1.1.6-or-older device answers, so a
+paged client classifies this firmware as legacy and falls back to page-0
+requests. Page-0 requests are unchanged with any low byte (hosts send `0x0000`
+or `0x0002`). The rule is `vendor_page_refused()` in
+`firmware/DSPi/vendor_page_guard.h`, host-tested by
+`firmware/tests/test_page_guard.c` and `test_midi_control.c`.
+
 ### 1.3 Ship state
 
 Both interfaces ship **disabled** by default. A fresh device (or one after a
@@ -287,8 +308,8 @@ and dropped; the parser resynchronizes on the next `0xA5`.
 
 `wIdx` is passed straight through to the dispatcher. Over USB it carries the
 vendor interface number (2); over UART it is not an interface selector and can be
-sent as `0x0000` for every command except those few that genuinely use `wIndex`
-as a parameter. `wValue` still carries per-command data (channel, slot, packed
+sent as `0x0000`; no command uses it as a parameter. Its high byte must be 0:
+a non-zero `wIdxH` is a paged 1.1.7 request and is answered `ERROR` (1.2.3). `wValue` still carries per-command data (channel, slot, packed
 fields) exactly as over USB.
 
 ### 3.3 CRC16 details
