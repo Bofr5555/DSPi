@@ -1633,6 +1633,29 @@ No pre-existing vendor commands are modified by the multiple-SPDIF feature beyon
 
 ---
 
+## 14. Follower Mode: the S/PDIF Time Base (pointer)
+
+*Specified 2026-11-19 (WP FWTB0, PLAN-AT); implemented by WP FWSP1 and WP FWSP2; not implemented yet. RP2350 builds
+with `DSPI_ALINK_SPDIF` (the K340 default) only.*
+
+Between DSPi units, S/PDIF can carry a sample-exact time base: a DSPi **source** stamps its frame counter into the
+user bits (one 48-byte superframe per 192-frame IEC 60958 block), and a DSPi **follower** on this input phase-locks to
+it and plays every sample a fixed D samples after it arrived, like the alink line and USB-direct mode 2. The carriage
+is normative in `alink_protocol_spec.md` section 12 (the contract in section 11), the control plane in
+`extension_channel_spec.md` 2.10 (`EXT_ALINK_SPDIF` 0x8020 and friends).
+
+- **Off by default** (`EXT_ALINK_SPDIF.mode` 0): this input behaves exactly as this document describes, and the
+  outputs emit all-zero user bits. Mode 0 stays the default so a TV on S/PDIF is never muted by a setting it cannot
+  satisfy.
+- **In follower mode** (mode 1, while an S/PDIF input is the source) the phase lock replaces the clock servo's fill
+  term of section 6 (the feed-forward stays), the output stays muted until the unit is phase-locked, and the
+  latency is D, the same after every relock, instead of "prefill + batch, new after every relock".
+- **Foreign S/PDIF has no time base.** A follower that receives a stream with no valid superframe (any non-DSPi
+  source, or equipment in between that re-clocks or rewrites the user bits) reports lock error and, by default,
+  mutes (`on_lock_error` 1 plays it rate-locked, as today).
+- `REQ_GET_SPDIF_RX_STATUS` (0xE2) and the channel-status read (0xE3) are unchanged; the time base is reported in
+  `EXT_ALINK_SPDIF_STATUS` (0x8021) and `EXT_TIME_BASE` (0x8030).
+
 ## Vendor Command Summary
 
 | Code | Command | Direction | Data | Description |

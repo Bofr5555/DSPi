@@ -1,7 +1,7 @@
 # Test Signal Generator Specification
 
 *Status: implemented*
-*Last updated: 2026-11-18 (WP FWSIGGEN: DAC hardware-mute ownership, pump timing)*
+*Last updated: 2026-11-19 (WP FWTB0: section 15, start on the time base, specified; WP FWSIGGEN 2026-11-18: DAC hardware-mute ownership, pump timing)*
 
 ## 1. Overview
 
@@ -600,6 +600,7 @@ generator plays with no stream, muted with a stream and after it).
 | **Mute / master volume / output trim** | Applied downstream of injection to generator channels (both processed and RAW), so a muted or attenuated output attenuates or silences the generated signal too. Set an output's trim/master volume appropriately before measuring. |
 | **Output-type switch (S/PDIF <-> I2S)** | The pump refuses to run while the switch is in progress; injection resumes on the next normal block. |
 | **DAC hardware mute** | The generator opens an idle hold itself and restores it after its tail; reset brackets keep priority (section 9.3). |
+| **Time base (ops 9 and 10)** | A START or STOP at a sample of the unit's time base; a loss cancels a pending START and stops a generator it started (section 15). |
 | **USB stream start while running** | A pipeline reset restarts the outputs: the schedule continues, the DAC frame anchor moves (section 9.1). |
 | **PDM / Core 1 EQ_WORKER** | PDM honors `siggen_raw_mask` like the S/PDIF/I2S path. In Core 1 `EQ_WORKER` mode PDM output is inactive (a platform behavior, not siggen-specific), so a masked PDM channel simply produces nothing in that mode. |
 
@@ -742,3 +743,71 @@ The wire protocol, signal catalogue, timing models, flags, fades, and
 notification are identical across platforms; only the internal sample kernels and
 the two platform-dependent caps fields (`output_channels`, `multitone_max`)
 differ.
+
+---
+
+## 15. Start on the Time Base (apply ops 9 and 10)
+
+*Specified 2026-11-19 (WP FWTB0, PLAN-AT section 1.3, OD-ATe, review R3-R5); implemented by WP FWTB1 (line,
+USB-direct) and WP FWSP2 (S/PDIF). Not implemented yet. The wire side is `extension_channel_spec.md` 2.8.7.1 (the
+ops), 2.11.2 (`EXT_SIGGEN_TIMELINE`); the time bases are `alink_protocol_spec.md` section 11.*
+
+On a unit with a time base (the line, USB-direct mode 2, S/PDIF), the generator can be started and stopped on an
+exact sample of the shared counter T instead of "when the request arrives". Several units then start their own
+generators on samples of one timeline, which is how a system of DSPi units is measured with one microphone (each unit
+plays its own, bounded, firmware-exact signal; the host schedules the starts). The opcodes `0xA4`-`0xA8` and the
+`SiggenStatus` / `NOTIFY_EVT_SIGGEN_STATE` wire do not change.
+
+- **The ops.** Apply op 9 `SIGGEN_START` (arg 0, value 0) through `EXT_APPLY_AT_FRAME` or a superframe: the
+  generator's sample 0 is the sample carried as T, and it starts the staged `SiggenConfig` exactly as
+  `SIGGEN_CTL_START` would from idle. Apply op 10 `SIGGEN_STOP` (arg 0 fade, 1 now): `SIGGEN_CTL_STOP` or
+  `STOP_NOW` at that sample. Builds: RP2350 with a time base (`EXT_SIGGEN_TIMELINE` listed); not RP2040 in this
+  version.
+- **Sample 0 on T, exactly.** The sample carried as T enters the pipeline inside some processing block; the generator
+  renders silence for the block's samples before it and its sample 0 on that sample (a split block), on programme
+  audio and on the timeline's silence alike. From then on section 9.1 holds: generator sample k plays at T + k on the
+  time base for the whole run, gaps included.
+- **Arming.** At `T - arm_lead` (`arm_lead = max(hold_ms, release_ms) + 50 ms`, 150 ms on the K340, read back as
+  `EXT_SIGGEN_TIMELINE.arm_lead_ms`) the generator starts to "want output" (`siggen_wants_output()`): it opens an idle
+  DAC hold through the override of 9.3 and the out-of-step soft-mute exemption of 9.3 step 0 applies, so the DAC's
+  un-mute ramp is over when T arrives. The outputs play silence until then, so the edge is click-free. Nothing is
+  armed for an op that is not due: a queued op 9 holds the DAC open for at most `arm_lead`. A write whose T is less
+  than `arm_lead` ahead is refused at the write. The host's lead is at least `max(arm_lead) + 100 ms` over the units
+  (250 ms with a K340; PLAN-AT OD-ATn).
+- **Preconditions.** Only a **finite** config starts on T: a sweep or pattern type with `repeat` at least 1 (section
+  6), never a continuous type, never `RAW` (5.1); and only a config **written by `SET_CONFIG` since the last of** boot,
+  `STOP` / `STOP_NOW`, an applied op 10, a `CANCEL_ALL` of any time base, a preset load, or a loss (below). The
+  firmware keeps a "fresh config" flag: set by an accepted `SET_CONFIG`, cleared by each of those. Checked when the op
+  arms and again at T; otherwise the op completes `refused` with `REFUSED_NOT_READY`. So a host's abort or close
+  disarms every later START, and an unbounded generator can never be started on a timeline.
+- **Never late.** A START whose T has passed when it comes due does not start (`REFUSED_LATE`), and neither does one
+  whose output is not ready at T: the DAC still held, the unit muted by `REQ_SET_USER_MUTE` or a system-mute flag,
+  the time base not `LOCKED`, the preconditions not met (`REFUSED_NOT_READY`). A wrong timetable is worse than none.
+  A late **op 10** is applied at once and reported late: it is a stop.
+- **No bus-frame form.** On USB-direct op 9 is written with the sample index S (time base 1), never in the bus-frame
+  form (time base 2), which is refused at the write: an old bus frame would wrap to 2.048 s later.
+- **A loss cancels and stops.** A pending START is cancelled when its time base leaves `LOCKED` (`CANCELLED_LOSS`).
+  A generator **started by op 9** is stopped, as by `STOP_NOW`, when its time base leaves `LOCKED`, on every transport
+  (`STOPPED_LOSS`; `SiggenStatus.stop_reason` `HOST`, since the upstream reasons are kept). On USB-direct this is what
+  keeps a timed generator from outliving its time base: 9.3 step 0 exempts a playing generator from the out-of-step
+  soft mute and the override keeps the DAC open, so "muted with the unit" would not hold. A generator started by a
+  plain `SIGGEN_CTL_START` keeps today's behaviour (it plays on through a loss, muted where the unit mutes).
+- **The DAC is given back.** When an armed START is cancelled or refused, `siggen_wants_output()` is false at once,
+  and the override closes after its normal tail (9.3 step 4): the out-of-step soft mute is refreshed and an idle hold
+  drives the pin again.
+- **Other cancels.** A `SET_CONFIG` while a START is pending cancels it (`CANCELLED_CONFIG`): what starts at T is what
+  was staged when the op was written. `STOP`, `STOP_NOW` and `CANCEL_ALL` cancel it (`CANCELLED_HOST`). At most one
+  START is pending per unit; a second one is refused at the write. Note that `SET_CONFIG` while *running* restarts the
+  generator (4.1): a host stages one config per run and starts every pass of that unit with another op 9 on it.
+- **The timeline.** `EXT_SIGGEN_TIMELINE` (0x8031) records the time base, the state (idle, pending, armed,
+  running), the last result, the T of sample 0 (`start`), the pending T, the samples rendered, the frames held
+  (`siggen_hold()`, 9.1), a `run_id` and the run's **discontinuities**: an output underrun's re-anchor (9.1), a
+  pipeline reset, a re-anchor or whole-sample correction of the time base, a holdover entered while running, an epoch
+  change, a stop by a loss. A run with `last_result` started and 0 discontinuities played every sample on its T.
+- **A plain `START` is stamped too.** While a time base is `LOCKED`, a `SIGGEN_CTL_START` records the T of its sample
+  0 in `start` (and increments `run_id`), so a single unit's run is on its time base as well; without one, `start`
+  is 0.
+- **Host recipe (one unit).** Stage the config (`0xA4`, finite); read `EXT_TIME_BASE` for the current T and
+  `EXT_SIGGEN_TIMELINE.arm_lead_ms`; write op 9 at `T + lead` (lead at least `arm_lead` + 100 ms, plus the write
+  time); after the run read `EXT_SIGGEN_TIMELINE` and check `start`, `last_result` 1, `discontinuities` 0 and
+  `samples`, and check that `EXT_TIME_BASE.disturbances` did not change.

@@ -3,6 +3,10 @@
 *Protocol version: 1 (superframe byte 1). Status: normative, 2026-11-13 (WP LK1, fixup after review lk). Not yet used by any firmware
 image: the sender (WP LK4), the receiver input (LK5), phase lock (LK6) and the repeater (LK8) build on it.*
 
+*2026-11-19 (WP FWTB0, PLAN-AT): apply ops 9 `SIGGEN_START` and 10 `SIGGEN_STOP` (6.3, 6.4); the time-base contract C1-C6
+that every alink time-base transport meets (section 11, normative); the carriage of the superframe on S/PDIF (section
+12, normative). Specification only: the ops are WP FWTB1, the S/PDIF carriage WP FWSP1 and the S/PDIF roles WP FWSP2.*
+
 The alink carries the audio of a whole system from one sender (the master clock) to any number of receivers (a DSPi
 or a K340 with a receiver module) over optical or SFP lines, one frame per sample period, with a 64-bit frame
 counter and a control sub-channel. The system design is SYS2 (`~/.cache/dspi-build/work/sys2/SPEC.md`); this
@@ -21,7 +25,9 @@ Writing style note: this doc avoids em-dashes per project convention.
 
 In scope: line-rate classes, the 8b/10b line code and bit order, the frame, banks and CRCs, frame length at every
 sample rate (44.1 kHz padding), the 32-byte superframe with the frame counter and apply-at-frame, hop counting for
-repeaters and fan-outs, the PRBS-7 test payload, and the receiver's alignment, lock, error and loss rules.
+repeaters and fan-outs, the PRBS-7 test payload, and the receiver's alignment, lock, error and loss rules. Also in scope:
+the time-base contract that the line and every other alink time-base transport meet (section 11) and the carriage of
+the superframe in the S/PDIF user bits (section 12).
 
 Not in scope: PIO programs and sampling (LK2), the soft VCXO servo, phase lock and the anchor procedure (SYS2 3.1,
 LK6), what a unit does with an apply op (`extension_channel_spec.md` 2.8.7), muting and ramps on loss (LK5/LK6),
@@ -303,8 +309,8 @@ Example (vector `sf/typical`): F = 2^40, 48 kHz, 8 channels, L1, hops 0, sender 
 ### 6.3 Validity
 
 A superframe is valid when, in this order: its CRC matches; magic is `0xA5`; version is 1; `frame mod 32 = 0`; class
-is 1..3, rate is 0..2 and C is 1..the capacity of 5.7 for that class and rate; `apply_op` is 0..8 and
-`apply_op = 0` exactly when `apply_frame = 0`. The reference `alink_sf_unpack()` returns the first failing check
+is 1..3, rate is 0..2 and C is 1..the capacity of 5.7 for that class and rate; `apply_op` is 0..10 (0..8 before
+WP FWTB1; 6.4) and `apply_op = 0` exactly when `apply_frame = 0`. The reference `alink_sf_unpack()` returns the first failing check
 (`ALINK_SF_ERR_CRC` 1, `MAGIC` 2, `VERSION` 3, `FRAME` 4, `LAYOUT` 5, `APPLY` 6). Reserved bytes 28-29 are not
 checked. A receiver adds the checks of 8.6.
 
@@ -327,9 +333,20 @@ corrupted superframe or two cost nothing. A sender carries one apply at a time.
 | 6 | RATE | rate code | new C, 0 = unchanged (6.5) |
 | 7 | CLICK | output | 0 |
 | 8 | SYNC_PULSE | 0 | 0 |
+| 9 | SIGGEN_START | 0 | 0 |
+| 10 | SIGGEN_STOP | 0 fade, 1 now | 0 |
 
-What a unit does with ops 1-5, 7 and 8, the argument ranges and the late and refused results are specified in
-`extension_channel_spec.md` 2.8.7; the superframe only transports them. Op 6 is the protocol's own (6.5).
+What a unit does with ops 1-5 and 7-10, the argument ranges and the late and refused results are specified in
+`extension_channel_spec.md` 2.8.7 (ops 9 and 10: 2.8.7.1 and `test_signals_spec.md` section 15); the superframe only
+transports them. Op 6 is the protocol's own (6.5).
+
+**Ops 9 and 10 (WP FWTB1, PLAN-AT OD-ATe).** The protocol version stays 1: nothing using the alink is released, and
+a version-1 receiver without the ops rejects a superframe carrying op 9 or 10 (code 6 `APPLY`), counts it in
+`superframe_errors` and keeps playing on its counter (8.4), so a mixed system degrades to "the old units miss that
+op". A receiver or sender build that has the ops says so with `EXT_ALINK_INFO.features` bit 6 `SIGGEN_SYNC`
+(`extension_channel_spec.md` 2.8.1). A host sends op 9 or 10 in the superframe only when every unit of the alink
+lists that bit; this plan's hub broadcasts only op 10 (the abort without control latency), never op 9 (each unit's
+START is written per unit, through `EXT_APPLY_AT_FRAME`).
 
 ### 6.5 Layout changes (RATE)
 
@@ -629,3 +646,267 @@ SYS2 section 2 is the design; these points make it precise or change it:
 10. **PRBS-7** is defined per frame (reset at each frame), so a bench receiver checks every frame on its own.
 11. **Repeaters** keep F and rewrite hops (saturating at 255) and class; they send nothing until they hold a valid
     superframe.
+
+## 11. Time bases
+
+*Normative (WP FWTB0, PLAN-AT section 1.1, owner decisions AT1 and AT4 of 2026-11-19). The control plane is in
+`extension_channel_spec.md`: 2.8.6, 2.8.7, 2.9.4, 2.10 (the S/PDIF block) and 2.11 (`EXT_TIME_BASE`,
+`EXT_SIGGEN_TIMELINE`, event `0xE4`). Implemented by WP FWTB1 (line and USB-direct) and WP FWSP2 (S/PDIF).*
+
+A **time base** is a sample counter T shared by a set of units, the **domain**: every unit of one domain numbers the
+same audio sample with the same T (or with a T a single read maps, C1). A **follower** receives a time base, a
+**source** emits one. Multi-unit work (alignment, scenes, apply-at-frame, measurement with each unit's own generator
+started at a sample of T) needs nothing from the transport except this contract, so it never names a transport: the
+hub and the console talk to "a unit with a time base". Nothing in this section is specific to the line.
+
+### 11.1 The contract (C1-C6)
+
+**A transport is an alink time-base transport when a unit on it offers C1 to C6.**
+
+- **C1. A sample counter T**, 64 bits at the host interface, shared by every unit of one domain, with a `time_base`
+  id (11.3). Units MAY count from different origins only where one read resolves the difference (USB-direct: origins
+  differ by multiples of `2048 * spf`, `extension_channel_spec.md` 2.9.1). T increments by exactly one per sample
+  period of the domain while the time base is `LOCKED` (11.2); arithmetic is modulo 2^64.
+- **C2. Fixed play-out.** A follower plays the sample carried as T exactly D samples after it arrived; D is configured
+  per unit, and the measured error is reported (`phase_error`, in samples). A source plays the sample carried as T at
+  the instant it emits T (D = 0 by definition). So every `LOCKED` follower with the same D plays the same T at the
+  same instant, and a source plays T exactly D samples before its followers do.
+- **C3. Apply at T.** A queue of ops that act on exactly the sample carried as T as it enters the pipeline, on
+  programme audio and on silence alike, each completing with a result event (`0xE2`) that carries T. An op whose T has
+  passed is applied at once and reported `late`, except op 9 `SIGGEN_START`, which is never late: it is refused
+  (`extension_channel_spec.md` 2.8.7.1).
+- **C4. Lock states and events.** The contract's states (11.2), an event for every transition (`0xE4`), and a
+  **disturbance counter** that every transition out of `LOCKED`, every holdover, resume, re-anchor, whole-sample
+  correction and epoch change increments. The counter is readable together with T and `output_frames` in one atomic
+  read (`EXT_TIME_BASE`), so a host can prove that nothing happened in an interval from two reads, without relying on
+  events (which are rate-limited and collapse). While an entry stays `LOCKED` and its counter does not change,
+  `t - output_frames` is constant.
+- **C5. A domain identity** a host can compare: `EXT_TIME_BASE.domain`, 32 bits, `time_base` in byte 3. Line: byte 0
+  the sender id (superframe byte 7), bytes 1-2 zero. S/PDIF: bytes 0-1 the source's serial bytes 0-1 (12.2), byte 2
+  the source's epoch. USB-direct: bytes 0-2 zero (the host's bus decides; a hub compares units by their host bus and
+  by `t`). An id is short and can collide, so a host also checks that the units' `t` agree in one read round
+  (PLAN-AT G1): equal domains are necessary, not sufficient.
+- **C6. Discovery.** `EXT_LIST` names `EXT_TIME_BASE` (`0x8030`) on every build that has a time base, and
+  `EXT_SIGGEN_TIMELINE` (`0x8031`) on every build that has ops 9 and 10; each transport's own block names its own ids
+  (`0x8000`-`0x800A` line, `0x8010`-`0x8012` USB-direct, `0x8020`-`0x8022` S/PDIF).
+
+### 11.2 States
+
+`EXT_TIME_BASE` entry `state` and event `0xE4` `state`. Each transport maps its own state onto these:
+
+| Contract state | Meaning | Line (`EXT_ALINK_STATUS.state` / `EXT_ALINK_PHASE.state`) | USB-direct (`EXT_ALINK_USB_STATUS.state`) | S/PDIF (`EXT_ALINK_SPDIF_STATUS.state`) |
+|---|---|---|---|---|
+| 0 `NONE` | no usable time base | 0; or `EXT_ALINK_PHASE.mode` 0 (fill servo) | 0, 1, 3 (rate lock only) | mode 0; or the input is not S/PDIF |
+| 1 `ACQUIRING` | searching, pulling in, waiting for a superframe | 1 | 2 | the receiver locking, or waiting for a valid superframe |
+| 2 `ANCHORING` | drain, prefill, start, verify (muted) | 2 / 1 | 4 | anchoring (follower); outputs restarting (source) |
+| 3 `LOCKED` | T valid, play-out fixed, apply-at-T works | 2 / 2 | 5 | phase-locked (follower); outputs running in sync (source) |
+| 4 `HOLDOVER` | T extrapolated, muted, the timeline kept | 3 | 5 with STATUS flags bit 4 `HOLDOVER` | holdover (12.5) |
+| 5 `LOCK_ERROR` | configured to lock but cannot | 2 / 3 (re-anchor pending) | 6; or STATUS flags bit 6 `LOCK_ERROR` | no valid superframe in mode 1, D out of range, a rate it cannot lock at (12.5) |
+
+Only `LOCKED` carries a usable T: apply-at-T, the play-out guarantee of C2 and the invariant of C4 hold only there.
+In every other state `t` is the transport's own report (extrapolated in `HOLDOVER`, 0 where the transport has no T)
+and MUST NOT be scheduled on.
+
+### 11.3 Time base ids
+
+| Id | Time base | T |
+|---|---|---|
+| 0 | the line | the frame counter F (6.6) |
+| 1 | USB-direct | the sample index S (`extension_channel_spec.md` 2.9.1) |
+| 2 | USB-direct, bus-frame form | a bus frame plus a sample in it; only in `EXT_APPLY_AT_FRAME` writes (2.9.4), never listed in `EXT_TIME_BASE`, never used by op 9 |
+| 3 | S/PDIF | the source's frame counter F, carried in the user bits (section 12) |
+| 4 | reserved: ADAT | |
+| 5 | reserved: I2S / TDM | |
+| 6 | reserved: PTP / AES67 media clock | |
+| `0xFF` | none | |
+
+Ids are never reused for another meaning.
+
+### 11.4 The transports against the contract
+
+| Transport | T | How T reaches a follower | Broadcast op path | C1-C6 |
+|---|---|---|---|---|
+| line L1-L3, fan-out, repeater | F | superframe and head byte; re-emitted with `hops` (7.2) | the superframe (sender `EXT_ALINK_CTRL_MSG`) | C1-C3, C5 exist; C4's counter and `0xE4`, C6 added by WP FWTB1 |
+| USB-direct mode 2, 48 and 96 kHz | S | SOF count and the host rate | none; time base 2 gives the same bytes per unit | C1-C3, C5 exist; C4, C6 added by WP FWTB1 |
+| S/PDIF between DSPi units | F | the S/PDIF superframe in the user bits, one per IEC 60958 block (section 12) | the same superframe (source `EXT_ALINK_SPDIF_CTRL`) | new: WP FWSP1, WP FWSP2 |
+
+**No time base** (state `NONE`, single-unit work only; a host never schedules across them): **foreign S/PDIF** (any
+source that is not a DSPi source in mode 2, and any S/PDIF path through equipment that re-clocks or rewrites the user
+bits), **ADAT**, **I2S** (master or slave), **USB at 44.1 kHz** (no whole number of samples per bus frame), and **USB
+modes 0 and 1** (rate lock without a timeline). A unit fed by them may still be rate-locked; it has no T.
+
+### 11.5 Conformance checklist for a new transport
+
+A new transport (ADAT, I2S/TDM, PTP) is a time-base transport when its implementation passes, in host tests through
+the portable code, every check below. It then gets measurement, scenes and CLICK with no host change.
+
+1. **Counter continuity across a relock:** after a holdover that resumes, T continues as if nothing happened
+   (`RESUMED`); after a loss that ends the timeline, the next anchor places T by the received counter, never by a
+   local guess, and the disturbance counter counts both.
+2. **Apply at T on a split block:** an op whose T falls inside a processing block acts on exactly that sample, on
+   programme audio and on silence; op 9's generator sample 0 is the sample carried as T.
+3. **Late and refused:** an op whose T has passed is applied at once and reported `late`; op 9 is refused, never late.
+4. **Holdover:** a short loss of the carrier is ridden through on the extrapolated T (muted), and a return whose
+   counter does not confirm the extrapolation re-anchors (`REANCHOR`).
+5. **The disturbance counter:** every event listed in C4 increments it exactly once, and `t - output_frames` is
+   identical over 1000 atomic reads while `LOCKED` and undisturbed.
+6. **The domain id:** two units of one domain report equal `domain`; a source restart (new epoch, new origin) changes
+   it.
+7. **The states:** every transport state maps to exactly one contract state (11.2), and every transition sends one
+   `0xE4` (subject to the 250 ms merge).
+8. **Discovery:** `EXT_LIST` names `0x8030` and the transport's own block; `EXT_TIME_BASE` lists one entry per time
+   base the unit has, follower first.
+
+## 12. Carriage on S/PDIF
+
+*Normative (WP FWTB0, PLAN-AT section 1.2, OD-ATc, OD-ATs). The codec is WP FWSP1 (`firmware/DSPi/alink/
+alink_spdif_codec.{c,h}`, the Python twin `tools/alink/alink_spdif.py`, vectors `firmware/tests/
+alink_spdif_vectors.json`), the roles WP FWSP2 (`firmware/DSPi/alink_spdif.{c,h}`). The control plane is
+`extension_channel_spec.md` 2.10.*
+
+Between DSPi units the S/PDIF user bits are free: consumer equipment uses the channel-status bits, and the DSPi's own
+receiver already reads the raw subframe words that carry the user bit. A **source** (`EXT_ALINK_SPDIF.mode` 2) puts
+one **S/PDIF superframe** into the user bits of every IEC 60958 block it sends; a **follower** (mode 1) whose active
+input is S/PDIF reads it and phase-locks to it with the same servo as the line and USB-direct (`alink_phase`).
+
+### 12.1 Where the bits are
+
+- **The block:** 192 frames, both subframes, 384 subframes, starting at the subframe with the Z (B) preamble. One
+  superframe per block (`SPDIF_BLOCK_FRAMES` = 192, `SPDIF_USER_BITS` = 384).
+- **The order:** user bit i of the block is the U bit (IEC 60958 time slot 29; bit 29 of the DSPi's raw subframe word,
+  `SPDIF_input_spec.md` 5) of subframe i in transmission order: subframe 2k is channel A (left) of frame k, subframe
+  2k + 1 channel B (right). Bit i is **bit `i mod 8` of byte `i / 8`**, least significant bit first, the order the
+  firmware uses for the channel-status bits. The 384 bits are 48 bytes (`SPDIF_SUPERFRAME_LEN` = 48).
+- **The block's first frame** is the frame with `F mod 192 = 0` (12.3). The receiver identifies it by the Z preamble,
+  not by counting.
+
+### 12.2 Layout
+
+Bytes 0-31 are the line's superframe layout (6.1) with S/PDIF values; bytes 32-47 are padding.
+
+| Byte | Field | On S/PDIF |
+|---|---|---|
+| 0 | magic | `0xA5` |
+| 1 | version | 1 |
+| 2 | flags | b0 system mute; b2 apply pending (derived as on the line, 6.2); b3 the source has a live USB stream; b1, b4, b5, b6, b7 sent 0 (no RATE, no test pattern, no slaving on S/PDIF) and ignored by followers |
+| 3 | rate | rate code of the block: 0 = 44.1 kHz, 1 = 48 kHz, 2 = 96 kHz |
+| 4 | channels | 2 |
+| 5 | class | **`0x10`** (`SPDIF_CARRIER_CLASS`): S/PDIF carriage. Never a line class (1..3), so a line receiver can never accept an S/PDIF superframe, nor a follower a line one |
+| 6 | hops | 0 (reserved for the relay, PLAN-AT "Later"); ignored by followers in this version |
+| 7 | sender | the source's serial byte 0: the last byte of its unique board id (`pico_get_unique_board_id()`, byte 7), as the line's sender byte |
+| 8-15 | frame | F of the block's first frame, u64; **`F mod 192 = 0`** (replaces the line's mod-32 rule) |
+| 16-23 | apply_frame | apply target F, u64; 0 = none |
+| 24 | apply_op | 0 none, or one of **1 MUTE, 2 UNMUTE, 4 MASTER_VOLUME, 7 CLICK, 9 SIGGEN_START, 10 SIGGEN_STOP** (6.4); 3, 5, 6 and 8 are never carried on S/PDIF |
+| 25 | apply_arg | as 6.4 |
+| 26-27 | apply_value | i16, as 6.4 |
+| 28 | epoch | the source's epoch (12.3), u8, wraps |
+| 29 | sender2 | the source's serial byte 1: byte 6 of its unique board id |
+| 30-31 | crc | CRC-16/CCITT-FALSE over bytes 0-29, low byte first, as on the line (5.5) |
+| 32-47 | padding | sent 0, ignored |
+
+The source's **id** is the u16 `sender | sender2 << 8` (`EXT_ALINK_SPDIF_STATUS.source_id`, `EXT_TIME_BASE.domain`
+bytes 0-1).
+
+**Validity**, in this order (the codec returns the first failing check with the line's codes, 6.3): the CRC matches
+(1); magic is `0xA5` (2); version is 1 (3); `frame mod 192 = 0` (4); class is `0x10`, rate is 0..2 and channels is 2
+(5); `apply_op` is 0 or in the S/PDIF set {1, 2, 4, 7, 9, 10}, its `arg` and `value` within 6.4's table for that op,
+and `apply_op = 0` exactly when `apply_frame = 0` (6). The S/PDIF codec has its own allowed-op set; it does not take
+`ALINK_OP_MAX` from the line's codec. A follower adds the checks of 12.5 (rate, continuity, source and epoch).
+
+**Apply carriage:** a superframe carries the pending apply exactly when its block completes before the target,
+`frame + 192 <= N`. The source carries one broadcast apply at a time (`extension_channel_spec.md` 2.10.3).
+
+**Example** (the vector FWSP1 MUST include as `spdif_sf/typical`): a source with serial bytes 0-1 `0x42`, `0x37`,
+epoch 3, 48 kHz, the block at F = 960 000 (192 x 5000), carrying op 9 `SIGGEN_START` at N = 1 000 000. The CRC was
+computed with the line's reference `crc16()` (`tools/alink/alink_codec.py`, run in the alink tools container; the same
+run reproduces `sf/typical`'s `d7 47`):
+
+```
+a5 01 04 01 02 10 00 42  00 a6 0e 00 00 00 00 00  40 42 0f 00 00 00 00 00  09 00 00 00 03 37 a7 80
+00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00
+```
+
+The next block (F = 960 192) with no apply: `a5 01 00 01 02 10 00 42 c0 a6 0e 00 00 00 00 00`, 12 zero bytes,
+`03 37 90 dd`, then 16 zero bytes. The block's first 16 user bits, in subframe order (A0, B0, A1, B1, ...), are
+`1 0 1 0 0 1 0 1 1 0 0 0 0 0 0 0` (bytes `a5 01`, LSB first): frame 0 carries A = 1, B = 0.
+
+### 12.3 The source's counter and epochs
+
+- **F counts the frames the source's outputs play.** F of a frame is the output-frame position at which the source's
+  DAC outputs play it and its S/PDIF outputs emit it: all output slots start together
+  (`start_output_slots_in_sync`), so they share one frame index. The origin is set when the outputs start in sync
+  and is otherwise arbitrary, with one rule: **every IEC 60958 block the source emits starts at a frame with
+  `F mod 192 = 0`** (the transmit library's block phase is 0 at the synchronized start, so an origin that is a
+  multiple of 192 there meets it).
+- **Epochs.** Any output restart (preset load, rate change, pipeline reset, output-type switch, a flash write that
+  restarts the outputs, a USB mode-0 stream start, `usb_audio.c`) breaks the frame sequence. The source then starts a
+  new **epoch**: a new origin, byte 28 incremented (mod 256), a disturbance counted, `0xE4` reason 11 `EPOCH`; every
+  follower re-anchors (12.5). A source SHOULD therefore run USB-direct mode 2 or a non-USB input, whose timeline
+  survives stream restarts; on USB mode 0 every "play" is a new epoch.
+- **The source is a member of its own domain.** Its `EXT_TIME_BASE` lists a source entry (role 1, D = 0), and its
+  apply queue (`EXT_APPLY_AT_FRAME` time base 3) acts on the sample written at output position F.
+- **Which slots carry it.** Every S/PDIF-type output slot, or the slots in `EXT_ALINK_SPDIF.tx_mask`. A slot that does
+  not carry it, and every S/PDIF output of a unit not in mode 2, emits all-zero user bits, byte-identical to firmware
+  before WP FWSP1. Consumer equipment on a stamped output sees nonzero user bits, which IEC 60958 consumer devices
+  ignore; `tx_mask` leaves a slot unstamped where one does not.
+- **The source's time-base slots are never in a generator mask** (the hub refuses it, PLAN-AT S-AT6): followers would
+  receive the stimulus as programme.
+
+### 12.4 How the source emits it (transmit rules)
+
+Stamping is not monotonic: the 512-frame transmit ring (`SPDIF_TX_RING_FRAMES`, 2.7 blocks) is stamped up to one ring
+ahead by the silence pump (from the main loop, and from the 1 ms timer interrupt during a flash blackout), and the
+audio writer later overwrites the same frames. So:
+
+- **(a) A block's superframe is a function of its block index** `F / 192`. The source keeps a table of
+  `SPDIF_TX_TABLE_BLOCKS` = **4** entries keyed by block index (the blocks the ring can touch plus the block after),
+  read by both stampers, the silence stamp and the audio write, by the block index of the frame they stamp. There is
+  no current/next pair swapped at a boundary: a double buffer mixes two blocks' bits in one block and fails every
+  follower's CRC.
+- **(b) A block is frozen once any of its frames is stamped.** Its content, the apply field included, never changes
+  after that. The fill interface refuses an entry whose block is already (partly) stamped. A broadcast op therefore
+  enters only blocks not yet stamped, and the **shortest broadcast lead is the ring plus two blocks**,
+  `SPDIF_CTRL_MIN_LEAD_FRAMES` = 512 + 2 x 192 = **896 frames** (18.7 ms at 48 kHz) from the frame the source plays
+  now: the stamped frontier is at most 512 frames ahead of it, so the first block not yet stamped starts at most 703
+  frames ahead and completes at most 895 frames ahead, and a target 896 frames ahead is carried by at least one
+  complete superframe. `EXT_ALINK_SPDIF_CTRL` refuses a shorter lead (`extension_channel_spec.md` 2.10.3). A host
+  SHOULD give more (a lost block costs the followers that op): every 192 frames beyond 896 adds one carrying block.
+- **(c) Flash blackouts.** While flash is unavailable the RAM-resident stamper only reads the table; the flash-resident
+  source code keeps it filled four blocks ahead (about 16 ms at 48 kHz). A blackout that outruns the table emits
+  all-zero user bits for the blocks beyond it (an entry not yet filled stamps zeros), which the followers coast over
+  (d) and, past 8 blocks, hold over. A measurement never overlaps a flash write (the holdover is a disturbance).
+- **(d) The follower's coast rule.** A block whose superframe is missing or invalid (zero user bits, a failed check)
+  is ridden through on counter continuity: the follower takes F of that block as the previous F + 192, counts it in
+  `sf_errors`, and changes nothing else (no disturbance, no event, the timeline unmoved). After
+  `SPDIF_COAST_BLOCKS` = **8** consecutive such blocks it enters `HOLDOVER`. The next valid superframe must confirm
+  the continued F (equal to the coasted value, same source id and epoch); otherwise the follower re-anchors (reason 5
+  `REANCHOR`, or 11 `EPOCH` when the epoch or source changed).
+
+### 12.5 The follower
+
+- **Collection.** The receiver library's block interrupt already walks the 384 verified words of each block for sync,
+  parity and the channel-status bits, with the block's timestamp; it collects U alongside C and hands the 48 bytes and
+  the timestamp to the follower (WP FWSP1). Without a follower it costs nothing.
+- **Acceptance**, after 12.2's validity: the rate code equals the rate the receiver detected; the source id and epoch
+  equal the previous accepted superframe's (else a new domain: re-anchor, reason `EPOCH`); F equals the previous F +
+  192 (the coast rule, 12.4 d, covers gaps).
+- **Phase lock.** The same `alink_phase` servo as the line and USB-direct: `e = F_arr - (next_w - fill) - D`, with
+  `F_arr` (the F arriving now) from the receive DMA position against the block start, at subframe resolution (half a
+  frame), smoothed by the servo's IIR and PI as the line's quarter-frame output quantisation is. Anchor, verify,
+  whole-frame corrections, PI, holdover on loss (VCXO trim held, outputs on silence, T extrapolated), re-anchor
+  beyond 2 frames (`AUTO_REANCHOR`), relock placed by F. `d_min` and `d_max` are computed as on the line
+  (`extension_channel_spec.md` 2.8.1) plus the receiver's in-flight margin, and reported in
+  `EXT_ALINK_SPDIF_STATUS`; the hub chooses one D for the domain.
+- **Holdover** lasts at most 10 s (as USB-direct's); a return within it that confirms F resumes on the same timeline
+  (reason 4 `RESUMED`), anything else re-anchors. Beyond 10 s the time base ends (reason 2 `LOST`, state `ACQUIRING`).
+- **Lock error** (PLAN-AT OD-ATp): a follower in mode 1 whose receiver is locked to a stream but has seen no valid
+  superframe for 0.5 s (a foreign source; a DSP, AVR or switch in between that rewrites or re-clocks the user bits;
+  persistent CRC failures), or whose D is outside `d_min..d_max`, or that runs at a rate it cannot lock at, is
+  `LOCK_ERROR`. Its action is `EXT_ALINK_SPDIF.on_lock_error`, as on USB-direct: **0 mute** (the default) or **1 play
+  unaligned** (today's rate lock). Mode 0 stays the default, so a TV on S/PDIF is never muted by a forgotten setting.
+  The UI says "this S/PDIF source does not carry a DSPi time base".
+- **What carries it:** a direct wire (3.3 V logic between boards, common ground), coax through a transformer, TOSLINK
+  including passive optical splitters. Anything that re-clocks or rewrites the user bits does not.
+- **Builds.** RP2350 builds, the K340 included (`DSPI_ALINK_SPDIF`, on by default there). RP2040 builds have no
+  S/PDIF time base in this version (PLAN-AT OD-ATm). A source needs an S/PDIF-type output slot; a follower an S/PDIF
+  input (the K340's RX1 default is GP5).

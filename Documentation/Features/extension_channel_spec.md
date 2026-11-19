@@ -1,7 +1,7 @@
 # Extension Channel (`REQ_EXTENSION`, 0x00)
 
-*Last updated: 2026-11-18*
-*Status: implemented on the bofr fork, HW-untested; the alink block (2.8) is specified, not implemented*
+*Last updated: 2026-11-19*
+*Status: implemented on the bofr fork, HW-untested; the alink block (2.8) is specified, not implemented. The S/PDIF time-base block (2.10), the time-base block (2.11) and apply ops 9 and 10 are specified (WP FWTB0, PLAN-AT), not implemented*
 *Platforms: RP2040 + RP2350*
 
 The vendor opcode space is almost full, and features developed outside Weeb Labs should not claim opcodes that upstream may assign later. The extension channel puts all of them behind a single opcode, `0x00`, and selects the feature with `wValue`. The fork's owner is asking Weeb Labs to reserve `0x00` for this purpose.
@@ -45,14 +45,14 @@ IN replies are truncated to `wLength` like every other DSPi GET. On UART / I2C /
 |---|---|
 | `0x0000` | `EXT_LIST` (discovery) |
 | `0x0001`-`0x7FFF` | Features coordinated with Weeb Labs. Every assigned ID is listed in section 2. An ID is never reused for a different meaning. |
-| `0x8000`-`0x80FF` | This fork's private blocks, assigned by the fork; an ID is never reused for a different meaning. `0x8000`-`0x800F` the alink block (2.8), `0x8010`-`0x801F` the alink USB-direct block (2.9). Firmware without a block and stock firmware refuse its IDs. |
+| `0x8000`-`0x80FF` | This fork's private blocks, assigned by the fork; an ID is never reused for a different meaning. `0x8000`-`0x800F` the alink block (2.8), `0x8010`-`0x801F` the alink USB-direct block (2.9), `0x8020`-`0x802F` the S/PDIF time-base block (2.10), `0x8030`-`0x803F` the time-base and measurement block (2.11). Firmware without a block and stock firmware refuse its IDs. |
 | `0x8100`-`0xFFFF` | Experimental or private. Never shipped in a release build; hosts must not depend on them. |
 
 ### 1.3 Envelopes
 
 *Specified 2026-11-18 (WP FWPG0, PLAN-PG decision OD-PGc). The 1.1.7-generation envelope is not implemented yet: the tunnel is WP FWPG2, the legacy stack WP FWPG3, USB MIDI and the sender WP FWPG4, all on the port of this fork onto upstream 1.1.7. Upstream reference: `release/v1.1.7` at `103ba37` (`firmware/DSPi/vendor/`, `Documentation/Features/vendor_protocol_migration_guide.md`, cited below as "the guide").*
 
-An envelope is how a request reaches an extension sub-command: which `bRequest`, which `wIndex` and what a refusal looks like. The sub-commands themselves do not depend on it. **In every envelope the sub-command ID is `wValue`, the payloads and replies are byte-identical, `EXT_LIST` returns the same bytes, and the rules of section 2 apply unchanged.** That covers every assigned ID, `0x0000`-`0x0006` and `0x8000`-`0x8012`, and every ID assigned later. Ext notifications (`0xE0`-`0xE3`) and `EXT_NOTIFY_FEATURES` are not requests and are the same on every generation.
+An envelope is how a request reaches an extension sub-command: which `bRequest`, which `wIndex` and what a refusal looks like. The sub-commands themselves do not depend on it. **In every envelope the sub-command ID is `wValue`, the payloads and replies are byte-identical, `EXT_LIST` returns the same bytes, and the rules of section 2 apply unchanged.** That covers every assigned ID, `0x0000`-`0x0006`, `0x8000`-`0x8012`, `0x8020`-`0x8022` and `0x8030`-`0x8031`, and every ID assigned later. Ext notifications (`0xE0`-`0xE4`) and `EXT_NOTIFY_FEATURES` are not requests and are the same on every generation.
 
 The firmware generations and the envelopes each one has:
 
@@ -115,14 +115,14 @@ The tunnel refuses with upstream's result codes (`vc_ctrl.h`, guide 5.3): over U
 | Code | Name | When the tunnel answers it |
 |---|---|---|
 | `0x10` | `VC_ERR_UNKNOWN` | from the dispatcher, not the tunnel: page `0xE0` or command `0x10` is absent (stock 1.1.7, a build without the tunnel), or a command of page `0xE0` other than `0x10` |
-| `0x11` | `VC_ERR_DIRECTION` | the sub-command has no form for this direction: a SET of `EXT_LIST`, `EXT_NOTIFY_FEATURES`, `EXT_RESET_INFO`, `EXT_FIRMWARE_FIXES`, `EXT_ALINK_USB_STATUS`, or a direction a build does not have (2.8) |
+| `0x11` | `VC_ERR_DIRECTION` | the sub-command has no form for this direction: a SET of `EXT_LIST`, `EXT_NOTIFY_FEATURES`, `EXT_RESET_INFO`, `EXT_FIRMWARE_FIXES`, `EXT_ALINK_USB_STATUS`, `EXT_ALINK_SPDIF_STATUS`, `EXT_TIME_BASE`, `EXT_SIGGEN_TIMELINE`, or a direction a build does not have (2.8, 2.10) |
 | `0x12` | `VC_ERR_LENGTH` | a SET whose length is not the sub-command's exact length (and, from the dispatcher, a SET of 0 or more than 64 bytes) |
 | `0x13` | `VC_ERR_ADDRESS` | the sub-command ID (`wValue`) is not listed in `EXT_LIST`: unknown, private-experimental, or a block this build lacks (for example the alink IDs on a build without the alink). "The list is the contract" (2.1) holds: a host never sends an unlisted ID |
 | `0x14` | `VC_ERR_VALUE` | the handler rejects a payload field: an unknown op, a voltage outside the window or below the build default (2.3), a `tone_output` out of range, a nonzero reserved byte or undefined flag bit, an out-of-range mode, delay or slot. Any refusal not named in another row is this code |
-| `0x15` | `VC_ERR_UNSUPPORTED` | the value is valid but this build cannot do it: `tx_pin` on a build without `REPEATER`, `los_pin` without `LOS_PIN` (2.8.3) |
+| `0x15` | `VC_ERR_UNSUPPORTED` | the value is valid but this build cannot do it: `tx_pin` on a build without `REPEATER`, `los_pin` without `LOS_PIN` (2.8.3), `EXT_ALINK_SPDIF` mode 2 on a unit without an S/PDIF-type output slot (2.10.1) |
 | `0x16` | `VC_ERR_BLOCKED` | not allowed on this transport: `EXT_CORE_VREG` `SET` or `TRIAL` above 1.20 V off the USB vendor path (1.3.7) |
 | `0x17` | `VC_ERR_BUSY` | from the dispatcher only (1.3.2) |
-| `0x18` | `VC_ERR_STATE` | not allowed in the current state: an identify tone while the signal generator runs (2.5), an apply op while one is pending or the queue is full, an op that needs a lock without one, a rate or channel change while an apply is pending (2.8, 2.9) |
+| `0x18` | `VC_ERR_STATE` | not allowed in the current state: an identify tone while the signal generator runs (2.5), an apply op while one is pending or the queue is full, an op that needs a lock without one, a rate or channel change while an apply is pending (2.8, 2.9); op 9 `SIGGEN_START` with less than `arm_lead` of lead or while another op 9 is pending, a broadcast op with less than 896 frames of lead (2.8.7.1, 2.10.3) |
 | `0x19` | `VC_ERR_PIN_INVALID` | an alink pin that is neither `0xFF` nor a header GPIO, or two set pins that are equal (2.8.3) |
 | `0x1A` | `VC_ERR_PIN_IN_USE` | an alink pin the live configuration already uses for something else (2.8.3) |
 
@@ -194,8 +194,13 @@ The rules of 2.3 and `control_interfaces_spec.md` 1.2.2 (WP FWSEC1, OD-SECh) hol
 | `0x8010` | `EXT_ALINK_USB` | 8 bytes (2.9.2) | 8 bytes (2.9.2) |
 | `0x8011` | `EXT_ALINK_USB_STATUS` | 64 bytes (2.9.3) | none (STALL) |
 | `0x8012` | `EXT_ALINK_USB_DIAG` | 64 bytes (2.9.6) | 1 byte: 1 clears (2.9.6) |
+| `0x8020` | `EXT_ALINK_SPDIF` | 8 bytes (2.10.1) | 8 bytes (2.10.1) |
+| `0x8021` | `EXT_ALINK_SPDIF_STATUS` | 48 bytes (2.10.2) | none (STALL) |
+| `0x8022` | `EXT_ALINK_SPDIF_CTRL` | 16 bytes: the broadcast queue (2.10.3) | 16 bytes: one broadcast op, on a source (2.10.3) |
+| `0x8030` | `EXT_TIME_BASE` | 64 bytes (2.11.1) | none (STALL) |
+| `0x8031` | `EXT_SIGGEN_TIMELINE` | 40 bytes (2.11.2) | none (STALL) |
 
-Firmware without the alink and the alink USB-direct block answers `EXT_LIST` with `01 00 02 00 03 00 04 00 05 00 06 00`. An RP2040 build (USB-direct block, no alink) answers `01 00 02 00 03 00 04 00 05 00 06 00 05 80 06 80 10 80 11 80 12 80`.
+Firmware without the alink and the alink USB-direct block answers `EXT_LIST` with `01 00 02 00 03 00 04 00 05 00 06 00`. An RP2040 build (USB-direct block, no alink) answers `01 00 02 00 03 00 04 00 05 00 06 00 05 80 06 80 10 80 11 80 12 80`. From WP FWTB1 and WP FWSP2 on (PLAN-AT), an RP2350 build also lists `0x8030` and `0x8031` (2.11) and, with `DSPI_ALINK_SPDIF` (the K340 default), `0x8020`-`0x8022` (2.10); a K340 receiver build then lists 24 IDs (48 bytes), within the 32-ID limit of 2.1. RP2040 builds list none of them in this version (PLAN-AT OD-ATm): such a unit has no contract read and no timed generator, so it is measured on its own only.
 
 ### 2.1 `EXT_LIST` (0x0000)
 
@@ -263,7 +268,8 @@ IN only: a `uint32` (little-endian) of flags that describe how the firmware fill
 | 2 | `NOTIFY_FEAT_ALINK_STATE` | The device sends `NOTIFY_EVT_ALINK_STATE` (`0xE1`) on alink lock, loss and re-anchor (2.8.12). Set only by alink builds. |
 | 3 | `NOTIFY_FEAT_APPLY_RESULT` | The device sends `NOTIFY_EVT_APPLY_RESULT` (`0xE2`) for each completed apply-at-frame op (2.8.12). Set by receiver builds with `APPLY_AT_FRAME` and by builds with the alink USB-direct block (2.9.4). |
 | 4 | `NOTIFY_FEAT_ALINK_USB` | The device sends `NOTIFY_EVT_ALINK_USB` (`0xE3`) on alink USB-direct state changes (2.9.5). Set by builds with the alink USB-direct block. |
-| 5-31 | reserved | zero |
+| 5 | `NOTIFY_FEAT_TIME_BASE` | The device sends `NOTIFY_EVT_TIME_BASE` (`0xE4`) on every time-base contract transition, on every transport (2.11.3). Set by every build that lists `EXT_TIME_BASE` (`0x8030`). WP FWTB0 (specified), FWTB1 / FWSP2 (implemented). |
+| 6-31 | reserved | zero |
 
 A host that sees bit 0 can recognise its own bulk write from the source byte and drop the time-window echo heuristic it needs for older firmware.
 
@@ -413,7 +419,7 @@ IN only, 32 bytes. Says what the unit is and what its alink can do. The values a
 | 8 | 1 | `rx_pin` | GPIO in use for the alink input (`EXT_ALINK_CONFIG.rx_pin` resolved: the build default when that is `0xFF`), `0xFF` when the build has no input |
 | 9 | 1 | `tx_pin` | repeater output GPIO, `0xFF` none |
 | 10 | 2 | reserved | 0 |
-| 12 | 4 | `features` | bit 0 `PHASE_LOCK` (`EXT_ALINK_PHASE` mode 1), bit 1 `APPLY_AT_FRAME`, bit 2 `REPEATER`, bit 3 `FAN_OUT`, bit 4 `TEST_PATTERNS`, bit 5 `LOS_PIN`; bits 6-31 reserved, 0 |
+| 12 | 4 | `features` | bit 0 `PHASE_LOCK` (`EXT_ALINK_PHASE` mode 1), bit 1 `APPLY_AT_FRAME`, bit 2 `REPEATER`, bit 3 `FAN_OUT`, bit 4 `TEST_PATTERNS`, bit 5 `LOS_PIN`, bit 6 `SIGGEN_SYNC` (the build has apply ops 9 `SIGGEN_START` and 10 `SIGGEN_STOP`, 2.8.7.1, in `EXT_APPLY_AT_FRAME` and in the superframe; on a sender: `EXT_ALINK_CTRL_MSG` accepts them; WP FWTB1); bits 7-31 reserved, 0 |
 | 16 | 2 | `d_local_min` | receiver: the smallest effective `D_local` accepted under the current output latency option (SYS2 3.2). Sender: 0 |
 | 18 | 2 | `d_local_max` | receiver: the largest effective `D_local` the output rings can hold. Sender: 0 |
 | 20 | 12 | reserved | 0 |
@@ -526,15 +532,38 @@ Receivers only. **OUT**, 16 bytes, queues one operation for alink frame `frame`:
 | 6 | `RATE` | refused here: a receiver follows the rate its superframes describe (`alink_protocol_spec.md` 6.5). Only the sender schedules RATE (2.8.8, 2.8.9) | |
 | 7 | `CLICK` | output index | 0: a one-sample impulse at -20 dBFS on that output, for the scope and the skew measurement (SYS2 3.5). A unit that is muted (`REQ_SET_USER_MUTE`, or a stream with the superframe's system-mute flag) plays none and reports `refused` (3) |
 | 8 | `SYNC_PULSE` | 0 | 0: toggles the unit's sync GPIO |
+| 9 | `SIGGEN_START` | 0 | 0: the generator's sample 0 is the sample of frame `frame`; starts the staged `SiggenConfig`. Never late (2.8.7.1). Builds with `EXT_ALINK_INFO.features` bit 6 `SIGGEN_SYNC` (or `EXT_SIGGEN_TIMELINE` listed) only |
+| 10 | `SIGGEN_STOP` | 0 fade, 1 now | 0: as `SIGGEN_CTL_STOP` (arg 0) or `SIGGEN_CTL_STOP_NOW` (arg 1) at that sample (2.8.7.1). Same builds as op 9 |
 
 - **When.** The op acts on the samples of alink frame `frame`, so it is heard `D_local` frames after that frame arrives, at the same moment on every phase-locked unit. `MUTE`, `UNMUTE`, `MASTER_VOLUME` and `CLICK` act on exactly that sample. `PRESET_LOAD` and `OUT_DELAY` start there and then proceed as their opcodes do (mute, ramp, refill). A `RATE` that arrives in the superframe is not an op of this queue: the receiver switches its layout at the frame boundary (`alink_protocol_spec.md` 6.5) and re-plans its dividers as `perform_rate_change` does.
-- **Queue.** At most 4 ops are pending. An op whose frame has already passed is applied at once and reported `late`.
+- **Queue.** At most 4 ops are pending. An op whose frame has already passed is applied at once and reported `late`, except op 9, which is refused (2.8.7.1).
 - **Refused (STALL / `ERROR`):** an unknown `op`, op 6 `RATE`, an `arg` or `value` outside the table (unused fields must be 0), a nonzero reserved byte, a full queue, or `EXT_ALINK_STATUS.state` other than 2 (without a lock there is no F). `CANCEL_ALL` is accepted in any state.
 - **Two delivery paths.** Ops that should reach every unit (and `RATE`, which only exists there) go through the sender's superframe (`EXT_ALINK_CTRL_MSG` OUT on the sender), which has no control-path latency. This sub-command is the per-unit path for values that differ between units.
 
 **IN**, 16 bytes: `u8 pending` (ops queued), `u8 last_op`, `u8 last_result` (0 applied, 1 late, 2 cancelled, 3 refused at apply time, for example an empty preset slot), `u8` reserved, `u64 last_frame` (the target frame of the last op), `u32` reserved. All zero until the first op completes.
 
 Example: MASTER_VOLUME -20 dB at frame 1 002 400: `a0 4b 0f 00 00 00 00 00 04 00 30 f8 00 00 00 00`. Once it has been applied, IN reads `00 04 00 00 a0 4b 0f 00 00 00 00 00 00 00 00 00`.
+
+##### 2.8.7.1 Ops 9 `SIGGEN_START` and 10 `SIGGEN_STOP`
+
+*Specified by WP FWTB0 (PLAN-AT section 1.3, OD-ATe, review R3-R5); implemented by WP FWTB1 (line, USB-direct) and WP FWSP2 (S/PDIF). The generator side is `test_signals_spec.md` section 15.*
+
+The two ops start and stop the unit's own test signal generator on a sample of its time base, so several units' generators start on samples of one shared counter (`alink_protocol_spec.md` section 11). They exist on every time base a build has: the line (`time_base` 0), USB-direct (1; never 2 for op 9, below), S/PDIF (3, 2.10), and in the line's and the S/PDIF superframe. Where they differ from ops 1-8:
+
+- **Arming.** The unit arms a pending op 9 at `T - arm_lead`, with `arm_lead = max(hold_ms, release_ms) + 50 ms` of the DAC hardware mute (150 ms on the K340), reported in `EXT_SIGGEN_TIMELINE.arm_lead_ms` (2.11.2). From then on the generator "wants output": it opens an idle DAC hold through the FWSIGGEN override and waits the DAC's un-mute ramp (`test_signals_spec.md` 9.3), so its first sample at T is not attenuated. A write whose T is less than `arm_lead` ahead of the sample entering the pipeline now is **refused at the write** (STALL / `ERROR`; `VC_ERR_STATE` on the tunnel).
+- **One at a time.** At most one op 9 is pending (queued or armed) per unit; a second op 9 while one is pending is refused at the write (`VC_ERR_STATE`). It occupies one of the 4 queue entries.
+- **Preconditions** (review R4). Op 9 completes `refused` (3), `EXT_SIGGEN_TIMELINE.last_result` 3 `REFUSED_NOT_READY`, unless (a) the staged `SiggenConfig` is **finite**: a sweep (`SWEEP_LOG`, `SWEEP_LIN`, `SWEEP_STEP`) or pattern type with `repeat` at least 1, never a continuous type, never `SIGGEN_FLAG_RAW`; and (b) it was written by `REQ_SIGGEN_SET_CONFIG` (0xA4) **since the last of**: boot, `SIGGEN_CTL_STOP` / `STOP_NOW`, an applied op 10, a `CANCEL_ALL` of any time base, a preset load, a loss (below). They are checked when the op arms and again at T; a failure at either completes the op at that moment, without arming the DAC (or giving it back, below). So a stale or unbounded config can never start, and a host's abort or close disarms every later START. The rules hold on both paths, per unit and broadcast.
+- **Never late.** If T has passed when the op comes due, it completes `refused` (3), `last_result` 2 `REFUSED_LATE`. If the output is not ready at T (the DAC still held, the unit muted by `REQ_SET_USER_MUTE` or by a system-mute flag, the time base not `LOCKED`, the preconditions not met), it completes `refused` (3), `last_result` 3 `REFUSED_NOT_READY`. The generator does not start in either case. `late` (1) is never reported for op 9. **A late op 10 is applied at once** (it is a stop) and reported `late` (1), like ops 1-8.
+- **No bus-frame form** (review R5). Op 9 with `time_base` 2 is refused at the write (`VC_ERR_VALUE`): a bus frame older than 64 frames would be taken as its next occurrence, 2.048 s later. A host writes op 9 on USB as S (`time_base` 1). Op 10 may use the bus-frame form.
+- **A loss cancels and stops** (review R3). A pending op 9 is cancelled when its time base leaves `LOCKED` (`0xE2` result 2 `cancelled`, `last_result` 4 `CANCELLED_LOSS`). **A generator started by op 9 is stopped, as by `STOP_NOW` (the unit's own loss mute fades the output), when its time base leaves `LOCKED`**, on every transport (`last_result` 7 `STOPPED_LOSS`, a discontinuity counted). This matters on USB-direct, where FWSIGGEN exempts a playing generator from the out-of-step soft mute and overrides the idle hold, so "muted with the unit" would not hold there. A generator started by a plain `SIGGEN_CTL_START` keeps today's behaviour.
+- **The DAC is given back** (review R3). When an armed op 9 is cancelled or completes `refused`, `siggen_wants_output()` is false at once and the FWSIGGEN override closes after its normal tail: the out-of-step soft mute is refreshed and an idle hold drives the pin again.
+- **Other cancels.** A `REQ_SIGGEN_SET_CONFIG` while op 9 is pending cancels it (`last_result` 5 `CANCELLED_CONFIG`): what starts at T is what was staged when the op was written. `SIGGEN_CTL_STOP`, `STOP_NOW` and `CANCEL_ALL` cancel it too (`last_result` 6 `CANCELLED_HOST`). An applied op 10 clears condition (b), so an op 9 still pending behind it completes `refused` at T (`REFUSED_NOT_READY`).
+- **Arguments.** Op 9: `arg` 0, `value` 0. Op 10: `arg` 0 (fade) or 1 (now), `value` 0. Anything else is refused at the write (`VC_ERR_VALUE`), as is either op on a build without them (an unknown op).
+- **Results** (`0xE2`, `EXT_APPLY_AT_FRAME` IN): op 9 completes 0 `applied` (the generator started on its sample), 2 `cancelled` or 3 `refused`; op 10 completes 0 `applied` or 1 `late`. `EXT_SIGGEN_TIMELINE` (2.11.2) says why and where.
+- **Broadcast.** Ops 9 and 10 may travel in the line's superframe (`alink_protocol_spec.md` 6.4) and in the S/PDIF superframe (2.10.3). A unit whose preconditions are not met refuses a broadcast op 9 and stays silent; a unit that first sees a broadcast op 9 less than `arm_lead` before its T completes it `refused` (`REFUSED_NOT_READY`). A host sends op 9 or 10 in a superframe only when every unit of the domain has the ops (`SIGGEN_SYNC`, or `EXT_SIGGEN_TIMELINE` listed): a receiver without them rejects the whole superframe. PLAN-AT's hub broadcasts only op 10 (its abort), never op 9.
+- **A plain `SIGGEN_CTL_START` is stamped too.** While a time base is `LOCKED`, `EXT_SIGGEN_TIMELINE.start` records the T of the generator's sample 0, so a single unit's run is on its time base as well.
+
+Example: op 9 on the USB time base at S = 80 012 000 (`time_base` 1): `e0 e2 c4 04 00 00 00 00 09 00 00 00 01 00 00 00`. When it has started, `0xE2` reads `02 e2 00 <seq> 09 00 00 00 64 07 20 00` (bus form, 2.9.4: bus frame 1892, sample 32) and `EXT_SIGGEN_TIMELINE` (2.11.2) shows `start` = 80 012 000.
 
 #### 2.8.8 `EXT_ALINK_TX` (0x8007)
 
@@ -567,7 +596,7 @@ Sender builds only. IN / OUT, 16 bytes.
 - **Carriage.** The op travels in superframe bytes 16-27 of every superframe that *completes* before the target, that is when `superframe start + 32 <= frame`. The pending apply ends once the sender's F reaches `frame`.
 - **Lead.** `frame` must be at least `next superframe start + 32`, so that at least one full superframe carries it, where the next superframe start is the sender's current F rounded up to a multiple of 32. Use far more lead in practice (SYS2 3.3 uses 2400 frames) so that one or two corrupted superframes cost nothing.
 - **One at a time.** While an apply is pending, a second one is refused. It is not replaced, and there is no cancel. Op 0 ("none") schedules nothing: the write only sets `system_flags` and leaves a pending apply alone.
-- **Ops.** 1-5, 7 and 8 take the arguments of 2.8.7. Op 6 `RATE`: `arg` = the new rate code, `value` must be 0 (hosts change only the rate; the sender fills in C itself when `EXT_ALINK_TX.channels` changes), `frame` must be a multiple of 32, and the current C must fit the new rate (`alink_max_channels(class, arg)`).
+- **Ops.** 1-5, 7 and 8 take the arguments of 2.8.7; 9 `SIGGEN_START` and 10 `SIGGEN_STOP` too, on a sender build with `SIGGEN_SYNC` (2.8.1; the sender has no generator and only carries them, under the rules of 2.8.7.1; a host broadcasts them only when every receiver lists `SIGGEN_SYNC`). Op 6 `RATE`: `arg` = the new rate code, `value` must be 0 (hosts change only the rate; the sender fills in C itself when `EXT_ALINK_TX.channels` changes), `frame` must be a multiple of 32, and the current C must fit the new rate (`alink_max_channels(class, arg)`).
 - **Refused (STALL / `ERROR`):** an unknown op, arguments outside those rules, too little lead, a RATE off a superframe boundary or one that does not fit, a pending apply, undefined `system_flags` bits or a nonzero reserved byte. The sender needs no lock.
 
 **IN** (every build), 24 bytes. On a receiver it is a snapshot of the last valid superframe received. On a sender it is the superframe content it is sending now, so a pending apply shows here as soon as it is accepted, and bytes 16-27 read 0 once the apply has ended:
@@ -643,7 +672,7 @@ Example: `02 e1 00 00 02 01 01 00 40 42 0f 00`: locked on L1, reason `LOCKED`, F
 | 6 | 2 | reserved 0 |
 | 8 | 4 | the op's *target* frame, low 32 bits (u32 LE), so the host can match the event to its request |
 
-One event per op that was applied, applied late, cancelled or refused, whether it came through `EXT_APPLY_AT_FRAME` or the superframe. The queue holds at most 4 ops and every op costs the host one write, so these events cannot storm and are not rate-limited. If the notification ring is full, `EXT_APPLY_AT_FRAME` IN still shows the last result.
+One event per op that was applied, applied late, cancelled or refused, whether it came through `EXT_APPLY_AT_FRAME` or the superframe. For op 9 the result is never 1 `late` (2.8.7.1); for an op on the S/PDIF time base (3) bytes 8-11 carry the target F, low 32 bits (2.10.4). The queue holds at most 4 ops and every op costs the host one write, so these events cannot storm and are not rate-limited. If the notification ring is full, `EXT_APPLY_AT_FRAME` IN still shows the last result.
 
 Example: `02 e2 00 01 04 00 00 00 a0 4b 0f 00`: MASTER_VOLUME applied at frame 1 002 400.
 
@@ -761,10 +790,11 @@ The USB time base answers when the input source is USB and `EXT_ALINK_USB.mode` 
 | 0 | alink frame F (2.8.7) |
 | 1 | USB sample index S, as `EXT_FRAME_COUNTER` time base 1 and `EXT_ALINK_USB_STATUS.sample` report it |
 | 2 | a bus frame: bits 0-10 the bus frame number, bits 16-23 the sample in that frame (0..spf-1), every other bit 0. The unit takes the next occurrence of that frame; a frame within the last 64 frames is past (the op runs at once and reports `late`). So the same 8 bytes address the same instant on every unit of the host, with no read first, for up to 1.98 s ahead |
+| 3 | the S/PDIF frame counter F (2.10.4; WP FWSP2) |
 
 - **Late.** An op runs when the timeline reaches its sample. If that sample has already been written to the output rings (S below the next sample to write, which is about one frame behind the arrival because of the held packet), it runs at once on the next samples written and reports `late` (1); this includes a bus frame that maps to the past 64 frames. An op for a sample of the held packet is not late.
-- Ops, arguments, the 4-deep queue, CLICK at -20 dBFS and never on a muted unit (here: `REQ_SET_USER_MUTE` or the host's UAC mute), `CANCEL_ALL`, and the results are those of 2.8.7. An op acts on the sample S as it enters the pipeline, and every phase-locked unit with the same D outputs that sample at the same instant, D samples after it arrived. Ops also act on the silence of the timeline (no stream needed: a CLICK measures the units' skew without any programme).
-- **Refused (STALL / `ERROR`):** `time_base` 1 or 2 unless the input source is USB and `EXT_ALINK_USB_STATUS.phase_state` is 2 or 3 (phase-locked); a bad bus-frame form (bits outside 0-10 and 16-23, or a sample offset of spf or more); `time_base` above 2; everything 2.8.7 refuses. `CANCEL_ALL` with `time_base` 1 or 2 cancels the USB queue in any state.
+- Ops, arguments, the 4-deep queue, CLICK at -20 dBFS and never on a muted unit (here: `REQ_SET_USER_MUTE` or the host's UAC mute), `CANCEL_ALL`, and the results are those of 2.8.7. An op acts on the sample S as it enters the pipeline, and every phase-locked unit with the same D outputs that sample at the same instant, D samples after it arrived. Ops also act on the silence of the timeline (no stream needed: a CLICK measures the units' skew without any programme). Ops 9 and 10 follow 2.8.7.1 on this time base: op 9 by S only, never late, armed `arm_lead` ahead, cancelled by a timeline end and stopping the generator it started when the unit leaves phase lock (state 5).
+- **Refused (STALL / `ERROR`):** `time_base` 1 or 2 unless the input source is USB and `EXT_ALINK_USB_STATUS.phase_state` is 2 or 3 (phase-locked); a bad bus-frame form (bits outside 0-10 and 16-23, or a sample offset of spf or more); op 9 with `time_base` 2 (2.8.7.1); `time_base` 3 unless the unit's S/PDIF time base is `LOCKED` (2.10.4); `time_base` above 3; everything 2.8.7 refuses. `CANCEL_ALL` with `time_base` 1 or 2 cancels the USB queue in any state.
 - **`CLICK`** is refused at apply time (result 3) on the RP2040, whose fixed-point pipeline has no click injection, and on the PDM sub output.
 - **`SYNC_PULSE`** is refused at apply time (result 3) except on bench builds (one pending pulse: a later SYNC_PULSE moves the GPIO's frame) with `-DDSPI_ALINK_USB_GPIO=<pin>`, where the pin goes high for one frame at the SOF of the op's frame (frame = S / spf; the pin also pulses at every SOF whose frame number is a multiple of 128). Such builds are for the bench only.
 - **IN** reads the USB queue's `pending`, `last_op`, `last_result`, `last_frame` (S) while the USB time base answers (as `EXT_FRAME_COUNTER`), the alink's otherwise.
@@ -828,6 +858,185 @@ Reading it after an event tells the causes apart: a host suspend or reset shows 
 5. After every stream start read each unit's `stream_first_bus_frame`, `stream_age_frames` and `stream_shift` and equalise (2.9.3), unless the sender schedules the frames itself.
 6. Use `EXT_APPLY_AT_FRAME` time base 2 for ops that must land together on every unit (one write per unit, same 16 bytes).
 
+### 2.10 S/PDIF time-base block (`0x8020`-`0x802F`)
+
+*Specified 2026-11-19 (WP FWTB0, PLAN-AT section 1.2, OD-ATc, OD-ATd, OD-ATp, OD-ATs, review R2); implemented by WP FWSP1 (the carriage) and WP FWSP2 (the roles). Not implemented yet. The carriage (where the bits are, the 48-byte S/PDIF superframe, the transmit rules, the follower's coast rule) is normative in `alink_protocol_spec.md` section 12; this section is its control plane.*
+
+S/PDIF between DSPi units is an alink time-base transport (`alink_protocol_spec.md` section 11, time base 3). A **source** stamps its own frame counter F into the user bits of its S/PDIF outputs, one superframe per 192-frame block; a **follower** whose active input is S/PDIF phase-locks to it and plays the sample carried as F exactly D samples after it arrived. Foreign S/PDIF (any other source, or a path that re-clocks or rewrites the user bits) has no time base: the follower reports `LOCK_ERROR` and the stream is rate-locked only, as today.
+
+- **Opt-in.** `EXT_ALINK_SPDIF.mode` is 0 by default. In mode 0 nothing a host can see changes: the S/PDIF input is today's (rate lock, `SPDIF_input_spec.md`), every S/PDIF output emits all-zero user bits, no time-base entry, no events.
+- **Discovery.** A host uses this block when `EXT_LIST` names `0x8020`: RP2350 builds with `DSPI_ALINK_SPDIF` (the K340 default). Such builds also list `0x8030` and `0x8031` (2.11). RP2040 builds and stock firmware refuse every ID here.
+- **Rules of 2.8 apply.** Little-endian, packed, normative offsets; IN replies truncated to `wLength` and only ever extended at the end; reserved fields read 0 and must be 0 on OUT; IN-only fields ignored on OUT; a refused write changes nothing; no `PARAM_CHANGED`; admin-only on the hub. Both envelopes (1.3): `REQ_EXTENSION` 0x00 on the 1.1.6 generation, the tunnel `0xE010` with the same `wValue` and bytes on the 1.1.7 generation; refusals STALL / `ERROR` on page 0 and the `VC_ERR_*` code named below on the tunnel.
+- **Persistence.** `EXT_ALINK_SPDIF` takes effect at once and is saved by `REQ_SAVE_OUTPUT_CONFIG` (`0x52`) next to the other alink blocks (WP FWSP2 assigns the directory block); not in presets or bulk parameters; preset loads and factory resets of the DSP settings do not touch it. A directory saved by older firmware reads as mode 0.
+- **One role per unit** in this version: mode 1 or mode 2. Mode 3 (relay: a follower or a USB-direct unit re-emitting its upstream T on S/PDIF) is reserved (PLAN-AT "Later") and refused.
+
+#### 2.10.1 `EXT_ALINK_SPDIF` (0x8020)
+
+IN / OUT, 8 bytes.
+
+| Offset | Size | Field | Meaning | Default |
+|---|---|---|---|---|
+| 0 | 1 | `mode` | 0 off (stock S/PDIF), 1 follower (follow the time base on the active S/PDIF input), 2 source (stamp the unit's own counter on its S/PDIF outputs) | 0 |
+| 1 | 1 | `flags` | bit 0 `AUTO_REANCHOR` (follower: a phase error beyond 2 frames re-anchors; clear: lock error "pending" while the servo pulls it in, as USB-direct); bits 1-7 reserved, 0 | `0x01` |
+| 2 | 2 | `d` | u16, follower: samples from the arrival of the sample carried as F to its output; the same on every follower of one domain that should play aligned. kept but not used by a source, which plays with D = 0 by definition | 192 |
+| 4 | 1 | `on_lock_error` | follower: what mode 1 does in lock error (`alink_protocol_spec.md` 12.5): 0 mute, 1 play unaligned (rate lock) | 0 |
+| 5 | 1 | reserved | 0 | 0 |
+| 6 | 1 | `tx_mask` | source: which output slots carry the superframe, bit n = S/PDIF output slot n; 0 = every S/PDIF-type slot. Follower and mode 0: 0 | 0 |
+| 7 | 1 | `state` | *IN only*: the contract state of this role (`alink_protocol_spec.md` 11.2), as `EXT_ALINK_SPDIF_STATUS.state` | |
+
+- **Refused** (STALL / `ERROR`): `mode` above 2 (`VC_ERR_VALUE`), undefined flag bits or a nonzero reserved byte (`VC_ERR_VALUE`), mode 1 with `d` outside `d_min..d_max` (`EXT_ALINK_SPDIF_STATUS` 24-27, for the detected rate, or 48 kHz while no stream is detected) at the time of the write (`VC_ERR_VALUE`), mode 2 with a `tx_mask` bit that is not an S/PDIF-type slot (`VC_ERR_VALUE`), mode 2 on a unit without an S/PDIF-type output slot (`VC_ERR_UNSUPPORTED`).
+- **Follower only while S/PDIF is the source.** Mode 1 acts while the input source is an S/PDIF input (1, 4, 5 or 6); with any other source the follower role reads `NONE` and the input behaves as that source does. A source (mode 2) works with every input.
+- **Changes.** A write that changes `mode` or `d` while locked re-anchors (a follower: about D + 20 ms of silence, `0xE4` reason `REANCHOR`); mode 0 cancels the pending ops of time base 3 (`0xE2` `cancelled`) and sends one `0xE4` reason 7 `DISABLED`. Any output restart of a source starts a new epoch (`alink_protocol_spec.md` 12.3), and its followers re-anchor; leaving mode 2 ends the time base at its followers (they coast, hold over, then lose it, 12.4 d, 12.5). Rewriting the same values does nothing.
+
+Examples: follower, automatic re-anchor, D 192, mute on lock error, locked: `01 01 c0 00 00 00 00 03`. Source on slot 0 only, outputs running: `02 01 00 00 00 00 01 03`.
+
+#### 2.10.2 `EXT_ALINK_SPDIF_STATUS` (0x8021)
+
+IN only, 48 bytes. On a follower it describes the received time base; on a source (mode 2) the one it emits: the follower-only fields (`phase_state`, `phase_error`, `d_min`, `d_max`, `sf_errors`, `reanchors`) read 0, and `lock_count` and `loss_count` count its epochs' starts and ends.
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 1 | `state` | the contract state (`alink_protocol_spec.md` 11.2): 0 `NONE`, 1 `ACQUIRING`, 2 `ANCHORING`, 3 `LOCKED`, 4 `HOLDOVER`, 5 `LOCK_ERROR` |
+| 1 | 1 | `phase_state` | follower: as `EXT_ALINK_PHASE.state`: 0 free, 1 anchoring, 2 locked, 3 re-anchor pending (`AUTO_REANCHOR` clear) |
+| 2 | 1 | `rate_code` | 0 = 44.1 kHz, 1 = 48 kHz, 2 = 96 kHz, `0xFF` unknown or other |
+| 3 | 1 | `flags` | bit 0 `SUPERFRAME` (a valid superframe accepted within the last 8 blocks), bit 1 `TIME_BASE` (a usable time base: `LOCKED` or `HOLDOVER`), bit 2 `HOLDOVER`, bit 3 `LOCK_ERROR`, bit 4 `SOURCE` (mode 2), bit 5 `FOREIGN` (the receiver is locked to a stream that carries no valid superframe); bits 6-7 0 |
+| 4 | 2 | `source_id` | u16: the source's serial bytes 0-1 (superframe bytes 7 and 29, `alink_protocol_spec.md` 12.2); a source reports its own; 0 while unknown |
+| 6 | 1 | `epoch` | the source's epoch (superframe byte 28); a source reports its own |
+| 7 | 1 | reserved | 0 |
+| 8 | 8 | `frame` | u64, F now: on a follower the F arriving now (extrapolated in `HOLDOVER`), on a source the F its outputs play now; 0 without a time base |
+| 16 | 4 | `phase_error` | f32, e in samples; 0 unless `phase_state` is 2 or 3 |
+| 20 | 4 | `vcxo_ppm` | f32, the soft VCXO's correction |
+| 24 | 2 | `d_min` | the smallest D the follower accepts at this rate and output latency option (2.8.1's rule plus the receiver's in-flight margin) |
+| 26 | 2 | `d_max` | the largest D the output rings can hold |
+| 28 | 2 | `fill` | output ring fill of slot 0, samples |
+| 30 | 2 | reserved | 0 |
+| 32 | 4 | `lock_count` | entries into `LOCKED` |
+| 36 | 4 | `loss_count` | transitions out of `LOCKED` (to `HOLDOVER`, `ACQUIRING`, `LOCK_ERROR`) |
+| 40 | 4 | `sf_errors` | blocks without a valid superframe while locked or in holdover: coasted blocks (`alink_protocol_spec.md` 12.4 d) and rejected superframes (any failed check of 12.2 or 12.5) |
+| 44 | 4 | `reanchors` | re-anchors (phase error, new D or mode, an epoch or source change, a return that broke continuity) |
+
+The counters run from boot and wrap at 2^32.
+
+Example (a locked follower; `d_min`, `d_max` and `fill` illustrative): `03 02 01 03 42 37 03 00 00 a6 0e 00 00 00 00 00 00 00 80 3e 00 00 48 41 96 00 8f 01 60 00 00 00 02 00 00 00 01 00 00 00 05 00 00 00 01 00 00 00`: locked, phase-locked, 48 kHz, superframe and time base, source `0x3742` epoch 3, F = 960 000, phase error 0.25, VCXO +12.5 ppm, D 150..399, fill 96, 2 locks, 1 loss, 5 superframe errors, 1 re-anchor.
+
+#### 2.10.3 `EXT_ALINK_SPDIF_CTRL` (0x8022): the broadcast
+
+On a source (mode 2). **OUT**, 16 bytes, the `EXT_APPLY_AT_FRAME` layout (2.8.7) with byte 12 `time_base` = 3: one op carried in the S/PDIF superframe to every follower and applied by the source itself at the same F (on the sample written at output position F).
+
+- **Ops:** 1 `MUTE`, 2 `UNMUTE`, 4 `MASTER_VOLUME`, 7 `CLICK`, 9 `SIGGEN_START`, 10 `SIGGEN_STOP`, with 2.8.7's arguments and 2.8.7.1's rules. 3, 5, 6 and 8 are never carried on S/PDIF and are refused (`VC_ERR_VALUE`), as is op 0 `CANCEL_ALL`: a stamped broadcast cannot be taken back (each unit's own queue is cancelled through `EXT_APPLY_AT_FRAME` time base 3).
+- **Lead** (review R2b). `frame` must be at least `SPDIF_CTRL_MIN_LEAD_FRAMES` = **896 frames** (the 512-frame transmit ring plus two blocks, 18.7 ms at 48 kHz) after the frame the source plays now; a shorter lead is refused (`VC_ERR_STATE`). That guarantees at least one complete carrying superframe (`alink_protocol_spec.md` 12.4 b); each further 192 frames adds one, and a host SHOULD give several so that a lost block costs nothing. Op 9 additionally needs the followers' `arm_lead` (2.8.7.1).
+- **One at a time.** The superframe carries one apply; while a broadcast is pending a second one is refused (`VC_ERR_STATE`). The broadcast ends once the source's F reaches `frame`.
+- **Refused** also: `time_base` other than 3, a nonzero reserved byte, a unit not in mode 2 or whose source entry is not `LOCKED` (`VC_ERR_STATE`).
+- **When the hub broadcasts.** PLAN-AT's hub uses it only for op 10 `SIGGEN_STOP` (its abort without control latency), and only when **every unit of the domain has the ops** (`EXT_SIGGEN_TIMELINE` listed): a follower without them rejects the whole superframe (it coasts over it, 12.4 d), so the stop would not reach it.
+
+**IN**, 16 bytes, the broadcast queue in the `EXT_APPLY_AT_FRAME` IN layout: `u8 pending` (0 or 1), `u8 last_op`, `u8 last_result` (the source's own result: 0 applied, 1 late, 2 cancelled, 3 refused), `u8` reserved, `u64 last_frame`, `u32` reserved. A follower reads all zero.
+
+Example: a broadcast `SIGGEN_STOP` now at F = 1 000 000: `40 42 0f 00 00 00 00 00 0a 01 00 00 03 00 00 00`. Once applied, IN reads `00 0a 00 00 40 42 0f 00 00 00 00 00 00 00 00 00`.
+
+#### 2.10.4 `EXT_APPLY_AT_FRAME` (0x8006) on the S/PDIF time base
+
+`time_base` 3 (byte 12) addresses the S/PDIF frame counter F. Ops, arguments, the 4-deep queue, `CANCEL_ALL` and the results are those of 2.8.7 and 2.8.7.1.
+
+- **Follower:** an op acts on the sample carried as F as it enters the pipeline, so every locked follower with the same D outputs it at the same instant, D samples after it arrived. **Source:** an op acts on the sample written at output position F, D = 0.
+- **Late.** An op whose F has already been written to the output rings runs at once on the next samples written and reports `late` (op 9: refused, 2.8.7.1).
+- **Refused** (STALL / `ERROR`): `time_base` 3 unless the unit's S/PDIF entry is `LOCKED` (a follower phase-locked, or a source with its outputs running; `VC_ERR_STATE`), everything 2.8.7 refuses. `CANCEL_ALL` with `time_base` 3 cancels the S/PDIF queue in any state.
+- **IN** reads the S/PDIF queue when `EXT_FRAME_COUNTER` answers `time_base` `0xFF` (the unit has neither an alink nor a USB time base) and the unit has an S/PDIF role; otherwise the queue 2.8.7 and 2.9.4 name. `EXT_FRAME_COUNTER` itself is unchanged: it never answers time base 3; the S/PDIF T is read through `EXT_TIME_BASE` (2.11.1).
+- **Event `0xE2`** for an op of time base 3 carries the target F, low 32 bits, in bytes 8-11.
+
+#### 2.10.5 Host recipe
+
+1. `EXT_LIST`: `0x8020` present on every unit. Read `EXT_NOTIFY_FEATURES` (decode `0xE4` only with bit 5).
+2. The source: an S/PDIF-type output slot wired to each follower's S/PDIF input (direct, coax or TOSLINK; nothing that re-clocks the user bits in between); its input USB-direct mode 2 or a non-USB source, so its epoch survives stream restarts; write `EXT_ALINK_SPDIF` `02 01 00 00 00 00 <tx_mask> 00`.
+3. Each follower: input source S/PDIF; read `d_min`/`d_max` from `EXT_ALINK_SPDIF_STATUS`; write `EXT_ALINK_SPDIF` `01 01 <D LE> <on_lock_error> 00 00 00`, the same D on every follower; `REQ_SAVE_OUTPUT_CONFIG` to persist.
+4. Wait for `0xE4` with state 3 `LOCKED` on time base 3, or poll `EXT_TIME_BASE`. Check that every unit lists one time-base-3 entry with the same `domain` (`alink_protocol_spec.md` 11.1 C5).
+5. Per-unit ops through `EXT_APPLY_AT_FRAME` time base 3; ops for every unit at once through `EXT_ALINK_SPDIF_CTRL` on the source.
+
+### 2.11 Time-base and measurement block (`0x8030`-`0x803F`)
+
+*Specified 2026-11-19 (WP FWTB0, PLAN-AT sections 1.1 and 1.3, OD-ATa, OD-ATi, review R7c); implemented by WP FWTB1 (line, USB-direct) and WP FWSP2 (S/PDIF). Not implemented yet.*
+
+The transport-independent control plane of the time-base contract (`alink_protocol_spec.md` section 11): one read for every time base a unit has, one read for where its generator sits on it, and one event for every contract transition. A host that uses these never needs to know the transport.
+
+- **Discovery.** `EXT_LIST` names `0x8030` on every build that has a time base (RP2350 builds with the alink, USB-direct or S/PDIF time base) and `0x8031` on every build that has ops 9 and 10; on line builds the latter is also `EXT_ALINK_INFO.features` bit 6 `SIGGEN_SYNC`. RP2040 builds list neither in this version (PLAN-AT OD-ATm). Event `0xE4` is announced by `EXT_NOTIFY_FEATURES` bit 5.
+- **Rules of 2.8 apply** (as 2.10). Both IDs are IN only: a SET is refused (`VC_ERR_DIRECTION` on the tunnel).
+- `EXT_FRAME_COUNTER` (0x8005) is unchanged and keeps answering the input's alink or USB time base.
+
+#### 2.11.1 `EXT_TIME_BASE` (0x8030)
+
+IN only, 64 bytes: the contract in one read (C4, C5).
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 1 | `version` | 1 (the layout version of this reply and of `EXT_SIGGEN_TIMELINE`) |
+| 1 | 1 | `count` | entries, 0..2 |
+| 2 | 2 | reserved | 0 |
+| 4 | 4 | `time_us` | the unit's `time_us_32()` at the read |
+| 8 | 4 | `output_frames` | output frames played since the outputs started in sync, low 32 bits (as `EXT_FRAME_COUNTER`) |
+| 12 + 24 i | 1 | `time_base` | entry i (`alink_protocol_spec.md` 11.3): 0 line, 1 USB S, 3 S/PDIF; never 2 |
+| +1 | 1 | `role` | 0 follower, 1 source |
+| +2 | 1 | `state` | the contract state (11.2): 0 `NONE`, 1 `ACQUIRING`, 2 `ANCHORING`, 3 `LOCKED`, 4 `HOLDOVER`, 5 `LOCK_ERROR` |
+| +3 | 1 | `last_reason` | the reason of this entry's last transition (2.11.3's reasons) |
+| +4 | 4 | `domain` | u32 (C5): byte 3 = `time_base`. Line: byte 0 the sender id, bytes 1-2 0. S/PDIF: bytes 0-1 the source id, byte 2 the epoch. USB: bytes 0-2 0 |
+| +8 | 8 | `t` | u64, T at `time_us`: S for USB, F otherwise; on a follower the T arriving now, on a source the T its outputs play now; extrapolated in `HOLDOVER`; in other states the transport's own report, 0 where it has no T (`NONE`, `ACQUIRING`); only a `LOCKED` entry's `t` may be scheduled on |
+| +16 | 2 | `disturbances` | u16, wraps: increments at every transition out of `LOCKED`, every holdover, resume, re-anchor, whole-sample correction and epoch change of this entry |
+| +18 | 2 | `d` | the play-out delay D in samples (follower; 0 for a source). Line: the effective `d_local + hops_offset` |
+| +20 | 4 | `phase_error` | f32, samples (frames on the line); 0 unless `LOCKED` |
+| 60 | 4 | reserved | 0 (the space after the second entry) |
+
+- **Which entries.** One entry per time base the unit is configured for, in its contract state: the line while `EXT_ALINK_CONFIG.enable` is 1 and the source is ALINK; USB-direct while `EXT_ALINK_USB.mode` is not 0 and the source is USB; an S/PDIF follower while `EXT_ALINK_SPDIF.mode` is 1 and the source is S/PDIF; an S/PDIF source while mode is 2. **Followers first**, then the source. `count` 0 when there are none. At most one follower (the active input decides) and one source, so 2 entries are the maximum (`TIME_BASE_MAX_ENTRIES`); for example a USB-direct follower that is also an S/PDIF source.
+- **The invariant.** `t - output_frames` is constant while the entry stays `LOCKED` and `disturbances` does not change. **The read is atomic** (review R7c): `t` and `output_frames` are taken together with interrupts masked, `t` in whole samples at the same output instant, so the invariant is exact. Hosts still compare it modulo 2^32 and allow +-1 sample, and `disturbances` is the primary proof (PLAN-AT G2).
+- `t` of a line entry is the alink F (as `EXT_FRAME_COUNTER`); of a USB entry S (as `EXT_ALINK_USB_STATUS.sample`); of an S/PDIF entry the follower's or source's F (as `EXT_ALINK_SPDIF_STATUS.frame`).
+
+Example: a USB-direct follower (locked, D 192, phase error 0.125, one disturbance since boot) that is also an S/PDIF source (outputs running, epoch 3, source `0x3742`, last reason `EPOCH`, four disturbances), read at `time_us` 100 000 000 with 4 800 000 output frames:
+
+```
+01 02 00 00 00 e1 f5 05 00 3e 49 00
+01 00 03 01 00 00 00 01 00 b4 c4 04 00 00 00 00 01 00 c0 00 00 00 00 3e
+03 01 03 0b 42 37 03 03 64 a6 0e 00 00 00 00 00 04 00 00 00 00 00 00 00
+00 00 00 00
+```
+
+(entry 0: time base 1, follower, `LOCKED`, reason `LOCKED`, domain `0x01000000`, t = S = 80 000 000; entry 1: time base 3, source, `LOCKED`, reason `EPOCH`, domain `0x03033742`, t = F = 960 100.)
+
+#### 2.11.2 `EXT_SIGGEN_TIMELINE` (0x8031)
+
+IN only, 40 bytes: where the generator sits on the time base; the proof a measurement gates on (PLAN-AT G3). The upstream `SiggenStatus` (0xA7) is not touched.
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 1 | `version` | 1 |
+| 1 | 1 | `time_base` | the time base of `start` and `pending` (11.3); `0xFF` none |
+| 2 | 1 | `state` | 0 idle, 1 pending (an op 9 queued, not yet armed), 2 armed (the DAC opening ahead of T), 3 running |
+| 3 | 1 | `last_result` | 0 none (no timed start yet), 1 started (on its sample), 2 refused late (T had passed), 3 refused not ready (DAC held, muted, not `LOCKED`, the preconditions of 2.8.7.1), 4 cancelled by a loss, 5 cancelled by a config write, 6 cancelled by the host (`CANCEL_ALL`, `STOP`, `STOP_NOW`), 7 stopped by a loss (started by op 9, then stopped because its time base left `LOCKED`; review R3) |
+| 4 | 2 | `discontinuities` | u16, of the current or last run: an output underrun's re-anchor, a pipeline reset, a re-anchor or whole-sample correction, a holdover entered while running, an epoch change, a stop by a loss |
+| 6 | 2 | `arm_lead_ms` | `max(hold_ms, release_ms) + 50` (2.8.7.1); 150 on the K340 |
+| 8 | 8 | `start` | u64, T of generator sample 0 of the current or last run (timed or plain, 2.8.7.1); 0 none (a plain START with no time base `LOCKED`) |
+| 16 | 8 | `pending` | u64, T of the pending op 9; 0 none |
+| 24 | 4 | `samples` | generator samples rendered in the current or last run |
+| 28 | 4 | `held` | frames of `siggen_hold()` in it (blocks the output rings refused, `test_signals_spec.md` 9.1) |
+| 32 | 4 | `run_id` | increments at every generator start, timed or plain |
+| 36 | 4 | reserved | 0 |
+
+Example: running since S = 80 012 000 on the USB time base, started on its sample, no discontinuity, 1 s rendered at 48 kHz, run 7: `01 01 03 01 00 00 96 00 e0 e2 c4 04 00 00 00 00 00 00 00 00 00 00 00 00 80 bb 00 00 00 00 00 00 07 00 00 00 00 00 00 00`.
+
+#### 2.11.3 Event `NOTIFY_EVT_TIME_BASE` (`0xE4`)
+
+Announced by `EXT_NOTIFY_FEATURES` bit 5 `NOTIFY_FEAT_TIME_BASE`; sent on every notification consumer (USB EP 0x83, UART, USB MIDI) like `0xE1`. 12 bytes:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0-3 | 4 | `2, 0xE4, 0, seq` |
+| 4 | 1 | `time_base` (11.3) |
+| 5 | 1 | `state` (the contract state, 11.2) |
+| 6 | 1 | `reason`: 0 `NONE`, 1 `LOCKED` (phase-locked and playing), 2 `LOST` (the time base ended), 3 `HOLDOVER` (extrapolating, muted, the timeline kept), 4 `RESUMED` (back from a holdover on the same timeline), 5 `REANCHOR` (the timeline moved: drained and anchored again), 6 `CORRECTION` (whole samples dropped or inserted on the timeline), 7 `DISABLED` (mode off, or the input left the transport), 8 `CONFIG` (the lock cannot run at this rate or D), 9 `LOCK_ERROR` (entered lock error), 10 `LOCK_OK` (left lock error), 11 `EPOCH` (an S/PDIF source restarted its counter) |
+| 7 | 1 | reserved, 0 |
+| 8 | 4 | T at the transition, low 32 bits (u32 LE) |
+
+- **When.** On every change of an entry's contract state and with every reason other than `NONE` (every disturbance of 2.11.1 has one), by every transport. The transports' own events stay as they are (`0xE1` line, `0xE3` USB-direct): `0xE4` is the transport-independent one.
+- **Rate limit.** At most one per 250 ms per `time_base`; transitions inside that window collapse into one event with the latest state and reason, following the clip event's merge rules (an entry a consumer has peeked is never changed; events of different time bases never merge). A host that needs every transition reads `disturbances` (2.11.1): events are for promptness, the counter is the proof (PLAN-AT OD-ATi).
+
+Example: an S/PDIF follower phase-locked at F = 960 000: `02 e4 00 05 03 03 01 00 00 a6 0e 00`.
+
 ## 3. Transports
 
 | Transport | Reaches `0x00`? | Refusal |
@@ -858,13 +1067,18 @@ The pair map sends a `PARAM_CHANGED` for its bulk-parameter offset. The clip eve
 | `tools/midi_ctrl/fake_device.py` | `FakeAlink`: the control-plane model of 2.8 (host development and tests) |
 | `alink_usb.{c,h}`, `alink_usb/alink_usb_core.{c,h}` | the alink USB-direct block (WP USB1, 2.9): `EXT_ALINK_USB*` IDs in `config.h`, the 0x8005/0x8006 time-base dispatch in `vendor_commands.c`, `NOTIFY_FEAT_ALINK_USB` and `notify_push_alink_usb()` in `notify.{c,h}`, the V27 directory block in `flash_storage.c`, the SOF and packet-stamp hooks in `usb_audio.c`, the anchor in `main.c`; `Documentation/Features/alink_usb.md`; host tests `firmware/tests/test_alink_usb.c`, simulation `tools/alink_usb_sim/` |
 | `firmware/DSPi-Sender/sender_vendor.c` | the sender build's alink block (WP LK4): 0x0003, 0x8000-0x8002, 0x8005, 0x8007-0x800A; `sender_alink.c` holds the `EXT_ALINK_TX` / `EXT_ALINK_CTRL_MSG` parsing and the RATE scheduling |
+| `timebase.{c,h}` (new, WP FWTB1) | the time-base block (2.11): `EXT_TIME_BASE` / `EXT_SIGGEN_TIMELINE` IDs in `config.h`, the provider table each transport registers into (line, USB-direct, S/PDIF), the atomic read of `t` and `output_frames`, the disturbance counters, `NOTIFY_FEAT_TIME_BASE` and the `0xE4` emitter with the 250 ms merge in `notify.{c,h}`; host test `firmware/tests/test_timebase.c` |
+| `siggen.{c,h}`, `siggen_dac.{c,h}` (WP FWTB1) | ops 9 and 10 (2.8.7.1): `siggen_arm_at()`, the preconditions and the "fresh config" flag, the never-late check, the stop on loss, the timeline record behind `EXT_SIGGEN_TIMELINE`, arming at `T - arm_lead` and the DAC hand-back; `alink/alink_codec.{c,h}` and `tools/alink/` the op constants and superframe validity; `alink_input.c`, `alink_usb/alink_usb_core.c` and `firmware/DSPi-Sender` the ops in their queues; `test_signals_spec.md` section 15 |
+| `alink/alink_spdif_codec.{c,h}`, `tools/alink/alink_spdif.py` (new, WP FWSP1) | the 48-byte S/PDIF superframe (`alink_protocol_spec.md` section 12): pack, unpack, validity, the allowed-op set, the user-bit order; vectors `firmware/tests/alink_spdif_vectors.json`; the 4-entry transmit table in `pico-extras/.../pico_audio_spdif_multi/` and the U-bit collector in `pico_spdif_rx/spdif_rx.c` |
+| `alink_spdif.{c,h}` (new, WP FWSP2) | the S/PDIF block (2.10): source counter, epochs and broadcast, follower acceptance, coast, phase lock, holdover, lock error; its provider in `timebase.c`; the follower hooks in `spdif_input.c`; the persisted block in `flash_storage.c`; host test `firmware/tests/test_alink_spdif.c`, simulation `tools/alink_spdif_sim/` |
 
 **On the 1.1.7 generation** (WP FWPG2, FWPG3): `vendor/pages/ext.def` (page `0xE0`, revision 1, the tunnel row `0x10`), `vendor/vc_page_ext.c` (the tunnel handler: ID, direction and length checks, then the same `ext_handle_get()` / `ext_handle_set()` as above, mapping each refusal to its `VC_ERR_*` code per 1.3.4), `vendor/vc_legacy.c` / `vc_legacy_custom.c` (the legacy front, which routes page-0 `REQ_EXTENSION` to the same handlers). Until those WPs land the rows above describe the only implementation.
 
-**Adding a sub-command:** pick the next free ID (`0x0001`-`0x7FFF` only after agreeing it with Weeb Labs; an alink sub-command takes the next free ID from `0x800B`, an alink USB-direct one from `0x8013`). Add it to `config.h`, to `ext_ids[]` in ascending order and to `ext_set_len()` if it has an OUT form, then add cases to `ext_handle_set()` / `ext_handle_get()` and a row to section 2.
+**Adding a sub-command:** pick the next free ID (`0x0001`-`0x7FFF` only after agreeing it with Weeb Labs; an alink sub-command takes the next free ID from `0x800B`, an alink USB-direct one from `0x8013`, an S/PDIF time-base one from `0x8023`, a time-base or measurement one from `0x8032`). Add it to `config.h`, to `ext_ids[]` in ascending order and to `ext_set_len()` if it has an OUT form, then add cases to `ext_handle_set()` / `ext_handle_get()` and a row to section 2.
 
 ## 5. History
 
+- 2026-11-19: WP FWTB0 (PLAN-AT, docs only): apply ops 9 `SIGGEN_START` and 10 `SIGGEN_STOP` (2.8.7, 2.8.7.1, 2.8.9, 2.9.4; `EXT_ALINK_INFO.features` bit 6 `SIGGEN_SYNC`); the S/PDIF time-base block `0x8020`-`0x802F` (2.10: `0x8020` `EXT_ALINK_SPDIF`, `0x8021` `EXT_ALINK_SPDIF_STATUS`, `0x8022` `EXT_ALINK_SPDIF_CTRL`, `EXT_APPLY_AT_FRAME` time base 3); the time-base and measurement block `0x8030`-`0x803F` (2.11: `0x8030` `EXT_TIME_BASE`, `0x8031` `EXT_SIGGEN_TIMELINE`, event `0xE4` and `EXT_NOTIFY_FEATURES` bit 5). The contract they serve is `alink_protocol_spec.md` sections 11 and 12. Both envelopes (1.3). Specification only; implemented by WP FWTB1, FWSP1, FWSP2.
 - 2026-11-18: WP FWPG0 (PLAN-PG OD-PGc): section 1.3 "Envelopes": the 1.1.7-generation envelope (private page `0xE0`, tunnel command `0xE010`, `wValue` = sub-command ID, payloads and IDs unchanged), the 1.1.6 envelope on the dual-stack port, refusals as `VC_ERR_*` on the tunnel (never `0x02` / `0x03`), discovery through `SYS.PAGE_LIST` and `EXT_LIST` in both envelopes, the FWSEC1 rules on both stacks, and how a host chooses. Specification only; no firmware implements the tunnel yet (WP FWPG2).
 - 2026-11-15: WP USB3b: lock error in mode 2 (`EXT_ALINK_USB` byte 4 `on_lock_error`, STATUS flags bit 6, `0xE3` reasons 10/11, DIAG `lock_errors`); RP2350 SOF readings with `SOF_TIMESTAMP_RAW` behind `_LAST` repaired instead of ending the time base (DIAG `bad_sof_readings`); DIAG layout version 2; phase re-anchors counted as phase, leaving mode 2 counted as stop.
 - 2026-11-14: WP USB3: mode 2 stays muted while out of step (2.9.2); the rate estimate after 0.5 s, a muted fast pull-in, the stored host rate in the V27 block's reserved bytes (STATUS flags bit 5), soft re-anchors for errors up to 64 samples (2.9.2); ride-through returns beyond 20 us restart the estimator's anchors, how to read `max_isr_quiet_us` (2.9.6, review usb2 N1, N2).
