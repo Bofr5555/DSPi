@@ -77,12 +77,15 @@
 #include "tusb.h"
 #include "pico/binary_info.h"
 #include "build_info.h"
+#include "image_kind.h"   // -- WP IMGKIND --
 #include "pipeline_settle.h"
 #include "scope_marker.h"   // -- WP SCOPE1 -- (test builds only; empty otherwise)
 
 // Same stamp REQ_GET_BUILD_INFO reports, embedded in the UF2's binary info
 // so `picotool info` can identify a build file or a BOOTSEL-mode device.
 bi_decl(bi_program_version_string(BUILD_GIT_DESCRIBE));
+// -- WP IMGKIND -- what the image is for (image_kind.h).
+DSPI_IMAGE_KIND_STAMP(DSPI_IMAGE_KIND_DSP);
 
 // ----------------------------------------------------------------------------
 // GLOBAL DEFINITIONS

@@ -130,6 +130,8 @@ The check order is the dispatcher's (unknown, direction, blocked, length, addres
 
 #### 1.3.5 Transports
 
+**What a paged host requires of the dual-stack alink sender** (described at the end of this section; the console's core, `dspi-core` `device::is_paged_alink_sender`, PLAN-PG 1.9; WP IMGKIND). It takes a paged device for the alink sender only when all of these hold, and otherwise opens it as a DSP or not at all (fail closed): the USB product string is `DSPi Audio Link Sender` (or the old `DSPi Link Sender`; with no product string, as over MIDI or behind a hub, `SYS.PLATFORM` decides alone); `SYS.PLATFORM` in the 1.1.6 layout with byte 3 (output channels) = 0; `SYS.PAGE_LIST` lists SYS `0x01`, STORE `0x02` and `0xE0` and **no other page**; page `0xE0`'s command bitmap lists the tunnel `0x10`; STORE lists no `ALL_PARAMS` GET. A sender build that lists any further page, a debug build's diagnostics page `DIAG` `0xF0` included, is not recognised as the sender and fails to open; such a build is for the bench only. The sender's UF2 carries the device-kind stamp `alink_sender` (binary info, tag `DS`, id `0x0B7A4B1D`, `firmware/DSPi/image_kind.h`; every DSPi image carries `dsp`), so the console refuses a DSP image on a sender and a sender image on a DSP.
+
 | Transport | 1.1.6 envelope on G2b (legacy stack) | Tunnel on G2b | Source in `SYS.LAST_RESULT` |
 |---|---|---|---|
 | USB vendor (EP0) | yes, STALL | yes, STALL + `LAST_RESULT` | `CTRL_SOURCE_USB` |

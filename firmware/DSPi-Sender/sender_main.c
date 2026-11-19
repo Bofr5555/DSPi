@@ -22,9 +22,14 @@
 #include "hardware/vreg.h"
 
 #include "flash_clkdiv.h"
+#include "image_kind.h"   // -- WP IMGKIND --
 #include "sender.h"
 #include "soft_vcxo.h"
 #include "usb_descriptors.h"
+
+// -- WP IMGKIND -- what the image is for (image_kind.h): the console refuses a
+// DSP image on a sender and this image on a DSP.
+DSPI_IMAGE_KIND_STAMP(DSPI_IMAGE_KIND_ALINK_SENDER);
 
 sender_t snd;
 spin_lock_t *snd_lock;
