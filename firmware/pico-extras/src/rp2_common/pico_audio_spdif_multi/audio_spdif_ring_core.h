@@ -415,6 +415,15 @@ int audio_spdif_ubits_fill(uint32_t block, const uint8_t sf[PICO_AUDIO_SPDIF_UBI
     return res;
 }
 
+bool audio_spdif_ubits_reader(uint32_t *reader) {
+    uint32_t rb, sb;
+    uint32_t save = save_and_disable_interrupts();
+    bool live = ub_span(&rb, &sb);
+    restore_interrupts(save);
+    if (live) *reader = rb;
+    return live;
+}
+
 bool audio_spdif_ubits_window(uint32_t *first, uint32_t *last) {
     uint32_t rb, sb;
     uint32_t save = save_and_disable_interrupts();

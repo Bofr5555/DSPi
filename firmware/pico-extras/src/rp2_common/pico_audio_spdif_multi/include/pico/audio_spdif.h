@@ -277,6 +277,12 @@ int audio_spdif_ubits_fill(uint32_t block, const uint8_t sf[PICO_AUDIO_SPDIF_UBI
  * the table's end). */
 bool audio_spdif_ubits_window(uint32_t *first, uint32_t *last);
 
+/** \brief The reader's block (the oldest over the enabled carrying slots),
+ * also while the window above is empty.  False when no carrying slot is
+ * enabled.  (Review fwbc F4: a source stages ahead of the reader whether or
+ * not a block can be filled this pass.) */
+bool audio_spdif_ubits_reader(uint32_t *reader);
+
 /** \brief Block index of an instance's frame (the stampers' numbering). */
 uint32_t audio_spdif_ubits_block_of(const audio_spdif_instance_t *inst, uint32_t frame);
 

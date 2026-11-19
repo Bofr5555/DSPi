@@ -646,6 +646,8 @@ static void test_fill_rules(void) {
     uint32_t first, last;
     CHECK(audio_spdif_ubits_window(&first, &last) && first == sb + 1u && last == rb + 3u,
           "window %" PRIu32 "..%" PRIu32 " (stamped %" PRIu32 ", reader %" PRIu32 ")", first, last, sb, rb);
+    uint32_t rdr = ~0u;
+    CHECK(audio_spdif_ubits_reader(&rdr) && rdr == rb, "reader's block %" PRIu32 " (%" PRIu32 ")", rdr, rb);
     CHECK(audio_spdif_ubits_fill(sb + 1u, sf) == AUDIO_SPDIF_UBITS_OK, "first unstamped block filled");
     CHECK(audio_spdif_ubits_fill(sb + 1u, sf) == AUDIO_SPDIF_UBITS_OK, "refill before its stamp");
     // Its first stamp freezes it: then refused, and every stamper uses it.
@@ -660,9 +662,24 @@ static void test_fill_rules(void) {
     sb = audio_spdif_ubits_block_of(inst, inst->erased_frames - 1u);
     CHECK((sb == rb + 3u && !open) || (sb == rb + 2u && open && f2 == l2 && f2 == rb + 3u),
           "full ring ahead: frontier block %" PRIu32 " reader %" PRIu32 " window %d", sb, rb, open);
+    // Review fwbc F4: the reader's block is known whether or not the window
+    // is open (a source stages ahead of it in every pass), at every reader
+    // phase of a block under a full-ring pump.
+    int closed = 0;
+    for (int i = 0; i < 2 * 192; i++) {
+        reader_advance(1);
+        pump_all(PICO_AUDIO_SPDIF_RING_FRAMES);
+        rb = audio_spdif_ubits_block_of(inst, inst->consumed_frames);
+        rdr = ~0u;
+        bool live = audio_spdif_ubits_reader(&rdr);
+        if (!audio_spdif_ubits_window(&f2, &l2)) closed++;
+        if (!live || rdr != rb) { CHECK(false, "reader's block with the window closed: %" PRIu32 " (%" PRIu32 ")", rdr, rb); break; }
+    }
+    CHECK(closed > 192, "the window is closed for most of a block under a full-ring pump (%d of 384 frames)", closed);
     // No carrying slot enabled: the frontier checks are off, entries still freeze.
     for (int k = 0; k < NSLOTS; k++) slots[k].inst.enabled = false;
     CHECK(!audio_spdif_ubits_window(&f2, &l2), "no window without an enabled carrying slot");
+    CHECK(!audio_spdif_ubits_reader(&rdr), "no reader's block without an enabled carrying slot");
     CHECK(audio_spdif_ubits_fill(sb, sf) == AUDIO_SPDIF_UBITS_FROZEN, "a stamped entry stays frozen");
     for (int k = 0; k < NSLOTS; k++) slots[k].inst.enabled = true;
 }

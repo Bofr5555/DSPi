@@ -243,22 +243,37 @@ static void apply_carry(void) {
 }
 
 // The source's table: stage eight blocks ahead of the reader and fill the
-// transmit table's window (the reader's block .. + 3) from it.
+// transmit table's window (the reader's block .. + 3) from it.  The staging
+// follows the reader in every pass, also while the window is empty (the
+// stamped frontier in the table's last block: nothing to fill, but the
+// stampers' filler still needs the blocks ahead; review fwbc F4).
 static void src_stage(bool restage) {
-    uint32_t first, last;
-    if (!audio_spdif_ubits_window(&first, &last)) {
+    uint32_t first, last, reader;
+    if (!audio_spdif_ubits_reader(&reader)) {
         // No carrying slot enabled (outputs stopped, prefilling): stage from
         // block 0 of the coming epoch.
         if (alink_spdif.mode == ALINK_SPDIF_MODE_SOURCE && !alink_spdif.src_running)
             alink_spdif_src_stage(&alink_spdif, 0, restage);
         return;
     }
-    uint32_t reader = last - (ALINK_SPDIF_TX_TABLE_BLOCKS - 1u);
     alink_spdif_src_stage(&alink_spdif, reader, restage);
+    if (!audio_spdif_ubits_window(&first, &last)) return;
     for (uint32_t b = first; b != last + 1u; b++) {
         const uint8_t *sf = alink_spdif_src_staged(&alink_spdif, b);
         if (sf) (void)audio_spdif_ubits_fill(b, sf);
     }
+}
+
+// Slot 0's ring position `played` in the transmit library's unwrapped frame
+// numbering (192 per block from the ring reset): the 32-bit ring counter wraps
+// after 24.8 h at 48 kHz, the block index does not (review fwbc F1).  The
+// carrying slots must be set (apply_carry()); the counter itself when none
+// runs.
+static uint64_t ring_pos64(uint32_t played) {
+    uint32_t reader;
+    if (!audio_spdif_ubits_reader(&reader)) return played;
+    uint64_t base = (uint64_t)reader * ALINK_SPDIF_BLOCK_FRAMES;
+    return base + (uint64_t)(int64_t)(int32_t)(played - (uint32_t)base);
 }
 
 static void update_armed(void) {
@@ -302,15 +317,15 @@ void alink_spdif_fw_service(void) {
         alink_spdif_rx_state(u, locked, locked ? alink_spdif_rate_code(spdif_input_get_sample_rate()) : 0xFFu,
                              fs, now);
     }
+    apply_carry();
     if (u->mode == ALINK_SPDIF_MODE_SOURCE) {
         if (!u->src_epoch_open) {
             uint32_t wr = 0, played = 0;
             bool run = outputs_running() && ring_counters(&wr, &played);
-            alink_spdif_src_sync(u, run, played);
+            alink_spdif_src_sync(u, run, ring_pos64(played));
         }
         src_stage(false);
     }
-    apply_carry();
     alink_spdif_service(u, now);
     if (follow && alink_spdif_muted(u)) pipeline_request_soft_mute(fs / 1000u * SPDIF_MUTE_HOLD_MS);
     update_armed();
@@ -418,8 +433,8 @@ uint8_t alink_spdif_fw_set_config(const uint8_t p[ALINK_SPDIF_CFG_LEN]) {
     if (r == TB_OK) {
         uint32_t wr = 0, played = 0;
         bool run = outputs_running() && ring_counters(&wr, &played);
-        alink_spdif_src_sync(&alink_spdif, run, played);
-        apply_carry();
+        apply_carry();                      // the reader's block of the carrying slots (ring_pos64())
+        alink_spdif_src_sync(&alink_spdif, run, ring_pos64(played));
         if (alink_spdif.mode == ALINK_SPDIF_MODE_SOURCE) src_stage(true);
         update_armed();
     }

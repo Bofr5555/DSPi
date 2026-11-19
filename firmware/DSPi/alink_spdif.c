@@ -352,6 +352,11 @@ void alink_spdif_src_started(alink_spdif_t *u) {
     }
     bool epoch = u->src_epoch_pending;
     u->src_epoch_pending = false;
+    if (!u->src_running) {
+        // The rings restarted: position 0 is block 0, frame 0.
+        u->pos_ref = 0;
+        u->pos_base = 0;
+    }
     u->src_running = true;
     u->stage_on = true;
     tb_note(u, TB_RS_NONE);
@@ -365,7 +370,7 @@ void alink_spdif_src_started(alink_spdif_t *u) {
 
 // Mode 2 entered with the outputs already running at ring position `played`:
 // a new epoch starts here, F of the frame playing now beyond every F before.
-static void src_enter(alink_spdif_t *u, bool running, uint32_t played) {
+static void src_enter(alink_spdif_t *u, bool running, uint64_t played) {
     u->src.sender = u->serial0;
     u->src.sender2 = u->serial1;
     u->epoch++;
@@ -376,10 +381,14 @@ static void src_enter(alink_spdif_t *u, bool running, uint32_t played) {
         uint64_t want = u->f_seen + ALINK_SPDIF_BLOCK_FRAMES;
         uint64_t base = want > played ? want - played : 0;
         u->origin = align_up_192(base);
+        u->pos_ref = (uint32_t)played;
+        u->pos_base = played;
         u->src_epoch_open = true;
         u->src_running = true;
     } else {
         u->origin = align_up_192(u->f_seen + ALINK_SPDIF_BLOCK_FRAMES);
+        u->pos_ref = 0;
+        u->pos_base = 0;
         u->src_epoch_open = true;
         u->src_running = false;
     }
@@ -388,7 +397,7 @@ static void src_enter(alink_spdif_t *u, bool running, uint32_t played) {
     count_locks(u);
 }
 
-void alink_spdif_src_sync(alink_spdif_t *u, bool running, uint32_t played) {
+void alink_spdif_src_sync(alink_spdif_t *u, bool running, uint64_t played) {
     if (u->mode == ALINK_SPDIF_MODE_SOURCE && !u->src_epoch_open) src_enter(u, running, played);
 }
 
@@ -455,6 +464,18 @@ uint32_t alink_spdif_src_split(alink_spdif_t *u, uint64_t f, uint32_t n) {
 // ---------------------------------------------------------------------------
 // The follower: the word stream and the superframes (12.4 d, 12.5)
 // ---------------------------------------------------------------------------
+
+// The follower's timeline ended, or the stream's F numbering is not the one
+// its queued ops were written in (another source or epoch, an F that breaks
+// continuity: a source that restarted with the same epoch byte after a power
+// cycle).  The ops still queued are cancelled (0xE2), as the source cancels
+// its own at a restart and the line and USB-direct do when their timeline
+// ends: never run late, or on a frame of the new numbering that happens to
+// have the same number (review fwbc F2).
+static void queue_void(alink_spdif_t *u) {
+    cancel_queue(u);
+    u->sf_taken_have = false;
+}
 
 static void end_hold(alink_spdif_t *u) {
     u->resuming = false;
@@ -539,6 +560,7 @@ static void block_done(alink_spdif_t *u, bool whole, uint32_t now_us) {
     uint16_t id = alink_spdif_source_id(&sf);
     bool same = u->sf_seen && id == u->src_id && sf.epoch == u->src_epoch;
     bool first = !u->rd_valid;
+    if (u->sf_seen && !same) queue_void(u);     // another source or a new epoch: a new numbering
     u->rd_f = f_end;
     u->rd_valid = true;
     if (first) {
@@ -549,8 +571,12 @@ static void block_done(alink_spdif_t *u, bool whole, uint32_t now_us) {
             bool ok = same && alink_phase_relock(&u->ph, f_end, hold_extrapolate(u, now_us),
                                                   alink_spdif_port_ring_span());
             u->hold_rx = false;
-            if (ok) u->resuming = true;
-            else reanchor(u, same ? TB_RS_REANCHOR : TB_RS_EPOCH);
+            if (ok) {
+                u->resuming = true;
+            } else {
+                queue_void(u);  // F is not where the held timeline says
+                reanchor(u, same ? TB_RS_REANCHOR : TB_RS_EPOCH);
+            }
         } else if (u->sf_seen && !same && (u->ph.started || u->prefilling)) {
             reanchor(u, TB_RS_EPOCH);
         }
@@ -559,6 +585,7 @@ static void block_done(alink_spdif_t *u, bool whole, uint32_t now_us) {
     } else if (f_end != u->rd_f_expect) {
         // The block's F breaks continuity (a returning superframe that does
         // not confirm the coasted F, or words lost in the receiver).
+        queue_void(u);
         reanchor(u, TB_RS_REANCHOR);
     } else if (u->ph.hold && u->hold_rx) {
         // A coast holdover confirmed: resume on the same timeline.
@@ -638,6 +665,7 @@ void alink_spdif_rx_state(alink_spdif_t *u, bool locked, uint8_t rate, uint32_t 
         u->hold_rx = false;         // a coast holdover now on the extrapolation only
     } else if (u->ph.started && !enter_hold(u, false, now_us)) {
         u->ph.started = false;
+        queue_void(u);              // the timeline ends here
     }
     tb_note(u, TB_RS_NONE);
     count_locks(u);
@@ -808,6 +836,7 @@ void alink_spdif_service(alink_spdif_t *u, uint32_t now_us) {
     if (u->mode == ALINK_SPDIF_MODE_SOURCE) {
         uint32_t wr, played;
         if (u->src_running && ring_now(&wr, &played)) {
+            alink_spdif_src_track(u, played);   // F across the ring counter's wrap
             uint64_t f_play = alink_spdif_src_f(u, played);
             if (f_play > u->f_seen) u->f_seen = f_play;
             if (u->bc_pending && f_play >= u->bc_last_frame) {
@@ -832,6 +861,7 @@ void alink_spdif_service(alink_spdif_t *u, uint32_t now_us) {
         u->resuming = false;
         u->rd_valid = false;
         u->lock_err = true;
+        queue_void(u);              // the timeline ended
         if (had) tb_note(u, TB_RS_LOST);
         tb_note(u, TB_RS_LOCK_ERROR);
         count_locks(u);
@@ -839,6 +869,7 @@ void alink_spdif_service(alink_spdif_t *u, uint32_t now_us) {
     // Holdover ends after 10 s (LOST): no T any more.
     if (u->ph.hold && now_us - u->hold_us >= ALINK_SPDIF_HOLD_MAX_US) {
         end_hold(u);
+        queue_void(u);              // the timeline ended
         tb_note(u, TB_RS_LOST);
         count_locks(u);
     }

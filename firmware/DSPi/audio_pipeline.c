@@ -2007,7 +2007,16 @@ void siggen_pump(void) {
     // USB phase-mode timeline included), not only USB / S/PDIF / I2S: each
     // of those would otherwise be topped up by a second producer.
     siggen_pump_gate_t g = {
+#if DSPI_ALINK_SPDIF
+        // -- WP FWSP2 (review fwbc F5) -- an S/PDIF source's pending op of
+        // time base 3 acts on the sample written at its F, on silence too
+        // (2.10.4): with no input delivering blocks the pump writes them, so
+        // the split hook of process_input_block() reaches the op's frame (an
+        // op 9 would otherwise stay armed until a stream starts).
+        .running = siggen_running || alink_spdif_split_armed,
+#else
         .running = siggen_running,
+#endif
         .source_owns_rings = pipeline_source_owns_rings(),
         .preset_loading = preset_loading,
         .source_is_usb = active_input_source == INPUT_SOURCE_USB,

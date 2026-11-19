@@ -334,6 +334,20 @@ static void test_lock_error(void) {
     CHECK(!f->u.lock_err, "superframes back: lock error cleared");
     sw_run(8.0, 0, NULL);
     CHECK(st(f) == TB_ST_LOCKED, "then anchored and LOCKED (%u)", st(f));
+    // Review fwbc: a LOCKED follower whose stream loses its superframes for
+    // good (the user bits rewritten on the way) while the audio goes on:
+    // coast, holdover, then LOCK_ERROR after 0.5 s, and with on_lock_error 0
+    // none of that audio plays, before or after the lock error.
+    CHECK(!isnan(latency(f)), "locked: audio plays");
+    f->foreign = true;
+    bool leaked = false;
+    for (int i = 0; i < 150; i++) {
+        sw_run(SW.t + 0.01, 0, NULL);
+        if (i >= 6 && !isnan(latency(f))) leaked = true;    // past the 9 coasted blocks and the rings' fill
+    }
+    CHECK(st(f) == TB_ST_LOCK_ERROR && alink_spdif_muted(&f->u) && !f->u.ph.started && !f->u.ph.hold,
+          "superframes gone for good: LOCK_ERROR, muted (%u)", st(f));
+    CHECK(!leaked && isnan(latency(f)), "superframes gone for good: nothing of the stream plays (on_lock_error 0)");
 }
 
 static void test_cut(void) {
@@ -359,10 +373,24 @@ static void test_cut(void) {
     sw_run(SW.t + 3.0, 0, NULL);
     double l1 = lat_mean(f, 1.0);
     CHECK(fabs(l1 - l0) < 0.1, "cut: the same timeline (latency %.3f -> %.3f)", l0, l1);
-    // A loss beyond 10 s ends the time base (LOST).
+    // A loss beyond 10 s ends the time base (LOST), and with it the ops still
+    // queued (review fwbc F2): a source back after a power cycle numbers F anew.
+    uint64_t Nq = f->u.ph.next_w + 3600u * 48000u;
+    uint8_t pq[16] = { 0 };
+    for (int i = 0; i < 8; i++) pq[i] = (uint8_t)(Nq >> (8 * i));
+    pq[8] = ALINK_OP_UNMUTE;
+    pq[12] = 3;
+    SWF = f;
+    CHECK(alink_spdif_apply(&f->u, pq, f->u.ph.next_w) == TB_OK && f->u.aq.n == 1, "cut: an op queued an hour ahead");
+    f->n_op = f->n_res = 0;
     f->wire = false;
-    sw_run(SW.t + 10.2, 0, NULL);
+    sw_run(SW.t + 9.0, 0, NULL);
+    CHECK(f->u.ph.hold && f->u.aq.n == 1, "cut: the holdover keeps the queue");
+    sw_run(SW.t + 1.2, 0, NULL);
     CHECK(!f->u.ph.hold && st(f) == TB_ST_ACQUIRING, "a 10 s cut ends the holdover (%u)", st(f));
+    CHECK(f->u.aq.n == 0 && f->n_op == 0 && f->n_res == 1 && f->reslog[0].res == ALINK_APPLY_CANCELLED,
+          "cut: the lost timeline's op is cancelled (queue %u, ran %d, results %d)", (unsigned)f->u.aq.n, f->n_op,
+          f->n_res);
 }
 
 static void test_epoch(void) {
@@ -373,6 +401,18 @@ static void test_epoch(void) {
     uint8_t ep = SW.src.u.epoch;
     int ev0 = n_tb_ev;
     (void)ev0;
+    // Review fwbc F2: an op still queued on a follower when the epoch changes
+    // is cancelled with the old numbering (the source cancels its own at the
+    // restart), never run on the new epoch's frame of the same number.
+    sw_fol_t *q = &SW.fol[0];
+    uint64_t Nq = q->u.ph.next_w + 5u * 48000u;
+    uint8_t pq[16] = { 0 };
+    for (int i = 0; i < 8; i++) pq[i] = (uint8_t)(Nq >> (8 * i));
+    pq[8] = ALINK_OP_UNMUTE;
+    pq[12] = 3;
+    SWF = q;
+    CHECK(alink_spdif_apply(&q->u, pq, q->u.ph.next_w) == TB_OK && q->u.aq.n == 1, "epoch: an op queued on the follower");
+    q->n_op = q->n_res = 0;
     sw_src_restart(SW.t, 0.006);
     CHECK(SW.src.u.epoch == (uint8_t)(ep + 1u), "epoch: the source's epoch increments");
     bool saw[2] = { false, false };
@@ -384,8 +424,33 @@ static void test_epoch(void) {
     sw_run(SW.t + 6.0, 0, NULL);
     CHECK(st(&SW.fol[0]) == TB_ST_LOCKED && st(&SW.fol[1]) == TB_ST_LOCKED, "epoch: LOCKED again");
     CHECK(SW.fol[0].u.src_epoch == SW.src.u.epoch, "epoch: on the new epoch");
+    CHECK(q->u.aq.n == 0 && q->n_op == 0 && q->n_res == 1 && q->reslog[0].op == ALINK_OP_UNMUTE &&
+              q->reslog[0].res == ALINK_APPLY_CANCELLED,
+          "epoch: the follower's queued op is cancelled, not run in the new numbering (queue %u, ran %d, results %d)",
+          (unsigned)q->u.aq.n, q->n_op, q->n_res);
     double l1 = lat_mean(&SW.fol[0], 0.5), m1 = lat_mean(&SW.fol[1], 0.5);
     CHECK(fabs(l1 - l0) < 0.1 && fabs(m1 - m0) < 0.1, "epoch: latency kept (%.3f %.3f -> %.3f %.3f)", l0, m0, l1, m1);
+    // The same when the receiver rides through the restart's gap and the
+    // next superframe it accepts carries the new epoch (no carrier loss seen).
+    Nq = q->u.ph.next_w + 5u * 48000u;
+    for (int i = 0; i < 8; i++) pq[i] = (uint8_t)(Nq >> (8 * i));
+    SWF = q;
+    CHECK(alink_spdif_apply(&q->u, pq, q->u.ph.next_w) == TB_OK && q->u.aq.n == 1, "epoch: an op queued again");
+    q->n_op = q->n_res = 0;
+    uint32_t re = q->u.reanchors;
+    SW.src.u.epoch++;
+    SW.src.u.src.epoch = SW.src.u.epoch;
+    alink_spdif_src_stage(&SW.src.u, (uint32_t)(sw_src_pos(SW.t) / 192.0), true);
+    bool saw_epoch = false;
+    for (int i = 0; i < 50; i++) {
+        sw_run(SW.t + 0.001, 0, NULL);
+        if (q->u.reanchors == re + 1u && q->u.tbk.last_reason == TB_RS_EPOCH) saw_epoch = true;
+    }
+    CHECK(q->u.reanchors == re + 1u && saw_epoch && q->u.aq.n == 0 && q->n_op == 0 &&
+              q->n_res == 1 && q->reslog[0].res == ALINK_APPLY_CANCELLED,
+          "epoch: a new epoch on a running stream re-anchors EPOCH and cancels the queue (re %u, queue %u, ran %d, "
+          "results %d, reason %u)",
+          q->u.reanchors - re, (unsigned)q->u.aq.n, q->n_op, q->n_res, q->u.tbk.last_reason);
 }
 
 static void test_coast(void) {
@@ -420,8 +485,19 @@ static void test_coast(void) {
     sw_run(SW.t + 3.0, 0, NULL);
     CHECK(st(f) == TB_ST_LOCKED, "coast: LOCKED again");
     uint32_t ra = f->u.reanchors;
+    // Review fwbc F2: an F that breaks continuity is another numbering (a
+    // source restarted with the same epoch byte): the queued op is cancelled.
+    uint64_t Nc = f->u.ph.next_w + 3600u * 48000u;
+    uint8_t pc[16] = { 0 };
+    for (int i = 0; i < 8; i++) pc[i] = (uint8_t)(Nc >> (8 * i));
+    pc[8] = ALINK_OP_UNMUTE;
+    pc[12] = 3;
+    SWF = f;
+    CHECK(alink_spdif_apply(&f->u, pc, f->u.ph.next_w) == TB_OK && f->u.aq.n == 1, "coast: an op queued");
+    f->n_op = f->n_res = 0;
     f->kill_ubits = 5;
     sw_run(SW.t + 0.008, 0, NULL);
+    CHECK(f->u.aq.n == 1, "coast: coasting keeps the queue");
     SW.src.u.origin += 1920u;
     alink_spdif_src_stage(&SW.src.u, (uint32_t)(sw_src_pos(SW.t) / 192.0), true);
     bool back = false, re_at_back = false;
@@ -435,6 +511,9 @@ static void test_coast(void) {
     }
     CHECK(back && re_at_back, "coast: a return that breaks continuity re-anchors at once (back %d, re %u)", back,
           f->u.reanchors - ra);
+    CHECK(f->u.aq.n == 0 && f->n_op == 0 && f->n_res == 1 && f->reslog[0].res == ALINK_APPLY_CANCELLED,
+          "coast: the continuity break cancels the queued op (queue %u, ran %d, results %d)", (unsigned)f->u.aq.n,
+          f->n_op, f->n_res);
     // After a holdover, a continuity break: the re-anchored lock is LOCKED,
     // not RESUMED (a new placement).
     sw_run(SW.t + 4.0, 0, NULL);
@@ -645,6 +724,91 @@ static void test_op9_source(void) {
     CHECK(le32(tb + 12 + 4) != dom, "source epoch: a new domain");
 }
 
+// Review fwbc F1: the output ring position is a 32-bit counter (it wraps after
+// 24.8 h at 48 kHz); F is 64 bits and never wraps (12.3).  A source that has
+// played for that long keeps one F for its superframes, its own time base,
+// its lead checks and its ops; a follower sees nothing.
+static void test_wrap(void) {
+    world(48000, 1, 192);
+    alink_spdif_t *s = &SW.src.u;
+    sw_fol_t *f = &SW.fol[0];
+    // 9 s before the wrap (the source has been running for 24.8 h).
+    uint64_t x0 = 0x100000000ull - 9u * 48000u - 77u;
+    SW.src.x0 = x0;
+    s->pos_ref = (uint32_t)x0;
+    s->pos_base = x0;
+    alink_spdif_src_stage(s, (uint32_t)(x0 / 192u), true);
+    f->next_word = 2u * x0;
+    SWF = NULL;
+    alink_spdif_tb_register(s);
+    sw_run(8.0, 0, NULL);
+    CHECK(st(f) == TB_ST_LOCKED, "wrap: LOCKED before the wrap");
+    CHECK(sw_src_pos(SW.t) < 4294967296.0, "wrap: still before it");
+    double l0 = lat_mean(f, 0.3);
+    uint16_t dist0 = f->u.tbk.dist, sdist0 = s->tbk.dist;
+    uint32_t err0 = f->u.sf_errors, re0 = f->u.reanchors;
+    uint32_t wr, played;
+    SWF = NULL;
+    (void)timebase_port_ring(&wr, &played);
+    uint64_t f_before = alink_spdif_src_f(s, played);
+    uint8_t tb[64];
+    timebase_service(0);
+    timebase_read(tb);
+    uint64_t inv0 = le64(tb + 20) - le32(tb + 8);
+    sw_run(SW.t + 2.0, 0, NULL);            // across the wrap
+    CHECK(sw_src_pos(SW.t) > 4294967296.0, "wrap: past it");
+    SWF = NULL;
+    (void)timebase_port_ring(&wr, &played);
+    uint64_t f_after = alink_spdif_src_f(s, played);
+    CHECK(played < 0x80000000u && f_after > f_before && f_after - f_before > 90000u && f_after - f_before < 102000u,
+          "wrap: the source's F runs on (%llu -> %llu)", (unsigned long long)f_before, (unsigned long long)f_after);
+    CHECK(f_after == s->origin + (uint64_t)sw_src_pos(SW.t), "wrap: F is the origin plus the frames played");
+    timebase_service(1);
+    timebase_read(tb);
+    uint64_t t_src = le64(tb + 20);
+    CHECK(tb[14] == TB_ST_LOCKED && t_src - le32(tb + 8) == inv0 + 0x100000000ull && s->tbk.dist == sdist0,
+          "wrap: EXT_TIME_BASE t runs on (t - output_frames steps by 2^32 only), no disturbance");
+    CHECK(st(f) == TB_ST_LOCKED && f->u.tbk.dist == dist0 && f->u.sf_errors == err0 && f->u.reanchors == re0,
+          "wrap: the follower sees nothing (dist %u, sf_errors %u, re-anchors %u)", (unsigned)(f->u.tbk.dist - dist0),
+          (unsigned)(f->u.sf_errors - err0), (unsigned)(f->u.reanchors - re0));
+    double l1 = lat_mean(f, 0.3);
+    CHECK(fabs(l1 - l0) < 0.1, "wrap: latency kept (%.3f -> %.3f)", l0, l1);
+    // The follower's F and the source's are one numbering after the wrap.
+    SWF = NULL;
+    (void)timebase_port_ring(&wr, &played);
+    int64_t df = (int64_t)(f->u.rd_f - alink_spdif_src_f(s, played));
+    CHECK(df > -2000 && df < 2000, "wrap: one F numbering on both sides (%lld)", (long long)df);
+    // A broadcast after the wrap: the lead is judged in the same numbering
+    // and the follower applies it on F, not late.
+    f->n_op = 0;
+    uint64_t fp = (uint64_t)sw_src_playing();
+    uint64_t N = fp + 2000u;
+    uint8_t p[16] = { 0 };
+    for (int i = 0; i < 8; i++) p[i] = (uint8_t)(N >> (8 * i));
+    p[8] = ALINK_OP_MUTE;
+    p[12] = 3;
+    SWF = NULL;
+    (void)timebase_port_ring(&wr, &played);
+    CHECK(alink_spdif_ctrl_write(s, p, alink_spdif_src_f(s, played), alink_spdif_src_f(s, wr)) == TB_OK,
+          "wrap: broadcast accepted");
+    alink_spdif_src_stage(s, (uint32_t)(sw_src_pos(SW.t) / 192.0), true);
+    sw_run(SW.t + 0.3, 0, NULL);
+    CHECK(f->n_op == 1 && f->oplog[0].frame == N && f->oplog[0].next_f == N && !f->oplog[0].late,
+          "wrap: the follower applies the broadcast on F (n %d)", f->n_op);
+    CHECK(!s->bc_pending, "wrap: the broadcast ended at F");
+    // Half a day on: the position is tracked in every pass, so F holds
+    // however many times the 32-bit counter wraps.
+    for (int i = 0; i < 9; i++) {
+        SW.src.x0 += 0x40000000ull;
+        SWF = NULL;
+        alink_spdif_service(s, alink_spdif_port_now_us());
+    }
+    (void)timebase_port_ring(&wr, &played);
+    CHECK(alink_spdif_src_f(s, played) == s->origin + (uint64_t)sw_src_pos(SW.t) &&
+              alink_spdif_src_f(s, wr) == alink_spdif_src_f(s, played) + 256u,
+          "wrap: F holds after 2.25 more wraps (%llu)", (unsigned long long)alink_spdif_src_f(s, played));
+}
+
 static void test_mode0(void) {
     world(48000, 1, 192);
     sw_fol_t *f = &SW.fol[0];
@@ -684,6 +848,7 @@ int main(void) {
     test_broadcast();
     test_op9_follower();
     test_op9_source();
+    test_wrap();
     test_mode0();
     printf("test_alink_spdif: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

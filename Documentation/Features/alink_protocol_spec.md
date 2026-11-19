@@ -849,9 +849,11 @@ too): `a5 01 00 01 02 10 00 42 c0 a6 0e 00 00 00 00 00`, 12 zero bytes,
   new **epoch**: a new origin, byte 28 incremented (mod 256), a disturbance counted, `0xE4` reason 11 `EPOCH`; every
   follower re-anchors (12.5). A source SHOULD therefore run USB-direct mode 2 or a non-USB input, whose timeline
   survives stream restarts; on USB mode 0 every "play" is a new epoch. The transmit library's frame index is 32 bits
-  and today its block phase steps by 64 frames at the wrap (24.8 h of uninterrupted output at 48 kHz, 12.4 h at
-  96 kHz; `audio_spdif.c`, "known limit"): WP FWSP1 either keeps the block phase continuous across the wrap or the
-  source starts a new epoch there. F itself is 64 bits and never wraps.
+  and wraps after 24.8 h of uninterrupted output at 48 kHz, 12.4 h at 96 kHz. Nothing happens there: the library keeps
+  the block phase continuous across the wrap (its block index is unwrapped, WP FWSP1), and the source unwraps the ring
+  position the same way for its own F (its ops, its lead checks, `EXT_TIME_BASE.t`; review fwbc). F itself is 64 bits
+  and never wraps; `EXT_TIME_BASE`'s `t - output_frames` steps by 2^32 there, which is why a host compares it modulo
+  2^32 (`extension_channel_spec.md` 2.11.1).
 - **The source is a member of its own domain.** Its `EXT_TIME_BASE` lists a source entry (role 1, D = 0), and its
   apply queue (`EXT_APPLY_AT_FRAME` time base 3) acts on the sample written at output position F.
 - **Which slots carry it.** Every S/PDIF-type output slot, or the slots in `EXT_ALINK_SPDIF.tx_mask`. A slot that does

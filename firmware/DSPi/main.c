@@ -1020,8 +1020,12 @@ bool pipeline_source_owns_rings(void) {
     }
     if (input_source_is_spdif(active_input_source)) {
 #if DSPI_ALINK_SPDIF
-        // -- WP FWSP2 -- a follower's holdover writes the timeline's silence.
-        if (alink_spdif_fw_owns_rings()) return true;
+        // -- WP FWSP2 -- a follower delivers blocks only on its timeline (the
+        // prefill, the run, the holdover's silence).  Off it (waiting for a
+        // superframe or the VCXO, re-anchoring, lock error muted) it discards
+        // the stream: the rings are not its own then, or a running generator
+        // would get no blocks at all (review fwbc F3).
+        if (alink_spdif_fw_engaged()) return alink_spdif_fw_owns_rings();
 #endif
         return spdif_input_get_state() == SPDIF_INPUT_LOCKED;
     }

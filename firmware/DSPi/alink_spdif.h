@@ -134,6 +134,11 @@ typedef struct {
     bool     src_epoch_open;                // an origin is set (the next start is a new epoch)
     bool     src_epoch_pending;             // a restart is in progress (outputs stopped)
     uint64_t origin;                        // F of output-ring frame 0 of this epoch
+    // The ring position is a 32-bit counter (24.8 h at 48 kHz, 12.4 h at
+    // 96 kHz) and F never wraps (12.3): the last position seen and its
+    // 64-bit value in the transmit library's block numbering (review fwbc F1).
+    uint32_t pos_ref;
+    uint64_t pos_base;
     uint64_t f_seen;                        // the highest F known played (the next origin is beyond it)
     uint8_t  epoch;
     alink_spdif_src_t src;                  // the codec's view: flags, rate, ids, epoch, the broadcast
@@ -227,11 +232,23 @@ static inline uint8_t alink_spdif_rate_code(uint32_t hz) {
 void alink_spdif_src_stopping(alink_spdif_t *u, uint64_t f_now);
 // The outputs started in sync (every slot from ring position 0).
 void alink_spdif_src_started(alink_spdif_t *u);
-// Mode 2 just written or loaded: the outputs run (`running`, slot 0 at ring
-// position `played`) or not; a first epoch starts.
-void alink_spdif_src_sync(alink_spdif_t *u, bool running, uint32_t played);
-// F of output-ring position `pos` (slot 0's frames written or played).
-static inline uint64_t alink_spdif_src_f(const alink_spdif_t *u, uint32_t pos) { return u->origin + pos; }
+// Mode 2 just written or loaded: the outputs run (`running`, slot 0 playing
+// ring position `played`: the unwrapped frame index since the ring reset, 192
+// per transmit block, whose low 32 bits are the ring counter) or not; a first
+// epoch starts.
+void alink_spdif_src_sync(alink_spdif_t *u, bool running, uint64_t played);
+// Slot 0's ring counter now (frames played): keeps the 64-bit position, so F
+// is continuous across the counter's 2^32 wrap.  Every main-loop pass (the
+// service does it); any two calls less than 2^31 frames apart.
+static inline void alink_spdif_src_track(alink_spdif_t *u, uint32_t played) {
+    u->pos_base += (uint64_t)(int64_t)(int32_t)(played - u->pos_ref);
+    u->pos_ref = played;
+}
+// F of output-ring position `pos` (slot 0's frames written or played, the
+// 32-bit ring counter, within 2^31 frames of the last position tracked).
+static inline uint64_t alink_spdif_src_f(const alink_spdif_t *u, uint32_t pos) {
+    return u->origin + u->pos_base + (uint64_t)(int64_t)(int32_t)(pos - u->pos_ref);
+}
 // Build the staged superframes of blocks reader_block .. reader_block + 7
 // that are not staged yet (or all of them: `restage`, after a broadcast).
 // Main loop.

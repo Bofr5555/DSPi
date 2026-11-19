@@ -385,7 +385,7 @@ static double sw_fol_playing(const sw_fol_t *f) {
 // The F the source plays at its output now.
 static double sw_src_playing(void) {
     double x = sw_src_pos(SW.t);
-    return (double)alink_spdif_src_f(&SW.src.u, 0) + x;
+    return (double)SW.src.u.origin + x;     // the truth: x does not wrap (review fwbc F1)
 }
 
 static void (*sw_pass_hook)(sw_fol_t *f);
