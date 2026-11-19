@@ -24,15 +24,18 @@ sample entering the pipeline, which is D minus the ring fill later, and
 refuses a lead under arm_lead (EXT_SIGGEN_TIMELINE.arm_lead_ms) at the write.
 
 Safety.  Only finite configs (sweeps and patterns with a repeat count, the
-firmware refuses anything else, R4), at -20 dBFS or below, on the outputs
-named with --out; nothing plays on the host.  `abort` cancels every pending op
+firmware refuses anything else, R4), on the output named with --out, whose
+role must be named with --role (review fwbc N4): at most -20 dBFS on a woofer
+or full-range output, at most -30 dBFS on a tweeter (the K340's tweeters are
+transformer-fed), and no CLICK on a tweeter (the firmware's CLICK is a fixed
+-20 dBFS sample).  Nothing plays on the host.  `abort` cancels every pending op
 (CANCEL_ALL) and stops the generators (STOP_NOW) on every unit.
 
   siggen_sync_bench.py status  A=midi:/dev/snd/midiC2D0 B=usb:/dev/bus/usb/003/012
-  siggen_sync_bench.py start   A=... B=... --type sweep --out 2 --lead-ms 400 [--stagger B=4807] [--json run.json]
-  siggen_sync_bench.py click   A=... B=... --out 2 --lead-ms 300            (H1, HS1: op 7 at one T)
-  siggen_sync_bench.py click-impulse A=... --out 2                          (H3: op 7 and op 9 IMPULSE at one T)
-  siggen_sync_bench.py leads   A=... --leads 100,150,250 --out 2            (H7)
+  siggen_sync_bench.py start   A=... B=... --type sweep --out 2 --role woofer --lead-ms 400 [--stagger B=4807] [--json run.json]
+  siggen_sync_bench.py click   A=... B=... --out 2 --role woofer --lead-ms 300 (H1, HS1: op 7 at one T)
+  siggen_sync_bench.py click-impulse A=... --out 2 --role woofer            (H3: op 7 and op 9 IMPULSE at one T)
+  siggen_sync_bench.py leads   A=... --leads 100,150,250 --out 2 --role tweeter (H7, at -30 dBFS at most)
   siggen_sync_bench.py abort   A=... B=...
   siggen_sync_bench.py start --fake 2 ...                                   (in-process fakes, no device)
 
@@ -79,6 +82,16 @@ SIGGEN_CFG_VERSION = 1
 SIGGEN_SWEEP_LOG, SIGGEN_IMPULSE = 4, 7
 SIGGEN_TYPES = {"sweep": SIGGEN_SWEEP_LOG, "impulse": SIGGEN_IMPULSE}
 LEVEL_MAX_DB = -20.0                        # ATHIL Part A: -20 dBFS, electrical only
+# review fwbc N4: the cap per output role.  A tweeter (the K340's are
+# transformer-fed) gets at most -30 dBFS and no CLICK; an unnamed role (None)
+# gets the tweeter's cap.
+ROLE_LEVEL_MAX_DB = {"woofer": LEVEL_MAX_DB, "full-range": LEVEL_MAX_DB, "tweeter": -30.0}
+CLICK_ROLES = ("woofer", "full-range")      # the firmware's CLICK is a fixed -20 dBFS sample
+
+
+def level_max_db(role: str | None) -> float:
+    """The highest level allowed on an output of `role`; the strictest for an unknown one."""
+    return ROLE_LEVEL_MAX_DB.get(role, min(ROLE_LEVEL_MAX_DB.values()))
 RATES = (44100, 48000, 96000)
 
 
@@ -215,16 +228,19 @@ def unpack_timeline(b: bytes) -> dict:
 
 
 def pack_config(kind: str, out_mask: int, level_db: float, repeat: int, duration_ms: int = 300,
-                gap_ms: int = 20, f1: float = 20.0, f2: float = 20000.0, period_ms: float = 100.0) -> bytes:
-    """A finite SiggenConfig (test_signals_spec.md 4.1): a log sweep or an impulse train."""
+                gap_ms: int = 20, f1: float = 20.0, f2: float = 20000.0, period_ms: float = 100.0,
+                role: str | None = None) -> bytes:
+    """A finite SiggenConfig (test_signals_spec.md 4.1): a log sweep or an impulse train,
+    at most level_max_db(role) (no role: the tweeter's cap)."""
     if kind not in SIGGEN_TYPES:
         raise ValueError(f"type {kind}: sweep or impulse")
     if not 1 <= repeat <= 0xFFFF:
         raise ValueError("repeat 1..65535: a timed start needs a finite run (R4)")
     if not out_mask or out_mask >> 16:
         raise ValueError("no output")
-    if not level_db <= LEVEL_MAX_DB:
-        raise ValueError(f"level {level_db} dBFS above {LEVEL_MAX_DB} dBFS")
+    cap = level_max_db(role)
+    if not level_db <= cap:
+        raise ValueError(f"level {level_db} dBFS above {cap} dBFS (output role {role or 'not named'})")
     t = SIGGEN_TYPES[kind]
     p1, p2 = (f1, f2) if t == SIGGEN_SWEEP_LOG else (period_ms, 0.0)
     dur = duration_ms if t == SIGGEN_SWEEP_LOG else 0
@@ -543,7 +559,10 @@ def main(argv=None) -> int:
     ap.add_argument("--time-base", choices=tuple(TB_NAMES), help="default: unit 1's first entry")
     ap.add_argument("--type", default="sweep", choices=tuple(SIGGEN_TYPES))
     ap.add_argument("--out", type=int, default=None, help="output index (0-based) the generator / CLICK plays on")
-    ap.add_argument("--level", type=float, default=LEVEL_MAX_DB, help=f"dBFS, at most {LEVEL_MAX_DB}")
+    ap.add_argument("--role", choices=tuple(ROLE_LEVEL_MAX_DB),
+                    help="what --out drives (required with --out): woofer / full-range at most "
+                         f"{LEVEL_MAX_DB} dBFS, tweeter at most {ROLE_LEVEL_MAX_DB['tweeter']} dBFS and no CLICK")
+    ap.add_argument("--level", type=float, default=None, help="dBFS; default and maximum: the role's cap")
     ap.add_argument("--repeat", type=int, default=3)
     ap.add_argument("--duration-ms", type=int, default=300, help="sweep length")
     ap.add_argument("--gap-ms", type=int, default=20)
@@ -555,10 +574,18 @@ def main(argv=None) -> int:
     ap.add_argument("--stagger", action="append", help="NAME=FRAMES: that unit's T is T + FRAMES")
     ap.add_argument("--json", help="write the report here too")
     args = ap.parse_args(argv)
-    if args.level > LEVEL_MAX_DB:
-        ap.error(f"--level above {LEVEL_MAX_DB} dBFS")
-    if args.cmd not in ("status", "abort") and args.out is None:
-        ap.error("--out is required: the output the generator / CLICK plays on")
+    if args.cmd not in ("status", "abort"):
+        if args.out is None:
+            ap.error("--out is required: the output the generator / CLICK plays on")
+        if args.role is None:
+            ap.error("--role is required: name what --out drives (woofer, full-range or tweeter)")
+        cap = level_max_db(args.role)
+        if args.level is None:
+            args.level = cap
+        if not args.level <= cap:
+            ap.error(f"--level above {cap} dBFS on a {args.role} output")
+        if args.cmd in ("click", "click-impulse") and args.role not in CLICK_ROLES:
+            ap.error(f"no CLICK on a {args.role} output: the firmware's CLICK is a fixed -20 dBFS sample")
     if args.fake:
         units = fake_units(args.fake)
     else:
@@ -572,7 +599,7 @@ def main(argv=None) -> int:
         if args.cmd in ("start", "click-impulse", "leads"):
             kind = "impulse" if args.cmd == "click-impulse" else args.type
             cfg = pack_config(kind, 1 << args.out, args.level, args.repeat, args.duration_ms, args.gap_ms,
-                              args.f1, args.f2, args.period_ms)
+                              args.f1, args.f2, args.period_ms, role=args.role)
             length = run_ms(kind, args.repeat, args.duration_ms, args.gap_ms, args.period_ms)
         if args.cmd == "status":
             _print(bench.status(), args.json)

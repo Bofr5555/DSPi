@@ -3,7 +3,7 @@
 #include <math.h>
 #include "pdm_generator.h"
 #include "alink_input.h"
-#if DSPI_ALINK || DSPI_ALINK_USB
+#if DSPI_ALINK || DSPI_ALINK_USB || DSPI_ALINK_SPDIF   // review fwbc N9: S/PDIF-only builds too
 #include "audio_pipeline.h"   // pipeline_click_inject (WP LK6)
 #endif
 #include "rta.h"
@@ -712,7 +712,7 @@ static void __not_in_flash_func(eq_worker_loop)() {
         // convert rows 2-7 to S24 in place first, so ADAT always sees
         // converted samples; otherwise fuse
         // convert+interleave per pair.  Then interleave pairs 1-3.
-#if (DSPI_ALINK || DSPI_ALINK_USB) && PICO_RP2350
+#if (DSPI_ALINK || DSPI_ALINK_USB || DSPI_ALINK_SPDIF) && PICO_RP2350
         pipeline_click_inject(buf_out, CORE1_EQ_FIRST_OUTPUT, CORE1_EQ_LAST_OUTPUT);
 #endif
         bool finalize_s24 = core1_eq_work.finalize_s24 != 0;

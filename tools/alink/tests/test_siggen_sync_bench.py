@@ -137,7 +137,7 @@ def bench_of(*devs, rate=FS):
 
 
 def sweep(repeat=2, out=2):
-    return sb.pack_config("sweep", 1 << out, -20.0, repeat, 300, 20)
+    return sb.pack_config("sweep", 1 << out, -20.0, repeat, 300, 20, role="woofer")
 
 
 SWEEP_MS = sb.run_ms("sweep", 2, 300, 20, 0)
@@ -168,7 +168,7 @@ class TestWire(NoDevices):
         self.assertEqual(sb.pack_apply(0, 0, tb=3)[12], 3)
 
     def test_config_layout_and_guards(self):
-        c = sb.pack_config("sweep", 1 << 2, -20.0, 3, 300, 20, 20.0, 20000.0)
+        c = sb.pack_config("sweep", 1 << 2, -20.0, 3, 300, 20, 20.0, 20000.0, role="woofer")
         self.assertEqual(len(c), 36)
         ver, typ, mask, inv, flags, _r, lvl, dur, rep, gap, p1, p2, p3, p4 = struct.unpack("<BBHHBBfIHHffff", c)
         self.assertEqual((ver, typ, mask, inv, flags, dur, rep, gap), (1, 4, 4, 0, 0, 300, 3, 20))
@@ -178,13 +178,26 @@ class TestWire(NoDevices):
         self.assertEqual(struct.unpack_from("<I", imp, 12)[0], 0)
         self.assertEqual(struct.unpack_from("<f", imp, 20)[0], 50.0)
         with self.assertRaises(ValueError):
-            sb.pack_config("sweep", 1, -10.0, 3)            # above -20 dBFS
+            sb.pack_config("sweep", 1, -10.0, 3, role="woofer")     # above -20 dBFS
         with self.assertRaises(ValueError):
-            sb.pack_config("sweep", 1, -20.0, 0)            # not finite (R4)
+            sb.pack_config("sweep", 1, -20.0, 0, role="woofer")     # not finite (R4)
         with self.assertRaises(ValueError):
-            sb.pack_config("sweep", 0, -20.0, 1)            # no output
+            sb.pack_config("sweep", 0, -20.0, 1, role="woofer")     # no output
         with self.assertRaises(ValueError):
-            sb.pack_config("sine", 1, -20.0, 1)             # continuous: not offered
+            sb.pack_config("sine", 1, -20.0, 1, role="woofer")      # continuous: not offered
+
+    def test_review_fwbc_n4_tweeter_cap(self):
+        # review fwbc N4: -20 dBFS only on a named woofer / full-range output;
+        # a tweeter, or an output whose role is not named, gets -30 dBFS at most.
+        for role in ("woofer", "full-range"):
+            self.assertEqual(len(sb.pack_config("sweep", 1, -20.0, 1, role=role)), 36)
+        for role in ("tweeter", None):
+            with self.assertRaises(ValueError):
+                sb.pack_config("sweep", 1, -20.0, 1, role=role)
+            with self.assertRaises(ValueError):
+                sb.pack_config("impulse", 1, -29.9, 1, role=role)
+            c = sb.pack_config("sweep", 1, -30.0, 1, role=role)
+            self.assertEqual(struct.unpack_from("<f", c, 8)[0], -30.0)
 
     def test_decoders_against_the_fake(self):
         d = GenDevice()
@@ -315,7 +328,7 @@ class TestOthers(NoDevices):
     def test_click_and_impulse_one_unit(self):
         a = GenDevice()
         bench, _w = bench_of(a)
-        cfg = sb.pack_config("impulse", 1 << 2, -20.0, 2, period_ms=100.0)
+        cfg = sb.pack_config("impulse", 1 << 2, -20.0, 2, period_ms=100.0, role="woofer")
         rep = bench.click_impulse("A", cfg, 2, lead_ms=400, run_ms_=200)
         self.assertEqual(rep["verdict"], "PASS", json.dumps(rep, default=str, indent=1))
         u = rep["units"]["A"]
@@ -356,9 +369,35 @@ class TestOthers(NoDevices):
         self.assertTrue(st["A"]["capable"] and st["B"]["capable"])
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
-                sb.main(["start", "--fake", "2", "--out", "2", "--level", "-6"])
+                sb.main(["start", "--fake", "2", "--out", "2", "--role", "woofer", "--level", "-6"])
             with self.assertRaises(SystemExit):
                 sb.main(["start", "--fake", "2"])              # --out required
+            # review fwbc N4: the role is required; a tweeter takes -30 dBFS at most and no CLICK.
+            with self.assertRaises(SystemExit):
+                sb.main(["start", "--fake", "2", "--out", "2"])
+            with self.assertRaises(SystemExit):
+                sb.main(["start", "--fake", "2", "--out", "3", "--role", "tweeter", "--level", "-20"])
+            with self.assertRaises(SystemExit):
+                sb.main(["start", "--fake", "2", "--out", "3", "--role", "tweeter", "--level", "-29"])
+            for cmd in ("click", "click-impulse"):
+                with self.assertRaises(SystemExit):
+                    sb.main([cmd, "--fake", "2", "--out", "3", "--role", "tweeter"])
+
+    def test_review_fwbc_n4_tweeter_default_level(self):
+        # The default level is the role's cap: a tweeter run stages -30 dBFS.
+        staged = []
+        real = sb.Bench.stage
+        def spy(self, cfg, *a, **k):
+            staged.append(struct.unpack_from("<f", cfg, 8)[0])
+            return real(self, cfg, *a, **k)
+        sb.Bench.stage = spy
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                sb.main(["start", "--fake", "2", "--out", "3", "--role", "tweeter", "--repeat", "1"])
+        finally:
+            sb.Bench.stage = real
+        self.assertTrue(staged)
+        self.assertTrue(all(v == -30.0 for v in staged), staged)
 
 
 if __name__ == "__main__":

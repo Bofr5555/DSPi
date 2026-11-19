@@ -16,7 +16,16 @@
 // write and back); and the latency equal to D plus the constant quarter frame
 // of the word quantisation (within half a frame).
 //
+// The 10 s figure holds at this seed and these feed-forward errors only
+// (review fwbc N1: about 0.2 frame per ppm of feed-forward residual the
+// integrator has not removed yet).  The robust criterion is the settled skew:
+// settled() runs several seeds with +-0.5 ppm feed-forward errors (the line's
+// long rate window measures 0.13 to 0.81 ppm) and checks the skew 40-45 s
+// after the start, with the 10-15 s figure printed for reference.
+//
 //   tools/alink_spdif_sim/run.sh       (exit 1 on a failure)
+
+#include <inttypes.h>
 
 #include "alink_spdif_world.h"
 
@@ -141,9 +150,41 @@ static void scenario(uint32_t fs, uint16_t d) {
            SW.fol[0].u.ph.e, SW.fol[1].u.ph.e);
 }
 
+// review fwbc N1: the settled skew over several seeds, feed-forward +-0.5 ppm.
+static void settled(uint32_t fs, uint16_t d) {
+    static const uint64_t seeds[] = { 0xC0FFEEull, 0xBADC0DEull, 0x1234567ull, 0x5EEDull };
+    double worst_early = 0, worst = 0;
+    for (unsigned k = 0; k < sizeof seeds / sizeof seeds[0]; k++) {
+        sw_world_init(fs, 3.0, seeds[k] + fs);
+        SW.word_jit_us = 0.05;
+        SW.nfol = 2;
+        sw_fol_init(&SW.fol[0], 6.0, d, 650.0);
+        sw_fol_init(&SW.fol[1], -4.0, d, 900.0);
+        SW.fol[0].ff_err = 0.5;
+        SW.fol[1].ff_err = -0.5;
+        sw_run(10.0, 0, NULL);
+        window(15.0);
+        double early = skew_max;
+        sw_run(40.0, 0, NULL);
+        window(45.0);
+        printf("  seed %#" PRIx64 ": skew max %.4f frame at 10-15 s, %.4f at 40-45 s (%d samples, silent %d)\n",
+               seeds[k], early, skew_max, n_obs, n_silent);
+        CHECK(n_obs > 1000 && n_silent == 0, "settled seed %#" PRIx64 ": observed (%d, silent %d)", seeds[k], n_obs,
+              n_silent);
+        CHECK(skew_max < 0.1, "settled seed %#" PRIx64 ": skew 40-45 s under 0.1 frame (%.4f)", seeds[k], skew_max);
+        if (early > worst_early) worst_early = early;
+        if (skew_max > worst) worst = skew_max;
+    }
+    printf("== %u Hz settled: worst skew %.4f frame at 40-45 s (%.4f at 10-15 s, not checked)\n", fs, worst,
+           worst_early);
+}
+
 int main(void) {
     scenario(48000, 192);
     scenario(96000, 320);
+    printf("== settled skew (review fwbc N1): seeds x feed-forward errors +0.5 / -0.5 ppm\n");
+    settled(48000, 192);
+    settled(96000, 320);
     printf("alink_spdif_sim: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

@@ -5,6 +5,7 @@
 #include "hardware/structs/watchdog.h"
 
 #include "flash_storage.h"
+#include "pico/binary_info.h"
 
 // Build default from the DSPI_VREG_MV cache variable (CMakeLists.txt).
 #if !defined(DSPI_VREG_MV) || DSPI_VREG_MV == 1150
@@ -18,6 +19,24 @@
 #else
 #error "DSPI_VREG_MV must be 1150, 1200, 1250 or 1300"
 #endif
+
+// -- WP FWSTAMP -- the core-voltage stamp (owner 2026-11-19).  A
+// BINARY_INFO_ID_AND_STRING entry, tag 'DS', id 0x0B7A4C15, whose text is
+// this build's DSPI_VREG_MV ("1150", "1200", "1250" or "1300").  The
+// console's firmware guard (dspi-core firmware_guard.rs, image_stamp) reads it
+// from a UF2 before a BOOTSEL install: a stamp proves the image is ours
+// (lineage "bofr", it has this core_vreg.c) and names the lowest voltage it
+// ever boots at (resolve() below: the build default is a floor).  Without it
+// every install of our own image asks the lineage phrase or the voltage words.
+// Upstream images have no core_vreg.c and so never carry it.  Change the tag,
+// id or text format only together with the console's parser.
+#ifndef DSPI_VREG_MV
+#define DSPI_VREG_MV 1150
+#endif
+#define CORE_VREG_STR2(x) #x
+#define CORE_VREG_STR(x) CORE_VREG_STR2(x)
+#define CORE_VREG_STAMP_ID 0x0B7A4C15
+bi_decl(bi_string(BINARY_INFO_MAKE_TAG('D', 'S'), CORE_VREG_STAMP_ID, CORE_VREG_STR(DSPI_VREG_MV)))
 
 // SCRATCH0: [31:16] magic, [3:0] hang count, [8:4] trial vreg (0 = none),
 //           [13:9] failed-trial vreg (0 = none).  Bits 14,15 spare.
