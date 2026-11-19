@@ -35,7 +35,9 @@
 // arithmetic. The writer encodes producer blocks directly into the ring,
 // stamping IEC preamble/channel-status from the absolute frame index
 // (phase = frames mod 192, which cannot live in ring position because 192
-// does not divide a power of two), and keeps ERASE_AHEAD frames of valid
+// does not divide a power of two; with PICO_AUDIO_SPDIF_UBITS the index is
+// unwrapped so the phase stays continuous at 2^32, and the user bits come
+// from the superframe table, audio_spdif_ring_core.h), and keeps ERASE_AHEAD frames of valid
 // silence stamped ahead of real audio: a stalled producer plays clean
 // silence, never a loop of stale ring content.
 //
@@ -44,15 +46,10 @@
 // output types), preserving inter-slot alignment deterministically.
 // ---------------------------------------------------------------------------
 
-_Static_assert((PICO_AUDIO_SPDIF_RING_FRAMES & (PICO_AUDIO_SPDIF_RING_FRAMES - 1)) == 0,
-    "ring frame count must be a power of two");
-
-#define RING_FRAMES      PICO_AUDIO_SPDIF_RING_FRAMES
-#define RING_MASK        (RING_FRAMES - 1u)
-#define RING_WORDS       (RING_FRAMES * 4u)
-#define RING_BYTES       PICO_AUDIO_SPDIF_RING_BYTES
-// Writable window: capacity minus the silence margin the writer maintains.
-#define WRITABLE_FRAMES  (RING_FRAMES - PICO_AUDIO_SPDIF_ERASE_AHEAD)
+// Ring geometry, the instance registry, the IEC 60958 stampers, the silence
+// pump, skip and writer, and the user-bit table (WP FWSP1): one internal
+// header, so the host test runs the same code (audio_spdif_ring_core.h).
+#include "audio_spdif_ring_core.h"
 
 #if !PICO_RP2350
 // Reload source word for the RP2040 free-running pair. Deliberately
@@ -79,122 +76,6 @@ static int pio_program_offset[3] = {-1, -1, -1};
 static bool spdif_pio_encoder_requested[3] = {true, true, true};
 static bool spdif_pio_encoder_loaded[3];
 
-// Instance registry (starvation getters and group operations)
-static audio_spdif_instance_t *spdif_instances[PICO_AUDIO_SPDIF_MAX_INSTANCES];
-static uint spdif_instance_count = 0;
-
-
-// ---------------------------------------------------------------------------
-// S/PDIF constants
-// ---------------------------------------------------------------------------
-
-#define PREAMBLE_X 0b11001001
-#define PREAMBLE_Y 0b01101001
-#define PREAMBLE_Z 0b00111001
-
-// IEC 60958-3 consumer channel status (5 bytes = 40 bits)
-// Byte values verified against Linux kernel include/sound/asoundef.h
-static uint8_t spdif_channel_status[5] = {
-    0x04,  // Byte 0: consumer, PCM, copy permitted
-    0x00,  // Byte 1: general category
-    0x00,  // Byte 2: source/channel
-    0x00,  // Byte 3: sample rate (set dynamically via update_pio_frequency)
-    0x0B,  // Byte 4: max=24bit, word length=24bit (0x01 | 0x0A)
-};
-
-static inline uint get_channel_status_bit(uint subframe_idx) {
-    if (subframe_idx >= 40) return 0;
-    return (spdif_channel_status[subframe_idx / 8] >> (subframe_idx % 8)) & 1u;
-}
-
-// Encode one stereo frame at ring position `p` with IEC phase `phase`.
-static inline void stamp_frame(spdif_subframe_t *p, uint phase,
-                               int32_t l, int32_t r) {
-    uint c = get_channel_status_bit(phase);
-    p[0].l = (phase == 0) ? PREAMBLE_Z : PREAMBLE_X;
-    p[0].h = 0x55000000u | (c << 29u);
-    spdif_update_subframe(&p[0], l);
-    p[1].l = PREAMBLE_Y;
-    p[1].h = 0x55000000u | (c << 29u);
-    spdif_update_subframe(&p[1], r);
-}
-
-// Zero PCM encodes to alternating bits, with only the preamble, channel
-// status and its matching parity bit varying. Write those words directly
-// instead of running the sample lookup/parity encoder twice per frame.
-// Always inline: the silence pump also runs while flash is unavailable.
-static inline __attribute__((always_inline))
-void stamp_silence_frame(spdif_subframe_t *p, uint phase) {
-    uint32_t c = get_channel_status_bit(phase);
-    uint32_t h = 0x55555555u | (c << 29u) | (c << 31u);
-    p[0].l = 0x55555500u | ((phase == 0) ? PREAMBLE_Z : PREAMBLE_X);
-    p[0].h = h;
-    p[1].l = 0x55555500u | PREAMBLE_Y;
-    p[1].h = h;
-}
-
-// PIO-encoder words (audio_spdif_bmc.pio). Control word: preamble as lead
-// and trail low-run counts, [2:0] and [5:3]. Data word: sample [23:0], V, U,
-// C at bits 24..26; parity comes from the PIO.
-#define BMC_CTRL_X  (4u | (1u << 3))
-#define BMC_CTRL_Y  (2u | (3u << 3))
-#define BMC_CTRL_Z  (0u | (5u << 3))
-
-static inline __attribute__((always_inline))
-void stamp_frame_bmc(spdif_subframe_t *p, uint phase, int32_t l, int32_t r) {
-    uint32_t c = (uint32_t)get_channel_status_bit(phase) << 26u;
-    p[0].l = (phase == 0) ? BMC_CTRL_Z : BMC_CTRL_X;
-    p[0].h = ((uint32_t)l & 0xFFFFFFu) | c;
-    p[1].l = BMC_CTRL_Y;
-    p[1].h = ((uint32_t)r & 0xFFFFFFu) | c;
-}
-
-static inline __attribute__((always_inline))
-void stamp_silence_frame_bmc(spdif_subframe_t *p, uint phase) {
-    uint32_t c = (uint32_t)get_channel_status_bit(phase) << 26u;
-    p[0].l = (phase == 0) ? BMC_CTRL_Z : BMC_CTRL_X;
-    p[0].h = c;
-    p[1].l = BMC_CTRL_Y;
-    p[1].h = c;
-}
-
-// Stamp n silence frames at absolute frames [e, e+n) in the instance's word
-// format. Always inline: callers run while flash may be unavailable.
-static inline __attribute__((always_inline))
-void stamp_silence_run(const audio_spdif_instance_t *inst, uint32_t e, uint32_t n) {
-    spdif_subframe_t *ring = (spdif_subframe_t *)inst->ring;
-    uint phase = e % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT;
-    if (inst->pio_bmc) {
-        while (n--) {
-            stamp_silence_frame_bmc(&ring[(e++ & RING_MASK) * 2u], phase);
-            if (++phase == PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT) phase = 0;
-        }
-    } else {
-        while (n--) {
-            stamp_silence_frame(&ring[(e++ & RING_MASK) * 2u], phase);
-            if (++phase == PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT) phase = 0;
-        }
-    }
-}
-
-// Stamp n audio frames from interleaved L/R samples at absolute frames [w, w+n).
-static inline __attribute__((always_inline))
-void stamp_audio_run(const audio_spdif_instance_t *inst, uint32_t w,
-                     const int32_t *lr, uint32_t n) {
-    spdif_subframe_t *ring = (spdif_subframe_t *)inst->ring;
-    uint phase = w % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT;
-    if (inst->pio_bmc) {
-        for (uint32_t i = 0; i < n; i++) {
-            stamp_frame_bmc(&ring[(w++ & RING_MASK) * 2u], phase, lr[i * 2u], lr[i * 2u + 1u]);
-            if (++phase == PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT) phase = 0;
-        }
-    } else {
-        for (uint32_t i = 0; i < n; i++) {
-            stamp_frame(&ring[(w++ & RING_MASK) * 2u], phase, lr[i * 2u], lr[i * 2u + 1u]);
-            if (++phase == PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT) phase = 0;
-        }
-    }
-}
 
 // (Re)initialise an instance's SM with the block's loaded program.
 static void spdif_sm_init(audio_spdif_instance_t *inst, uint pin) {
@@ -295,6 +176,9 @@ void audio_spdif_ring_reset(audio_spdif_instance_t *inst) {
     inst->snap_produced_frames = 0;
     inst->snap_consumed_frames = 0;
     inst->recovery_prewrite_fill_frames = UINT32_MAX;
+    // Block 0 restarts at frame 0 (and a carrying slot's user-bit table is
+    // emptied): before the silence stamp below, which reads both.
+    spdif_ubits_ring_reset(inst);
     // Re-anchor the HARDWARE read pointer too: the abort left it frozen
     // mid-ring, and any consumed/fill read before the next arm would
     // otherwise count a bogus base-to-stale delta into consumed_words,
@@ -308,97 +192,6 @@ void audio_spdif_ring_reset(audio_spdif_instance_t *inst) {
     // contents are not valid for this format. Must follow the read-addr
     // re-anchor above so the pump's consumed read is exactly zero.
     audio_spdif_ring_silence_pump(inst, RING_FRAMES);
-}
-
-SPDIF_TIME_CRITICAL
-void audio_spdif_ring_skip(audio_spdif_instance_t *inst, uint32_t frames) {
-    inst->underrun_frames += frames;
-    inst->wr_frames += frames;
-    // Restamp silence through the new margin: the reader immediately
-    // traverses the skipped span, which beyond the old erase-ahead may
-    // still hold stale audio from the previous lap.
-    uint32_t target = inst->wr_frames + PICO_AUDIO_SPDIF_ERASE_AHEAD;
-    uint32_t e = inst->erased_frames;
-    if ((int32_t)(target - e) > (int32_t)RING_FRAMES) e = target - RING_FRAMES;
-    if ((int32_t)(target - e) > 0) {
-        stamp_silence_run(inst, e, target - e);
-        e = target;
-    }
-    inst->erased_frames = e;
-}
-
-// Extend the silence region toward one full ring ahead of the reader so a
-// stalled producer can never loop stale content. Never touches unplayed
-// audio (the stamped span is exactly the free region). Bounded per call.
-SPDIF_TIME_CRITICAL
-void audio_spdif_ring_silence_pump(audio_spdif_instance_t *inst, uint32_t max_frames) {
-    uint32_t consumed = audio_spdif_ring_consumed_frames(inst);
-    uint32_t target = consumed + RING_FRAMES;
-    uint32_t e = inst->erased_frames;
-    if ((int32_t)(e - inst->wr_frames) < 0) e = inst->wr_frames;
-    int32_t need = (int32_t)(target - e);
-    if (need <= 0) return;
-    uint32_t n = ((uint32_t)need > max_frames) ? max_frames : (uint32_t)need;
-    stamp_silence_run(inst, e, n);
-    inst->erased_frames = e + n;
-}
-
-// ---------------------------------------------------------------------------
-// Ring writer
-// ---------------------------------------------------------------------------
-
-SPDIF_TIME_CRITICAL
-void audio_spdif_ring_write_s32(audio_spdif_instance_t *inst,
-                                const int32_t *lr, uint32_t frames) {
-    uint32_t consumed = audio_spdif_ring_consumed_frames(inst);
-    // Reader ahead of the writer is a deficit, not a full ring: it can
-    // overtake between the give path's admission and this write, and a
-    // reject then would advance every peer's wr but not this slot's.
-    int32_t signed_fill = (int32_t)(inst->wr_frames - consumed);
-    uint32_t fill = (signed_fill > 0) ? (uint32_t)signed_fill : 0u;
-
-    // All-or-nothing: a partial write would advance this slot's wr by a
-    // different amount than its peers', permanently skewing alignment. The
-    // DSPi give path admits a block only when EVERY enabled slot has space,
-    // and space only grows afterwards, so this reject is unreachable there.
-    uint32_t writable = (fill < WRITABLE_FRAMES) ? (WRITABLE_FRAMES - fill) : 0;
-    if (frames > writable) {
-        inst->drop_frames += frames;
-        inst->snap_produced_frames = inst->wr_frames;
-        inst->snap_consumed_frames = consumed;
-        return;
-    }
-
-    // Phase = w mod 192. Known limit: at the uint32 wrap (~24.8 h of
-    // uninterrupted streaming, and any ring reset restarts the clock) the
-    // phase steps by 64 for one block; receivers resync on the next Z.
-    uint32_t w = inst->wr_frames;
-    stamp_audio_run(inst, w, lr, frames);
-    w += frames;
-    inst->wr_frames = w;
-
-    // Extend the erase-ahead silence margin.
-    // Signed ordering: raw compares break at the uint32 counter wrap.
-    uint32_t e = inst->erased_frames;
-    if ((int32_t)(e - w) < 0) e = w;
-    uint32_t target = w + PICO_AUDIO_SPDIF_ERASE_AHEAD;
-    if ((int32_t)(target - e) > 0) {
-        stamp_silence_run(inst, e, target - e);
-        e = target;
-    }
-    inst->erased_frames = e;
-
-    // Recovery needs the fill before THIS block, not the post-write servo
-    // snapshot below. If the producer stalls, these `frames` remain real
-    // audio ahead of PDM's first inserted zero; counting them as silence
-    // would move the slot timeline by one block. Clamped at 0: frames the
-    // reader already passed are lost to this slot whatever the skip.
-    inst->recovery_prewrite_fill_frames = fill;
-
-    // Latch the coherent produced/consumed pair (constant production phase;
-    // the clock servo's cumulative-count observable).
-    inst->snap_produced_frames = w;
-    inst->snap_consumed_frames = consumed;
 }
 
 // ---------------------------------------------------------------------------

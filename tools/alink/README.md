@@ -8,6 +8,7 @@ no devices). Protocol: `Documentation/Features/alink_protocol_spec.md`.
 | File | Purpose |
 |---|---|
 | `alink_codec.py` | 8b/10b, CRCs, frame layout and 44.1 kHz lengths, the capacity table `CAPACITY` (the only one; spec 5.7), superframe, PRBS-7, `Encoder`, the reference receiver `Decoder`, the log format and test helpers of spec section 9.2 |
+| `alink_spdif.py` | the S/PDIF carriage twin (WP FWSP1, spec section 12): the 48-byte superframe in the user bits, validity, the block builder and apply carriage, the user-bit order, the 896-frame lead; `python3 -I alink_spdif.py` regenerates `firmware/tests/alink_spdif_vectors.json` (shared with `firmware/tests/test_alink_spdif_codec.c`); `tests/test_alink_spdif.py` |
 | `gen_vectors.py` | regenerates `firmware/tests/alink_vectors.json` (shared with `firmware/tests/test_alink_codec.c`) |
 | `tests/test_alink_codec.py` | anchors, stream properties, receiver behaviour, and the vector file (current and passing) |
 | `bench.py` | drives alink bench Picos (`firmware/alink_bench`, WP LK3) over their USB consoles: lock, trim scan, BER, impairments, PASS/FAIL summary; `Documentation/Bench/alink_gpio_bench.md` |
@@ -22,6 +23,7 @@ no devices). Protocol: `Documentation/Features/alink_protocol_spec.md`.
 ```sh
 ./run.sh -m unittest discover -s tests -v
 ./run.sh gen_vectors.py > ../../firmware/tests/alink_vectors.json   # after a deliberate protocol change
+./run.sh alink_spdif.py > ../../firmware/tests/alink_spdif_vectors.json   # S/PDIF carriage, likewise
 ```
 
 Decode a captured bit stream (bytes, MSB first) with the reference receiver:
