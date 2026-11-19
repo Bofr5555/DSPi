@@ -245,4 +245,64 @@ bool siggen_output_ready_now(void);
 // reset paths (audio is already muted there).  Safe to call when idle.
 void siggen_stop_immediate(uint8_t stop_reason);
 
+// ---------------------------------------------------------------------------
+// Start on the time base: apply ops 9 SIGGEN_START / 10 SIGGEN_STOP (WP FWTB1,
+// test_signals_spec.md 15, extension_channel_spec.md 2.8.7.1, 2.11.2).
+// RP2350 builds with a time base only (DSPI_SIGGEN_SYNC; never RP2040, PLAN-AT
+// OD-ATm).  Every call is from Core 0 main-loop context.
+//
+// The transport (alink_input.c, alink_usb_core.c; S/PDIF in WP FWSP2) owns the
+// queue entry of the op; the generator owns the decision:
+//   write   siggen_tb_accept() (one per unit, the lead) -> the transport queues it
+//   poll    siggen_tb_poll() every pass: arms at T - arm_lead (preconditions)
+//   at T    the transport splits the block so that the next sample processed
+//           is T and calls siggen_tb_fire(): the generator's sample 0 is T
+//   drop    the generator gives the op up (a cancel, a refusal at arming):
+//           siggen_port_drop_op9() makes the transport remove and report it
+// ---------------------------------------------------------------------------
+#if DSPI_SIGGEN_SYNC
+// Op 9 written per unit (EXT_APPLY_AT_FRAME): T on time base tb, t_now the
+// sample entering the pipeline now, fs the rate.  0 = accepted (the caller
+// queues it, nothing else refuses after this), else the refusal (timebase.h
+// TB_ERR_STATE: another op 9 pending, a lead under arm_lead or over 120 s).
+uint8_t siggen_tb_accept(uint8_t tb, uint64_t t, uint64_t t_now, uint32_t fs);
+// Op 9 taken from a superframe (the broadcast): false = completes refused at
+// once (REFUSED_NOT_READY: one pending already, or seen less than arm_lead
+// before T, or the lead over 120 s); the caller reports 0xE2 refused.
+bool siggen_tb_accept_broadcast(uint8_t tb, uint64_t t, uint64_t t_now, uint32_t fs);
+// Every pass while the time base runs: arms the pending op at T - arm_lead.
+void siggen_tb_poll(uint8_t tb, uint64_t t_now, uint32_t fs);
+// The pending op 9 is due: the next sample the pipeline processes is T (or T
+// has passed: late).  ready: the time base is LOCKED and the unit is not muted
+// (REQ_SET_USER_MUTE, the line's system-mute flag, the host's UAC mute on
+// USB).  Returns ALINK_APPLY_APPLIED (started on T) or ALINK_APPLY_REFUSED.
+uint8_t siggen_tb_fire(uint8_t tb, uint64_t t, bool late, bool ready);
+// Op 10 at its sample: arg 0 = SIGGEN_CTL_STOP (fade), 1 = STOP_NOW.  Clears
+// the fresh-config flag; a pending op 9 stays (and is refused at T).
+void siggen_tb_stop_op(uint8_t arg);
+// The transport removed the pending op 9 itself (CANCEL_ALL, its own stop):
+// last_result `result` (TB_RES_*).
+void siggen_tb_dropped(uint8_t result);
+// A CANCEL_ALL of any time base: clears the fresh-config flag and cancels a
+// pending op 9 (CANCELLED_HOST).
+void siggen_tb_cancel_all(void);
+// timebase.c: time base tb left LOCKED (R3): a pending op 9 on it is
+// cancelled (CANCELLED_LOSS), a generator op 9 started on it stops as by
+// STOP_NOW (STOPPED_LOSS), the fresh-config flag clears.  n disturbances.
+void siggen_tb_loss(uint8_t tb, uint16_t n);
+// timebase.c: n disturbances of time base tb (re-anchor, correction, ...)
+// while LOCKED: discontinuities of a run on it.
+void siggen_tb_disturbed(uint8_t tb, uint16_t n);
+// main.c: the output rings restarted (pipeline reset): a discontinuity.
+void siggen_tb_pipeline_reset(void);
+// EXT_SIGGEN_TIMELINE (40 bytes).
+void siggen_tb_timeline(uint8_t out[40]);
+
+// Port: main.c / timebase.c (firmware), the host tests.
+uint16_t siggen_port_arm_lead_ms(void);      // max(hold_ms, release_ms) + 50
+uint32_t siggen_port_slips(void);            // output ring underrun episodes (overruns)
+void     siggen_port_drop_op9(uint8_t tb, uint8_t apply_result);
+bool     siggen_port_tb_now(uint8_t *tb, uint64_t *t);   // a LOCKED time base's next sample
+#endif
+
 #endif // SIGGEN_H

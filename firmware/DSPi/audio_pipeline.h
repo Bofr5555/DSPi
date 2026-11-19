@@ -100,6 +100,9 @@ static inline void pipeline_click_inject(float (*out)[192], int first, int last)
 // reader's DMA word (fractional) and the frames played since the ring reset.
 // False when no valid reading exists.
 bool slot_ring_play_position(uint slot, float *fill, uint32_t *played);
+#if DSPI_SIGGEN_SYNC
+bool slot_ring_counters(uint slot, uint32_t *wr, uint32_t *played);   // WP FWTB1, interrupts masked
+#endif
 #endif
 
 // Buffer statistics helpers (used by vendor_commands.c and pipeline)

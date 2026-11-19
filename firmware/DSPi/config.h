@@ -170,6 +170,10 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define EXT_ALINK_USB                0x8010  // IN/OUT: 8 B
 #define EXT_ALINK_USB_STATUS         0x8011  // IN: 64 B
 #define EXT_ALINK_USB_DIAG           0x8012  // IN: 64 B; OUT: 1 B (1 = clear) (WP USB2)
+// Time-base and measurement block (extension_channel_spec.md 2.11, WP FWTB1):
+// RP2350 builds with a time base (DSPI_SIGGEN_SYNC); never RP2040.
+#define EXT_TIME_BASE                0x8030  // IN: 64 B (timebase.h)
+#define EXT_SIGGEN_TIMELINE          0x8031  // IN: 40 B (siggen.h)
 
 // Fixed firmware bugs a host may rely on (EXT_FIRMWARE_FIXES).  A bit is set
 // only while the fix is in the tree; bits 1-31 are reserved, zero.

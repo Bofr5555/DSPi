@@ -130,6 +130,7 @@ void alink_usb_init(alink_usb_t *us) {
     alink_apply_init(&us->aq);
     us->diag.last_cause = 0xFF;
     us->parked = true;
+    tb_track_init(&us->tbk);
 }
 
 static void sync_ph(alink_usb_t *us) {
@@ -170,6 +171,7 @@ uint32_t alink_usb_ring_target(alink_usb_t *us, uint32_t fs, uint32_t target, ui
 }
 
 static void timeline_end(alink_usb_t *us);
+static void tb_note(alink_usb_t *us, uint8_t tb_rs);
 static bool rate_ready(const alink_usb_t *us);
 static void end_cause(alink_usb_t *us, uint8_t cause);
 
@@ -202,6 +204,7 @@ bool alink_usb_set_config(alink_usb_t *us, const uint8_t p[ALINK_USB_CFG_LEN]) {
             us->ev_reason = ALINK_USB_RS_REANCHOR;
             us->ev_gap_last = false;
         }
+        tb_note(us, again ? TB_RS_REANCHOR : TB_RS_NONE);
     }
     return true;
 }
@@ -358,6 +361,36 @@ uint32_t alink_usb_bus_form(const alink_usb_t *us, uint64_t s) {
 // Events
 // ---------------------------------------------------------------------------
 
+// WP FWTB1: the contract's view of this transport (alink_protocol_spec.md
+// 11.2) and the reasons that are its own (a transition alone gets LOCKED,
+// LOST, HOLDOVER, RESUMED or LOCK_ERROR from the tracker).  Only on builds
+// with the time-base block (DSPI_SIGGEN_SYNC: RP2350, never RP2040).
+#if DSPI_SIGGEN_SYNC
+uint8_t alink_usb_tb_state(const alink_usb_t *us) {
+    if (us->mode == ALINK_USB_MODE_OFF) return TB_ST_NONE;
+    return tb_usb_state(us->state, us->ph.state, us->started, us->dark, us->lock_err);
+}
+
+static uint8_t tb_reason(uint8_t r) {
+    switch (r) {
+    case ALINK_USB_RS_REANCHOR:   return TB_RS_REANCHOR;
+    case ALINK_USB_RS_DISABLED:   return TB_RS_DISABLED;
+    case ALINK_USB_RS_CONFIG:     return TB_RS_CONFIG;
+    case ALINK_USB_RS_RESUMED:    return TB_RS_RESUMED;
+    case ALINK_USB_RS_LOCK_ERROR: return TB_RS_LOCK_ERROR;
+    case ALINK_USB_RS_LOCK_OK:    return TB_RS_LOCK_OK;
+    default:                      return TB_RS_NONE;
+    }
+}
+
+static void tb_note(alink_usb_t *us, uint8_t tb_rs) {
+    (void)tb_track_note(&us->tbk, alink_usb_tb_state(us), tb_rs, (uint32_t)us->ph.next_w);
+}
+#else
+static uint8_t tb_reason(uint8_t r) { (void)r; return 0; }
+static void tb_note(alink_usb_t *us, uint8_t tb_rs) { (void)us; (void)tb_rs; }
+#endif
+
 static void set_state(alink_usb_t *us, uint8_t st, uint8_t reason) {
     if (st != us->state) {
         us->state = st;
@@ -369,6 +402,7 @@ static void set_state(alink_usb_t *us, uint8_t st, uint8_t reason) {
         us->ev_pending = true;
         us->ev_gap_last = false;
     }
+    tb_note(us, tb_reason(reason));
 }
 
 static void event_service(alink_usb_t *us, uint32_t now_ms) {
@@ -397,7 +431,7 @@ static void apply_report(alink_usb_t *us, uint8_t op, uint8_t result, uint64_t s
 static void apply_run(alink_usb_t *us, bool late) {
     alink_apply_op_t op;
     alink_apply_pop(&us->aq, &op);
-    uint8_t r = alink_usb_port_apply(&op);
+    uint8_t r = alink_usb_port_apply(&op, late);
     if (late && r == ALINK_APPLY_APPLIED) r = ALINK_APPLY_LATE;
     if (op.op == ALINK_OP_SYNC_PULSE && r != ALINK_APPLY_REFUSED) us->sync_pulses++;
     apply_report(us, op.op, r, op.frame);
@@ -412,6 +446,10 @@ void alink_usb_cancel_all(alink_usb_t *us) {
 }
 
 bool alink_usb_apply(alink_usb_t *us, const uint8_t p[ALINK_APPLY_LEN]) {
+    return alink_usb_apply_code(us, p) == TB_OK;
+}
+
+uint8_t alink_usb_apply_code(alink_usb_t *us, const uint8_t p[ALINK_APPLY_LEN]) {
     uint8_t q[ALINK_APPLY_LEN];
     memcpy(q, p, ALINK_APPLY_LEN);
     uint8_t tb = q[12];
@@ -419,32 +457,50 @@ bool alink_usb_apply(alink_usb_t *us, const uint8_t p[ALINK_APPLY_LEN]) {
     // The limits of alink_apply_args_ok(); the firmware's values (presets,
     // outputs, delay) are the same on the alink.
     alink_apply_op_t op;
-    if (!alink_apply_parse(&alink_usb_apply_limits, q, &op)) return false;
+    if (!alink_apply_parse(&alink_usb_apply_limits, q, &op)) return TB_ERR_VALUE;
     if (op.op == ALINK_APPLY_CANCEL_ALL) {
-        if (tb > 2u) return false;
+        if (tb > 2u) return TB_ERR_VALUE;
         alink_usb_cancel_all(us);
-        return true;
+        return TB_OK;
     }
-    if (tb != 1u && tb != 2u) return false;
-    if (!us->started || us->ph.state == ALINK_PHASE_ANCHORING) return false;     // no timeline, no S
+    if (tb > 3u) return TB_ERR_VALUE;
+    // R5: op 9 never in the bus-frame form (an old bus frame would wrap to
+    // 2.048 s later); a host writes S (time base 1).
+    if (tb == 2u && op.op == ALINK_OP_SIGGEN_START) return TB_ERR_VALUE;
+    if (tb != 1u && tb != 2u) return TB_ERR_STATE;                     // 3: no S/PDIF time base here
+    if (!us->started || us->ph.state == ALINK_PHASE_ANCHORING) return TB_ERR_STATE;   // no timeline, no S
     uint64_t now;
-    if (!alink_usb_sample_now(us, &now, NULL)) return false;
+    if (!alink_usb_sample_now(us, &now, NULL)) return TB_ERR_STATE;
     if (tb == 2u) {
         // Bus frame (bits 0-10) and the sample in it (bits 16-23): the next
         // occurrence of that frame; one in the last 64 frames is past (late).
-        if (op.frame & ~(uint64_t)0x00FF07FFu) return false;
+        if (op.frame & ~(uint64_t)0x00FF07FFu) return TB_ERR_VALUE;
         uint32_t bus = (uint32_t)op.frame & 0x7FFu, k = (uint32_t)(op.frame >> 16) & 0xFFu;
-        if (k >= us->spf) return false;
+        if (k >= us->spf) return TB_ERR_VALUE;
         uint32_t n_now = (uint32_t)(now / us->spf);
         uint32_t delta = (bus - n_now) & 0x7FFu;
         uint32_t n = delta >= 2048u - 64u ? n_now - (2048u - delta) : n_now + delta;
         op.frame = (uint64_t)us->spf * n + k;
     }
-    if (!alink_apply_push(&us->aq, &op)) return false;
+    if (us->aq.n >= ALINK_APPLY_DEPTH) return TB_ERR_STATE;
+    if (op.op == ALINK_OP_SIGGEN_START) {
+        // The lead against the sample entering the pipeline now, one op 9 per
+        // unit (2.8.7.1): the generator decides.
+        uint8_t r = alink_usb_port_op9_accept(op.frame, us->ph.next_w);
+        if (r != TB_OK) return r;
+    }
+    if (!alink_apply_push(&us->aq, &op)) return TB_ERR_STATE;
     // One pending pulse: a later SYNC_PULSE moves the GPIO's frame (review usb1 F7).
     if (op.op == ALINK_OP_SYNC_PULSE) (void)alink_usb_port_pulse((uint32_t)(op.frame / us->spf));
-    return true;
+    return TB_OK;
 }
+
+#if DSPI_SIGGEN_SYNC
+void alink_usb_drop_op9(alink_usb_t *us, uint8_t apply_result) {
+    alink_apply_op_t op;
+    if (alink_apply_remove(&us->aq, ALINK_OP_SIGGEN_START, &op)) apply_report(us, op.op, apply_result, op.frame);
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Timeline writes
@@ -675,6 +731,7 @@ static void phase_act(alink_usb_t *us, int act, int32_t k, float e) {
         if (us->ph.state == ALINK_PHASE_LOCKED && fabs_(e) <= (float)ALINK_PHASE_CORRECT_MAX) soft_reanchor(us);
         else reanchor_for(us, ALINK_USB_END_RE_PHASE);
     } else if (act == ALINK_PHASE_ACT_CORRECT) {
+        tb_note(us, TB_RS_CORRECTION);          // WP FWTB1: a disturbance of the timeline
         if (k > 0) {
             us->ph.next_w += (uint32_t)k;       // skip: those samples never reach the rings
         } else {
@@ -875,6 +932,7 @@ void alink_usb_service(alink_usb_t *us, uint32_t now_ms) {
         set_state(us, us->state, le ? ALINK_USB_RS_LOCK_ERROR : ALINK_USB_RS_LOCK_OK);
         event_service(us, now_ms);
     }
+    tb_note(us, TB_RS_NONE);                    // WP FWTB1: transitions with no event of their own
     // Owner decision 2026-11-14: muted while out of step in mode 2, every
     // pass (the request is refreshed, never accumulated).  Owner 2026-11-18
     // (WP FWSIGGEN): not while the signal generator plays with no host stream

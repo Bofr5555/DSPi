@@ -1853,6 +1853,28 @@ bool slot_ring_play_position(uint slot, float *fill, uint32_t *played) {
     *fill = (float)(int32_t)(wr - frames) - (float)rem / (float)wpf;
     return true;
 }
+
+#if DSPI_SIGGEN_SYNC
+// WP FWTB1 (EXT_TIME_BASE, timebase.h tb_t_at_output()): slot 0's frames
+// written and frames played as whole numbers.  The caller masks interrupts.
+bool slot_ring_counters(uint slot, uint32_t *wr, uint32_t *played) {
+    if (output_type_switch_in_progress) return false;
+    if (output_types[slot] == OUTPUT_TYPE_I2S) {
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[slot];
+        if (!inst || !inst->ring) return false;
+        (void)audio_i2s_ring_consumed_words(inst);
+        *wr = inst->wr_frames;
+        *played = inst->consumed_frames;
+    } else {
+        audio_spdif_instance_t *inst = spdif_instance_ptrs[slot];
+        if (!inst || !inst->ring) return false;
+        (void)audio_spdif_ring_consumed_words(inst);
+        *wr = inst->wr_frames;
+        *played = inst->consumed_frames;
+    }
+    return true;
+}
+#endif
 #endif
 
 uint32_t slot_ring_fill_frames(uint slot) {

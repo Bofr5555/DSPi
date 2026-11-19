@@ -334,8 +334,20 @@ static void test_layouts(void) {
     CHECK(snd_ctrl_parse(o, &m) == 4, "RATE with value != 0 refused");
     o[10] = 0; o[9] = 3;
     CHECK(snd_ctrl_parse(o, &m) == 4, "RATE code 3 refused");
+    // WP FWTB1: ops 9 SIGGEN_START (arg 0) and 10 SIGGEN_STOP (arg 0 fade, 1
+    // now) are carried; other arguments and op 11 are refused.
     memset(o + 8, 0, 8); o[8] = 9;
-    CHECK(snd_ctrl_parse(o, &m) == 1, "op 9 refused");
+    CHECK(snd_ctrl_parse(o, &m) == 0 && m.op == 9, "op 9 accepted");
+    o[9] = 1;
+    CHECK(snd_ctrl_parse(o, &m) == 5, "op 9 arg 1 refused");
+    o[8] = 10;
+    CHECK(snd_ctrl_parse(o, &m) == 0 && m.op == 10 && m.arg == 1, "op 10 now accepted");
+    o[9] = 2;
+    CHECK(snd_ctrl_parse(o, &m) == 5, "op 10 arg 2 refused");
+    o[9] = 0; o[10] = 1;
+    CHECK(snd_ctrl_parse(o, &m) == 5, "op 10 value 1 refused");
+    o[10] = 0; o[8] = 11;
+    CHECK(snd_ctrl_parse(o, &m) == 1, "op 11 refused");
     o[8] = 0; o[12] = 1;
     CHECK(snd_ctrl_parse(o, &m) == 0 && m.op == 0 && m.system_flags == 1, "op 0: system mute only");
     o[12] = 2;
@@ -371,6 +383,19 @@ static void test_layouts(void) {
     while (tx.frame < 1056) snd_frame(&tx, &T, z, &s, NULL);
     snd_ctrl_pack_in(&tx, 1056, in);
     CHECK(in[0] == 0x08 && !in[16] && !in[8] && !in[9], "apply gone after its frame");
+
+    // WP FWTB1: the sender relays op 9 in its superframe: valid for a
+    // receiver with the ops, rejected (code 6) by one built before them.
+    CHECK(alink_tx_init(&tx, ALINK_CLASS_L1, ALINK_RATE_48K, 8, 990, 0x5A), "init");
+    CHECK(alink_tx_schedule(&tx, 2400, ALINK_OP_SIGGEN_START, 0, 0), "SIGGEN_START at 2400");
+    snd_ctrl_pack_in(&tx, 990, in);
+    CHECK(in[16] == ALINK_OP_SIGGEN_START && in[8] == 0x60 && in[9] == 0x09, "CTRL_MSG IN shows op 9");
+    while (tx.frame < 1024) snd_frame(&tx, &T, z, &s, NULL);
+    alink_sf_t sf;
+    CHECK(alink_sf_unpack(tx.sf, &sf) == ALINK_SF_OK && sf.apply_op == ALINK_OP_SIGGEN_START &&
+          sf.apply_frame == 2400, "the superframe carries op 9 at 2400");
+    CHECK(alink_sf_unpack_ops(tx.sf, &sf, ALINK_OP_MAX_PRE_FWTB1) == ALINK_SF_ERR_APPLY,
+          "a receiver without the ops rejects it");
 }
 
 // ---------------------------------------------------------------------------

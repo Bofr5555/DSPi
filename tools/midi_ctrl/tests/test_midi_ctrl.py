@@ -279,7 +279,7 @@ class AlinkBlock(unittest.TestCase):
     """LK7: alink block 0x8000-0x800A and events 0xE1 / 0xE2 (extension_channel_spec.md 2.8)."""
 
     RX_IDS = (1, 2, 3, 4, 5, 6, 0x8000, 0x8001, 0x8002, 0x8003, 0x8004, 0x8005, 0x8006,
-              0x8008, 0x8009, 0x800A)
+              0x8008, 0x8009, 0x800A, 0x8030, 0x8031)       # 0x8030/0x8031: WP FWTB1 (2.11)
     TX_IDS = (1, 2, 3, 4, 5, 6, 0x8000, 0x8001, 0x8002, 0x8005, 0x8007, 0x8008, 0x8009, 0x800A)
 
     def client(self, alink):
@@ -315,15 +315,15 @@ class AlinkBlock(unittest.TestCase):
         self.assertEqual(struct.unpack(f"<{len(rep.payload) // 2}H", rep.payload), self.RX_IDS)
         self.assertEqual(self.ext(mc.EXT_LIST, wlength=64).payload, rep.payload)   # 32 B fit in 64
         feats = struct.unpack("<I", self.ext(mc.EXT_NOTIFY_FEATURES).payload)[0]
-        self.assertEqual(feats, 0x0F)
+        self.assertEqual(feats, 0x2F)                      # bit 5 TIME_BASE (WP FWTB1)
         # Byte-exact vectors from the spec (2.8.1, 2.8.3, 2.8.4, 2.8.5).
         self.assertEqual(self.ext(mc.EXT_ALINK_INFO).payload.hex(),
-                         "010107014008000000ff00002300000070000004000000000000000000000000")
+                         "010107014008000000ff00006300000070000004000000000000000000000000")
         self.assertEqual(self.ext(mc.EXT_ALINK_CONFIG).payload.hex(), "00ff00ffffff0300")
         self.assertEqual(self.ext(mc.EXT_ALINK_SLOTS).payload.hex(), "0001020304050607")
         self.assertEqual(self.ext(mc.EXT_ALINK_PHASE).payload.hex(), "0100800000000000")
         self.assertIn("role=receiver protocol=v1 classes=L1,L2,L3 max_alinks=1 max_channels=64 slots=8 "
-                      "rx_pin=GP0 tx_pin=none features=0x00000023 PHASE_LOCK APPLY_AT_FRAME LOS_PIN "
+                      "rx_pin=GP0 tx_pin=none features=0x00000063 PHASE_LOCK APPLY_AT_FRAME LOS_PIN SIGGEN_SYNC "
                       "d_local=112..1024", mc.decode_alink_info(self.ext(mc.EXT_ALINK_INFO).payload))
         # Sender-only forms are refused on a receiver; wrong direction / length too.
         self.assertEqual(self.ext(mc.EXT_ALINK_TX).status, mc.ST_ERROR)
@@ -418,7 +418,7 @@ class AlinkBlock(unittest.TestCase):
         self.assertEqual(self.ext(mc.EXT_APPLY_AT_FRAME).payload.hex(), "01000000" + "00" * 12)
         self.dev.alink.advance(2400, self.dev)
         n = self.c.wait_notify(lambda r: r.payload[1] == mc.NOTIFY_EVT_APPLY_RESULT, 0.5)
-        self.assertEqual(n.payload.hex(), "02e2000104000000a04b0f00")
+        self.assertEqual(n.payload.hex(), "02e2000204000000a04b0f00")      # seq 2: the lock sent 0xE1 and 0xE4
         self.assertIn("APPLY_RESULT op=MASTER_VOLUME result=applied frame_low32=1002400", mc.decode_notify(n.payload))
         self.assertEqual(self.ext(mc.EXT_APPLY_AT_FRAME).payload.hex(), "00040000a04b0f000000000000000000")
         # A frame already passed is applied at once and reported late.
@@ -437,7 +437,7 @@ class AlinkBlock(unittest.TestCase):
         self.assertEqual(got, [2, 2, 2, 2])
         self.assertEqual(self.ext(mc.EXT_APPLY_AT_FRAME).payload[:3], bytes([0, 2, 2]))
         # Invalid arguments and reserved bytes are refused.
-        for bad in (req(1_100_000, 9), req(1_100_000, 1, 1), req(1_100_000, 3, 10), req(1_100_000, 4, 0, 1),
+        for bad in (req(1_100_000, 11), req(1_100_000, 1, 1), req(1_100_000, 3, 10), req(1_100_000, 4, 0, 1),
                     req(1_100_000, 5, 9, 10), req(1_100_000, 5, 0, 2048),
                     req(1_100_000, 6, 1), req(1_100_000, 6, 0),       # RATE: superframe path only
                     req(1_100_000, 1)[:12] + b"\x00\x00\x00\x01"):
@@ -448,7 +448,7 @@ class AlinkBlock(unittest.TestCase):
         rep = self.ext(mc.EXT_LIST)
         self.assertEqual(struct.unpack(f"<{len(rep.payload) // 2}H", rep.payload), self.TX_IDS)
         self.assertEqual(self.ext(mc.EXT_ALINK_INFO).payload.hex(),
-                         "020107084000000014ff00003800000000000000000000000000000000000000")
+                         "020107084000000014ff00007800000000000000000000000000000000000000")
         for sub in (mc.EXT_ALINK_SLOTS, mc.EXT_ALINK_PHASE, mc.EXT_APPLY_AT_FRAME):
             self.assertEqual(self.ext(sub).status, mc.ST_ERROR, hex(sub))
         self.assertEqual(self.ext(mc.EXT_ALINK_TX).payload.hex(), "00000108010000ffff00000000000000")
@@ -506,6 +506,92 @@ class AlinkBlock(unittest.TestCase):
         self.assertEqual(self.put(mc.EXT_ALINK_CTRL_MSG, msg(2592, 6, 0)), mc.ST_OK)        # to 44.1 kHz
         ln.advance(2592 - 96, self.dev)
         self.assertEqual(self.ext(mc.EXT_ALINK_CTRL_MSG).payload[1], 0)                    # rate code 0 now
+
+    # -- WP FWTB1: ops 9 / 10, EXT_TIME_BASE, EXT_SIGGEN_TIMELINE, 0xE4 -------------
+
+    def test_fwtb1_spec_examples_decode(self):
+        # 2.11.1 and 2.11.2's example bytes through the decoders.
+        tb = bytes.fromhex("010200000 0e1f505003e4900".replace(" ", "")
+                           + "010003010000000100b4c40400000000010 0c0000000003e".replace(" ", "")
+                           + "0301030b4237030300a60e0000000000040000000000000 0".replace(" ", "")
+                           + "00000000")
+        txt = mc.decode_time_base(tb)
+        self.assertIn("entries=2 time_us=100000000 output_frames=4800000", txt)
+        self.assertIn("[0] time_base=usb role=follower state=LOCKED last_reason=LOCKED domain=0x01000000 "
+                      "t=80000000 disturbances=1 d=192 phase_error=+0.125", txt)
+        self.assertIn("[1] time_base=spdif role=source state=LOCKED last_reason=EPOCH domain=0x03033742 "
+                      "t=960000 disturbances=4 d=0", txt)
+        tl = bytes.fromhex("010103010000960 0e0e2c40400000000000000000000000080bb0000000000000700000000000000"
+                           .replace(" ", ""))
+        self.assertEqual(mc.decode_siggen_timeline(tl),
+                         "v1 time_base=usb state=running last_result=started discontinuities=0 arm_lead_ms=150 "
+                         "start=80012000 pending=0 samples=48000 held=0 run_id=7")
+        self.assertIn("TIME_BASE time_base=spdif state=LOCKED reason=LOCKED T_low32=960000",
+                      mc.decode_notify(bytes.fromhex("02e400050303010000a60e00")))
+        # 2.8.7.1's op 9 write (USB time base 1, S = 80 012 000).
+        self.assertEqual(struct.pack("<QBBh4B", 80_012_000, 9, 0, 0, 1, 0, 0, 0).hex(),
+                         "e0e2c40400000000090000000100000 0".replace(" ", ""))
+
+    def test_fwtb1_receiver_ops(self):
+        self.client("receiver")
+        req = lambda frame, op, arg=0, value=0: struct.pack("<QBBh4x", frame, op, arg, value)
+        self.assertEqual(self.ext(mc.EXT_TIME_BASE).payload[:2], bytes([1, 0]))   # alink off: no entry
+        self.assertEqual(self.put(mc.EXT_TIME_BASE, bytes(64)), mc.ST_ERROR)      # IN only
+        self.assertEqual(self.put(mc.EXT_SIGGEN_TIMELINE, bytes(40)), mc.ST_ERROR)
+        self.lock()
+        ln = self.dev.alink
+        f0 = ln.frame
+        tb = self.ext(mc.EXT_TIME_BASE).payload
+        self.assertEqual(len(tb), 64)
+        self.assertEqual(tb[:2], bytes([1, 1]))
+        self.assertEqual(tb[12:16], bytes([0, 0, 3, 1]))       # line, follower, LOCKED, reason LOCKED
+        self.assertEqual(struct.unpack_from("<IQ", tb, 16), (0x5A, f0))
+        tl = self.ext(mc.EXT_SIGGEN_TIMELINE).payload
+        self.assertEqual(tl[:8], bytes([1, 0xFF, 0, 0, 0, 0, 150, 0]))
+        # Op 9: arm lead 150 ms (7200 frames) to 120 s; one pending; args.
+        self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, req(f0 + 7199, 9)), mc.ST_ERROR)
+        self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, req(f0 + 120 * 48000 + 1, 9)), mc.ST_ERROR)
+        self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, req(f0 + 12000, 9, 1)), mc.ST_ERROR)
+        self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, req(f0 + 12000, 9)), mc.ST_OK)
+        self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, req(f0 + 24000, 9)), mc.ST_ERROR)    # one pending
+        tl = self.ext(mc.EXT_SIGGEN_TIMELINE).payload
+        self.assertEqual((tl[2], struct.unpack_from("<Q", tl, 16)[0]), (1, f0 + 12000))
+        ln.advance(12000, self.dev)
+        n = self.c.wait_notify(lambda r: r.payload[1] == mc.NOTIFY_EVT_APPLY_RESULT, 0.5)
+        self.assertIn("op=SIGGEN_START result=applied", mc.decode_notify(n.payload))
+        tl = self.ext(mc.EXT_SIGGEN_TIMELINE).payload
+        self.assertEqual((tl[2], tl[3], struct.unpack_from("<Q", tl, 8)[0], struct.unpack_from("<I", tl, 32)[0]),
+                         (3, 1, f0 + 12000, 1))
+        # A loss (holdover) stops the run op 9 started: STOPPED_LOSS, a
+        # disturbance, and 0xE4.
+        self.dev.alink_event(3, 4)
+        e4 = self.c.wait_notify(lambda r: r.payload[1] == mc.NOTIFY_EVT_TIME_BASE, 0.5)
+        self.assertIn("TIME_BASE time_base=line state=HOLDOVER reason=HOLDOVER", mc.decode_notify(e4.payload))
+        tl = self.ext(mc.EXT_SIGGEN_TIMELINE).payload
+        self.assertEqual((tl[2], tl[3]), (0, 7))
+        self.assertEqual(struct.unpack_from("<H", self.ext(mc.EXT_TIME_BASE).payload, 28)[0], 1)
+        # Op 10 (fade / now) and op 11.
+        self.dev.alink_event(2, 1)
+        self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, req(ln.frame + 100, 10, 1)), mc.ST_OK)
+        self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, req(ln.frame + 100, 10, 2)), mc.ST_ERROR)
+        self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, req(ln.frame + 100, 11)), mc.ST_ERROR)
+        # A pending op 9, then CANCEL_ALL: cancelled (CANCELLED_HOST).
+        self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, req(ln.frame + 9000, 9)), mc.ST_OK)
+        self.assertEqual(self.put(mc.EXT_APPLY_AT_FRAME, req(0, 0)), mc.ST_OK)
+        self.assertEqual(self.ext(mc.EXT_SIGGEN_TIMELINE).payload[3], 6)
+
+    def test_fwtb1_sender_carries_ops(self):
+        self.client("sender")
+        ln = self.dev.alink
+        msg = lambda frame, op, arg=0, value=0: struct.pack("<QBBhB3x", frame, op, arg, value, 0)
+        ln.frame = 40
+        self.assertEqual(self.put(mc.EXT_ALINK_CTRL_MSG, msg(4800, 10, 1)), mc.ST_OK)
+        self.assertEqual(struct.unpack_from("<QBB", self.ext(mc.EXT_ALINK_CTRL_MSG).payload, 8), (4800, 10, 1))
+        ln.advance(4800, self.dev)
+        self.assertEqual(self.put(mc.EXT_ALINK_CTRL_MSG, msg(9600, 9)), mc.ST_OK)
+        self.assertIn("SIGGEN_SYNC", mc.decode_alink_info(self.ext(mc.EXT_ALINK_INFO).payload))
+        self.assertNotIn(mc.EXT_TIME_BASE, struct.unpack(f"<{len(self.ext(mc.EXT_LIST).payload) // 2}H",
+                                                        self.ext(mc.EXT_LIST).payload))
 
     def test_lk7_sender_tx_layout_change(self):
         # Fixup lk: rate/C changes while running go in-band as RATE; a class change restarts at once.
@@ -591,7 +677,7 @@ class AlinkBlock(unittest.TestCase):
         self.assertIn("no alink support", out)
         rc, out = Scripts.run_main(None, mc, ["ext-list", "--fake-alink", "receiver"])
         self.assertIn("0x8000 0x8001", out)
-        self.assertIn("notify features: 0x0000000F BULK_SOURCE CLIP_EVENT ALINK_STATE APPLY_RESULT", out)
+        self.assertIn("notify features: 0x0000002F BULK_SOURCE CLIP_EVENT ALINK_STATE APPLY_RESULT TIME_BASE", out)
 
 
 if __name__ == "__main__":

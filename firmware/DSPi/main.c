@@ -48,6 +48,9 @@
 #include "pdm_generator.h"
 #include "siggen.h"
 #include "siggen_dac.h"
+#if DSPI_SIGGEN_SYNC
+#include "timebase.h"
+#endif
 #include "rta.h"
 #include "tube.h"
 #include "limiter.h"
@@ -1044,6 +1047,18 @@ bool siggen_output_ready_now(void) {
     return siggen_dac_ready_now(&siggen_dac, dac_hw_mute_is_asserted(), dac_hw_mute_bracket_active());
 }
 
+#if DSPI_SIGGEN_SYNC
+// WP FWTB1 (siggen.h port): op 9 arms this long ahead of its T, so that the
+// DAC's un-mute ramp (FWSIGGEN's settle, max(hold, release)) is over at T.
+uint16_t siggen_port_arm_lead_ms(void) {
+    uint16_t hold = dac_hw_mute_hold_ms(), rel = dac_hw_mute_release_ms();
+    return (uint16_t)((hold > rel ? hold : rel) + TB_ARM_MARGIN_MS);
+}
+
+// Output ring underrun episodes (audio_pipeline.c output_rings_pre_give()).
+uint32_t siggen_port_slips(void) { return (uint32_t)overruns; }
+#endif
+
 static void siggen_dac_service(void) {
     if (siggen_dac.st == SIGGEN_DAC_IDLE && !siggen_wants_output()) return;   // steady idle: free
     uint16_t hold = dac_hw_mute_hold_ms(), rel = dac_hw_mute_release_ms();
@@ -1448,6 +1463,9 @@ static void complete_pipeline_reset(void) {
     uint spdif_count = 0;
     uint i2s_count = 0;
 
+#if DSPI_SIGGEN_SYNC
+    siggen_tb_pipeline_reset();     // WP FWTB1: a discontinuity of a running generator
+#endif
     // Phase 1: per-slot teardown — interrupts enabled.
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         teardown_output_slot(i);
@@ -1847,6 +1865,15 @@ void core0_init() {
 #endif
 #if DSPI_ALINK_USB
     alink_usb_fw_init();         // WP USB1; EXT_ALINK_USB is loaded with the alink block below
+#endif
+#if DSPI_SIGGEN_SYNC
+    // WP FWTB1: the time bases behind EXT_TIME_BASE, 0xE4 and ops 9/10.
+#if DSPI_ALINK
+    alink_input_tb_register();
+#endif
+#if DSPI_ALINK_USB
+    alink_usb_fw_tb_register();
+#endif
 #endif
 
     // Initialize feedback controller and nominal rate
@@ -2402,6 +2429,11 @@ int main(void) {
         notify_clip_service(to_ms_since_boot(get_absolute_time()));
 #if DSPI_ALINK
         alink_input_event_service(to_ms_since_boot(get_absolute_time()));
+#endif
+#if DSPI_SIGGEN_SYNC
+        // Time-base contract (WP FWTB1): states into the trackers, losses and
+        // disturbances to the generator, 0xE4 with the 250 ms merge.
+        timebase_service(to_ms_since_boot(get_absolute_time()));
 #endif
         usb_notify_tick();
 

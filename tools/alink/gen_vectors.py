@@ -142,6 +142,14 @@ def vectors():
                                      apply_arg=2, apply_value=16)),
         ("max_441", lc.Superframe(flags=0x3F, rate=0, channels=41, cls=3, hops=255, sender=0,
                                   frame=0)),
+        # WP FWTB1: ops 9 SIGGEN_START and 10 SIGGEN_STOP (now) are valid (6.3, 6.4).
+        ("apply_siggen_start", lc.Superframe(flags=lc.FLAG_APPLY_PEND, rate=1, channels=8, cls=1,
+                                             hops=0, sender=0x42, frame=960_000,
+                                             apply_frame=972_000, apply_op=lc.OP_SIGGEN_START)),
+        ("apply_siggen_stop", lc.Superframe(flags=lc.FLAG_APPLY_PEND, rate=1, channels=8, cls=1,
+                                            hops=0, sender=0x42, frame=960_000,
+                                            apply_frame=962_400, apply_op=lc.OP_SIGGEN_STOP,
+                                            apply_arg=1)),
     ]
     for name, sf in sfs:
         d = dict(type="sf", name=name, pack=1, result=0, bytes=sf.pack().hex())
@@ -168,7 +176,7 @@ def vectors():
         ("bad_rate", edit(3, 3), lc.SF_ERR_LAYOUT),
         ("zero_channels", edit(4, 0), lc.SF_ERR_LAYOUT),
         ("too_many_channels", edit(4, 9), lc.SF_ERR_LAYOUT),
-        ("bad_op", recrc(good[:16] + struct.pack("<Q", 5000) + bytes((9,)) + good[25:]),
+        ("bad_op", recrc(good[:16] + struct.pack("<Q", 5000) + bytes((11,)) + good[25:]),
          lc.SF_ERR_APPLY),
         ("op_without_target", edit(24, 1), lc.SF_ERR_APPLY),
         ("target_without_op", recrc(good[:16] + struct.pack("<Q", 5000) + good[24:]),
@@ -177,6 +185,13 @@ def vectors():
     ]
     for name, b, res in bad:
         v.append(dict(type="sf", name=name, pack=0, result=res, bytes=b.hex()))
+    # A version-1 receiver built before WP FWTB1 (ops 0..8) rejects ops 9 and 10
+    # (code 6) and keeps playing on its counter (6.3, 6.4): the same bytes,
+    # judged with op_max 8.
+    for name in ("apply_siggen_start", "apply_siggen_stop"):
+        b = dict(sfs)[name].pack()
+        v.append(dict(type="sf", name=name + "_pre_fwtb1", pack=0, result=lc.SF_ERR_APPLY,
+                      op_max=lc.OP_MAX_V1_PRE_FWTB1, bytes=b.hex()))
     for name, sf in sfs[:3]:
         for out_cls in (1, 3):
             v.append(dict(type="sf_repeat", name=name, cls=out_cls, bytes_in=sf.pack().hex(),

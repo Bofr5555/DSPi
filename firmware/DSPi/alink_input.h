@@ -146,7 +146,12 @@ void alink_input_load_phase(void);
 bool alink_input_set_phase(const uint8_t p[ALINK_PHASE_LEN]);
 void alink_input_get_phase(uint8_t out[ALINK_PHASE_LEN]);
 void alink_input_get_frame_counter(uint8_t out[ALINK_FRAME_COUNTER_LEN]);
-bool alink_input_apply(const uint8_t p[ALINK_APPLY_LEN]);
+// EXT_APPLY_AT_FRAME OUT on the line: 0 accepted, else the refusal (timebase.h
+// TB_ERR_*, the tunnel's VC_ERR_* code; WP FWTB1).
+uint8_t alink_input_apply(const uint8_t p[ALINK_APPLY_LEN]);
+#if DSPI_SIGGEN_SYNC
+void alink_input_tb_register(void);       // WP FWTB1: the time-base provider
+#endif
 void alink_input_get_apply(uint8_t out[ALINK_APPLY_LEN]);
 // output_latency_apply() for the ALINK source: the ring target to prefill
 // (the phase-locked delay less the block cap and decode margin, or target).

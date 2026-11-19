@@ -749,7 +749,8 @@ differ.
 ## 15. Start on the Time Base (apply ops 9 and 10)
 
 *Specified 2026-11-19 (WP FWTB0, PLAN-AT section 1.3, OD-ATe, review R3-R5); implemented by WP FWTB1 (line,
-USB-direct) and WP FWSP2 (S/PDIF). Not implemented yet. The wire side is `extension_channel_spec.md` 2.8.7.1 (the
+USB-direct; implemented 2026-11-19, host-tested, HW-untested: `siggen.c`, `timebase.c`, RP2350 builds only) and WP
+FWSP2 (S/PDIF, not yet). The wire side is `extension_channel_spec.md` 2.8.7.1 (the
 ops), 2.11.2 (`EXT_SIGGEN_TIMELINE`); the time bases are `alink_protocol_spec.md` section 11.*
 
 On a unit with a time base (the line, USB-direct mode 2, S/PDIF), the generator can be started and stopped on an
@@ -772,7 +773,7 @@ plays its own, bounded, firmware-exact signal; the host schedules the starts). T
   DAC hold through the override of 9.3 and the out-of-step soft-mute exemption of 9.3 step 0 applies, so the DAC's
   un-mute ramp is over when T arrives. The outputs play silence until then, so the edge is click-free. Nothing is
   armed for an op that is not due: a queued op 9 holds the DAC open for at most `arm_lead`. A write whose T is less
-  than `arm_lead` ahead is refused at the write. The host's lead is at least `max(arm_lead) + 100 ms` over the units
+  than `arm_lead` or more than 120 s ahead is refused at the write (WP FWTB1). The host's lead is at least `max(arm_lead) + 100 ms` over the units
   (250 ms with a K340; PLAN-AT OD-ATn).
 - **Preconditions.** Only a **finite** config starts on T: a sweep or pattern type with `repeat` at least 1 (section
   6), never a continuous type, never `RAW` (5.1); and only a config **written by `SET_CONFIG` since the last of** boot,
@@ -781,7 +782,7 @@ plays its own, bounded, firmware-exact signal; the host schedules the starts). T
   arms and again at T; otherwise the op completes `refused` with `REFUSED_NOT_READY`. So a host's abort or close
   disarms every later START, and an unbounded generator can never be started on a timeline.
 - **Never late.** A START whose T has passed when it comes due does not start (`REFUSED_LATE`), and neither does one
-  whose output is not ready at T: the DAC still held, the unit muted by `REQ_SET_USER_MUTE` or a system-mute flag,
+  whose output is not ready at T: the DAC still held, the unit muted by `REQ_SET_USER_MUTE`, a system-mute flag or (USB-direct) the host's UAC mute,
   the time base not `LOCKED`, the preconditions not met (`REFUSED_NOT_READY`). A wrong timetable is worse than none.
   A late **op 10** is applied at once and reported late: it is a stop.
 - **No bus-frame form.** On USB-direct op 9 is written with the sample index S (time base 1), never in the bus-frame
@@ -810,6 +811,14 @@ plays its own, bounded, firmware-exact signal; the host schedules the starts). T
 - **A plain `START` is stamped too.** While a time base is `LOCKED`, a `SIGGEN_CTL_START` records the T of its sample
   0 in `start` (and increments `run_id`), so a single unit's run is on its time base as well; without one, `start`
   is 0.
+- **Implementation (WP FWTB1).** The transport owns the queue entry, the generator the decision:
+  `siggen_tb_accept()` at the write (one per unit, the lead), `siggen_tb_poll()` every pass (arming at
+  `T - arm_lead`, the preconditions), and at T the transport splits the block so that the next sample processed is T
+  and calls `siggen_tb_fire()`: `engine_go()` makes that sample the generator's sample 0 (the config's tables are
+  prepared at arming). A cancel or a refusal at arming makes the transport drop the queued op
+  (`siggen_port_drop_op9()`). Losses and disturbances reach the generator from `timebase_service()` at the top of the
+  main loop, never from inside a transport's delivery. `discontinuities` also counts an output ring underrun episode
+  (`overruns`) and a pipeline reset (`complete_pipeline_reset()`) while running.
 - **Host recipe (one unit).** Stage the config (`0xA4`, finite); read `EXT_TIME_BASE` for the current T and
   `EXT_SIGGEN_TIMELINE.arm_lead_ms`; write op 9 at `T + lead` (lead at least `arm_lead` + 100 ms, plus the write
   time); after the run read `EXT_SIGGEN_TIMELINE` and check `start`, `last_result` 1, `discontinuities` 0 and

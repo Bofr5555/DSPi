@@ -283,6 +283,10 @@ void alink_sf_pack(const alink_sf_t *sf, uint8_t out[ALINK_SF_LEN]) {
 }
 
 int alink_sf_unpack(const uint8_t in[ALINK_SF_LEN], alink_sf_t *sf) {
+    return alink_sf_unpack_ops(in, sf, ALINK_OP_MAX);
+}
+
+int alink_sf_unpack_ops(const uint8_t in[ALINK_SF_LEN], alink_sf_t *sf, unsigned op_max) {
     uint16_t crc = (uint16_t)(in[30] | (in[31] << 8));
     if (alink_crc16(in, 30) != crc) return ALINK_SF_ERR_CRC;
     if (in[0] != ALINK_SF_MAGIC) return ALINK_SF_ERR_MAGIC;
@@ -302,7 +306,7 @@ int alink_sf_unpack(const uint8_t in[ALINK_SF_LEN], alink_sf_t *sf) {
     if (!alink_class_baud(sf->cls) || !alink_rate_hz(sf->rate) || sf->channels < 1 ||
         sf->channels > alink_max_channels(sf->cls, sf->rate))
         return ALINK_SF_ERR_LAYOUT;
-    if (sf->apply_op > ALINK_OP_MAX || (sf->apply_op == ALINK_OP_NONE) != (sf->apply_frame == 0))
+    if (sf->apply_op > op_max || (sf->apply_op == ALINK_OP_NONE) != (sf->apply_frame == 0))
         return ALINK_SF_ERR_APPLY;
     return ALINK_SF_OK;
 }

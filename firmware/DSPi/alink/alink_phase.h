@@ -250,6 +250,8 @@ typedef struct {
     uint8_t  presets;           // PRESET_LOAD slots (10)
     uint8_t  outputs;           // OUT_DELAY / CLICK outputs
     uint16_t max_delay;         // OUT_DELAY values 0..max_delay - 1
+    bool     siggen_ops;        // ops 9 SIGGEN_START / 10 SIGGEN_STOP (WP FWTB1; RP2350 builds
+                                // with a time base, never RP2040: PLAN-AT OD-ATm).  false: unknown ops
 } alink_apply_limits_t;
 
 typedef struct {
@@ -263,7 +265,9 @@ typedef struct {
 
 void alink_apply_init(alink_apply_q_t *q);
 
-// Arguments of ops 1-5, 7, 8 (2.8.7).  RATE and unknown ops are refused.
+// Arguments of ops 1-5, 7, 8 (2.8.7) and, with lim->siggen_ops, 9 (arg 0,
+// value 0) and 10 (arg 0 fade or 1 now, value 0; 2.8.7.1).  RATE and unknown
+// ops are refused.
 bool alink_apply_args_ok(const alink_apply_limits_t *lim, uint8_t op, uint8_t arg, int16_t value);
 
 // EXT_APPLY_AT_FRAME OUT payload into *op: false = refused (unknown op, RATE,
@@ -281,6 +285,11 @@ static inline uint64_t alink_apply_next(const alink_apply_q_t *q) {
 
 // Remove the earliest pending op into *op.
 void alink_apply_pop(alink_apply_q_t *q, alink_apply_op_t *op);
+
+// Pending ops of kind `op` (WP FWTB1: at most one op 9 per unit).
+unsigned alink_apply_count(const alink_apply_q_t *q, uint8_t op);
+// Remove the earliest pending op of kind `op` into *out: false when none.
+bool alink_apply_remove(alink_apply_q_t *q, uint8_t op, alink_apply_op_t *out);
 
 // Record a completed op (EXT_APPLY_AT_FRAME IN).
 void alink_apply_done(alink_apply_q_t *q, uint8_t op, uint8_t result, uint64_t frame);

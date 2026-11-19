@@ -137,6 +137,13 @@
 // NOTIFY_FEAT_ALINK_USB.
 #define NOTIFY_EVT_ALINK_USB          0xE3
 
+// Time base (extension_channel_spec.md 2.11.3, WP FWTB1): a contract
+// transition of any transport's time base (alink_protocol_spec.md 11).
+// Rate-limited to one per 250 ms per time base by timebase.c.  Packet (12
+// bytes): [ver=2, evt=0xE4, flags=0, seq, time_base, state, reason, 0,
+// T_low32_LE].  Announced by NOTIFY_FEAT_TIME_BASE.
+#define NOTIFY_EVT_TIME_BASE          0xE4
+
 // v2 protocol version byte (first byte of every v2 packet)
 #define NOTIFY_V2_VERSION            0x02
 
@@ -182,6 +189,10 @@ typedef enum {
 // NOTIFY_EVT_ALINK_USB (0xE3) is sent on USB sync state changes (WP USB1).
 #define NOTIFY_FEAT_ALINK_USB         (1u << 4)
 
+// NOTIFY_EVT_TIME_BASE (0xE4) is sent on every time-base contract transition
+// (WP FWTB1).  Set by every build that lists EXT_TIME_BASE.
+#define NOTIFY_FEAT_TIME_BASE         (1u << 5)
+
 #if defined(DSPI_ALINK) && DSPI_ALINK
 #define NOTIFY_FEATURES_ALINK        (NOTIFY_FEAT_ALINK_STATE | NOTIFY_FEAT_APPLY_RESULT)
 #else
@@ -192,8 +203,13 @@ typedef enum {
 #else
 #define NOTIFY_FEATURES_ALINK_USB     0u
 #endif
+#if defined(DSPI_SIGGEN_SYNC) && DSPI_SIGGEN_SYNC
+#define NOTIFY_FEATURES_TIME_BASE     NOTIFY_FEAT_TIME_BASE
+#else
+#define NOTIFY_FEATURES_TIME_BASE     0u
+#endif
 #define NOTIFY_FEATURES              (NOTIFY_FEAT_BULK_SOURCE | NOTIFY_FEAT_CLIP_EVENT | NOTIFY_FEATURES_ALINK | \
-                                      NOTIFY_FEATURES_ALINK_USB)
+                                      NOTIFY_FEATURES_ALINK_USB | NOTIFY_FEATURES_TIME_BASE)
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -287,6 +303,9 @@ void notify_push_apply_result(uint8_t op, uint8_t result, uint32_t frame_low);
 
 // USB sync event (NOTIFY_EVT_ALINK_USB); the caller rate-limits.
 void notify_push_alink_usb(uint8_t state, uint8_t phase_state, uint8_t reason, uint32_t s_low);
+
+// Time-base event (NOTIFY_EVT_TIME_BASE); the caller rate-limits.
+void notify_push_time_base(uint8_t time_base, uint8_t state, uint8_t reason, uint32_t t_low);
 
 // ---------------------------------------------------------------------------
 // Consumers

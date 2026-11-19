@@ -21,6 +21,10 @@
 #include "notify.h"
 #include <math.h>
 #include <string.h>
+#if DSPI_SIGGEN_SYNC
+#include "timebase.h"
+#include "alink/alink_phase.h"      // ALINK_APPLY_* results
+#endif
 
 extern MatrixMixer matrix_mixer;
 
@@ -189,6 +193,22 @@ static uint8_t  stop_reason = SIGGEN_STOP_NONE;
 static bool     start_wait = false;
 static volatile bool notify_pending = false;
 static uint8_t  notify_state, notify_reason;
+
+#if DSPI_SIGGEN_SYNC
+// Start on the time base (WP FWTB1, siggen.h).  The pending op 9 (one per
+// unit) and the timeline record behind EXT_SIGGEN_TIMELINE.
+static bool     tb_fresh;                    // R4 (b): SET_CONFIG since boot/stop/op 10/CANCEL_ALL/preset/loss
+static bool     tb_armed;                    // arming lead reached: the generator wants the outputs
+static bool     tb_dac_ready;                // siggen_output_gate() said the DAC is open
+static bool     tb_prepared;                 // engine_prepare() ran for cfg
+static uint8_t  tb_pend_tb = TB_ID_NONE;     // time base of the pending op 9
+static uint64_t tb_pend_t;
+static uint8_t  tl_tb = TB_ID_NONE, tl_last_result;
+static bool     tl_timed;                    // the current/last run was started by op 9
+static uint16_t tl_disc;
+static uint64_t tl_start;
+static uint32_t tl_samples, tl_held, tl_run_id, tl_slips_seen;
+#endif
 
 // Per-type synth state
 static uint32_t osc_phase[SIGGEN_MULTITONE_MAX];
@@ -828,6 +848,9 @@ void siggen_render(int32_t (*bufs)[AUDIO_BUFFER_SAMPLES], uint32_t sample_count,
     uint8_t nseg = plan_block(sample_count, plan);
 
     uint32_t pos_covered = (nseg > 0) ? (uint32_t)(plan[nseg-1].off + plan[nseg-1].len) : 0;
+#if DSPI_SIGGEN_SYNC
+    tl_samples += pos_covered;                   // EXT_SIGGEN_TIMELINE.samples
+#endif
 
     for (uint8_t si = 0; si < nseg; si++) {
         const SegPlan *s = &plan[si];
@@ -911,6 +934,9 @@ void siggen_hold(int32_t (*bufs)[AUDIO_BUFFER_SAMPLES], uint32_t sample_count)
 #endif
 {
     if (!siggen_running || sample_count == 0) return;
+#if DSPI_SIGGEN_SYNC
+    tl_held += sample_count;                     // EXT_SIGGEN_TIMELINE.held
+#endif
     for (int o = 0; o < NUM_OUTPUT_CHANNELS; o++)
         if ((cfg.channel_mask >> o) & 1u)
             memset(bufs[o], 0, sample_count * sizeof(samp_t));
@@ -1094,9 +1120,10 @@ static void flush_notify(void) {
     }
 }
 
-static void start_engine(void) {
-    flush_notify();
-
+// The config-dependent tables (heavy: three rate rows, powf).  Split from
+// the run start so that a start on the time base (op 9) can do it at arming
+// and start on its sample with engine_go() alone (WP FWTB1).
+static void engine_prepare(void) {
     // level -> linear amplitude
     float db = cfg.level_db;
     if (db > 0.0f) db = 0.0f;
@@ -1105,7 +1132,6 @@ static void start_engine(void) {
 
     walk_on = (cfg.flags & SIGGEN_FLAG_WALK) ||
               (cfg.signal_type == SIGGEN_CHANNEL_ID);
-    walk_pos = mask_lowest_bit(cfg.channel_mask);
 
     mt_count = 0;
     if (cfg.signal_type == SIGGEN_MULTITONE) {
@@ -1144,6 +1170,15 @@ static void start_engine(void) {
     for (uint8_t r = 0; r < SIGGEN_NUM_RATES; r++)
         compute_derived(siggen_rates[r], &drv_tab[r]);
     if (cfg.signal_type == SIGGEN_CHANNEL_ID) fill_id_pitch_table();
+#if DSPI_SIGGEN_SYNC
+    tb_prepared = true;
+#endif
+}
+
+// Run state from sample 0: the next sample siggen_render() writes.
+static void engine_go(void) {
+    flush_notify();
+    walk_pos = mask_lowest_bit(cfg.channel_mask);
 
     // Resolve the live pipeline rate before latching rate-dependent state;
     // rate_idx is otherwise only refreshed by siggen_render while running.
@@ -1208,6 +1243,44 @@ static void start_engine(void) {
     notify_pending = true;
 }
 
+#if DSPI_SIGGEN_SYNC
+// The pending op 9 completes without starting: last_result `result`; drop:
+// the transport still queues it (remove it there, 0xE2 apply_result).
+static void tb_finish(uint8_t result, uint8_t apply_result, bool drop) {
+    uint8_t tb = tb_pend_tb;
+    tb_pend_tb = TB_ID_NONE;
+    tb_pend_t = 0;
+    tb_armed = false;
+    tb_dac_ready = false;
+    tl_last_result = result;
+    if (drop && tb != TB_ID_NONE) siggen_port_drop_op9(tb, apply_result);
+}
+
+// A new run on the timeline record (timed: started by op 9 on T of tb).
+static void tl_begin(bool timed, uint8_t tb, uint64_t t) {
+    tl_run_id++;
+    tl_timed = timed;
+    tl_tb = tb;
+    tl_start = t;
+    tl_disc = 0;
+    tl_samples = tl_held = 0;
+    tl_slips_seen = siggen_port_slips();
+}
+#endif
+
+static void start_engine(void) {
+    engine_prepare();
+    engine_go();
+#if DSPI_SIGGEN_SYNC
+    // A plain START is stamped too: T of its sample 0 while a time base is
+    // LOCKED (the next sample entering the pipeline), else 0 (2.8.7.1).
+    uint8_t tb = TB_ID_NONE;
+    uint64_t t = 0;
+    if (!siggen_port_tb_now(&tb, &t)) { tb = TB_ID_NONE; t = 0; }
+    tl_begin(false, tb, t);
+#endif
+}
+
 static const SiggenTypeDesc caps_types[SIGGEN_TYPE_COUNT];   // defined below
 
 bool siggen_stage_config(const void *payload, uint16_t len) {
@@ -1252,6 +1325,13 @@ bool siggen_stage_config(const void *payload, uint16_t len) {
         cfg = c;
     }
     cfg_valid = true;
+#if DSPI_SIGGEN_SYNC
+    // What starts at T is what was staged when op 9 was written: a new config
+    // cancels a pending one (CANCELLED_CONFIG) and is the fresh one (R4 b).
+    tb_prepared = false;
+    if (tb_pend_tb != TB_ID_NONE) tb_finish(TB_RES_CANCELLED_CONFIG, ALINK_APPLY_CANCELLED, true);
+    tb_fresh = true;
+#endif
     return true;
 }
 
@@ -1264,12 +1344,44 @@ static void cancel_start_wait(uint8_t reason) {
     flush_notify();
 }
 
-bool siggen_wants_output(void) { return start_wait || siggen_running; }
+bool siggen_wants_output(void) {
+#if DSPI_SIGGEN_SYNC
+    // An armed op 9 opens the DAC ahead of its T (test_signals_spec.md 15).
+    if (tb_armed) return true;
+#endif
+    return start_wait || siggen_running;
+}
 
 void siggen_output_gate(bool ready) {
+#if DSPI_SIGGEN_SYNC
+    if (tb_armed) tb_dac_ready = ready;
+#endif
     if (start_wait && ready) {
         start_wait = false;
         start_engine();
+    }
+}
+
+// SIGGEN_CTL_STOP (fade) or STOP_NOW (hard), also for op 10.
+static void do_stop(bool now) {
+    if (!now) {
+        if (start_wait) { cancel_start_wait(SIGGEN_STOP_HOST); return; }
+        if (!siggen_running) return;
+        swap_pending = false;
+        if (eng_state == SIGGEN_STATE_GAP) {
+            mark_stopped(SIGGEN_STOP_HOST);   // gap is silent; no fade needed
+            flush_notify();
+        } else {
+            stop_reason = SIGGEN_STOP_HOST;
+            fade_dir = -1;
+        }
+        return;
+    }
+    if (start_wait) cancel_start_wait(SIGGEN_STOP_HOST);
+    swap_pending = false;
+    if (siggen_running) {
+        mark_stopped(SIGGEN_STOP_HOST);
+        flush_notify();
     }
 }
 
@@ -1295,24 +1407,14 @@ bool siggen_control(uint8_t action) {
         }
         return true;
     case SIGGEN_CTL_STOP:
-        if (start_wait) { cancel_start_wait(SIGGEN_STOP_HOST); return true; }
-        if (!siggen_running) return true;
-        swap_pending = false;
-        if (eng_state == SIGGEN_STATE_GAP) {
-            mark_stopped(SIGGEN_STOP_HOST);   // gap is silent; no fade needed
-            flush_notify();
-        } else {
-            stop_reason = SIGGEN_STOP_HOST;
-            fade_dir = -1;
-        }
-        return true;
     case SIGGEN_CTL_STOP_NOW:
-        if (start_wait) cancel_start_wait(SIGGEN_STOP_HOST);
-        swap_pending = false;
-        if (siggen_running) {
-            mark_stopped(SIGGEN_STOP_HOST);
-            flush_notify();
-        }
+#if DSPI_SIGGEN_SYNC
+        // A host stop disarms every later START (R4 b) and cancels a pending
+        // one (CANCELLED_HOST).
+        tb_fresh = false;
+        if (tb_pend_tb != TB_ID_NONE) tb_finish(TB_RES_CANCELLED_HOST, ALINK_APPLY_CANCELLED, true);
+#endif
+        do_stop(action == SIGGEN_CTL_STOP_NOW);
         return true;
     default:
         return false;
@@ -1320,6 +1422,9 @@ bool siggen_control(uint8_t action) {
 }
 
 void siggen_stop_immediate(uint8_t reason) {
+#if DSPI_SIGGEN_SYNC
+    tb_fresh = false;                       // a preset load (R4 b); a pending op 9 is refused at arming
+#endif
     if (start_wait) cancel_start_wait(reason);
     swap_pending = false;
     if (siggen_running) {
@@ -1365,8 +1470,160 @@ void siggen_service(void) {
         cfg = cfg_next;
         start_engine();
     }
+#if DSPI_SIGGEN_SYNC
+    // An output underrun's re-anchor (9.1) while running is a discontinuity.
+    uint32_t slips = siggen_port_slips();
+    if (slips != tl_slips_seen) {
+        if (siggen_running) tl_disc += (uint16_t)(slips - tl_slips_seen);
+        tl_slips_seen = slips;
+    }
+#endif
     flush_notify();
 }
+
+#if DSPI_SIGGEN_SYNC
+// ---------------------------------------------------------------------------
+// Start on the time base (WP FWTB1): see siggen.h
+// ---------------------------------------------------------------------------
+
+static uint64_t ms_samples(uint32_t ms, uint32_t fs) {
+    return (uint64_t)ms * (fs ? fs : 48000u) / 1000u;
+}
+
+static uint64_t arm_lead_samples(uint32_t fs) { return ms_samples(siggen_port_arm_lead_ms(), fs); }
+
+// R4 (a) and (b): a finite config (a sweep or pattern with a repeat count,
+// never continuous, never RAW), written since the last stop, op 10,
+// CANCEL_ALL, preset load or loss.
+static bool tb_config_ok(void) {
+    if (!cfg_valid || !tb_fresh) return false;
+    uint8_t tm = type_timing[cfg.signal_type];
+    if (tm != SIGGEN_TIMING_SWEEP && tm != SIGGEN_TIMING_PATTERN) return false;
+    return cfg.repeat >= 1 && !(cfg.flags & SIGGEN_FLAG_RAW);
+}
+
+static bool tb_idle(void) { return !siggen_running && !start_wait && !swap_pending; }
+
+static bool tb_lead_ok(uint64_t t, uint64_t t_now, uint32_t fs) {
+    int64_t lead = (int64_t)(t - t_now);
+    return lead >= (int64_t)arm_lead_samples(fs) && lead <= (int64_t)ms_samples(TB_OP9_LEAD_MAX_MS, fs);
+}
+
+uint8_t siggen_tb_accept(uint8_t tb, uint64_t t, uint64_t t_now, uint32_t fs) {
+    if (tb_pend_tb != TB_ID_NONE) return TB_ERR_STATE;      // one op 9 pending per unit
+    if (!tb_lead_ok(t, t_now, fs)) return TB_ERR_STATE;     // refused at the write
+    tb_pend_tb = tb;
+    tb_pend_t = t;
+    tb_armed = false;
+    tb_dac_ready = false;
+    return TB_OK;
+}
+
+bool siggen_tb_accept_broadcast(uint8_t tb, uint64_t t, uint64_t t_now, uint32_t fs) {
+    if (tb_pend_tb != TB_ID_NONE) return false;             // the pending one is left alone
+    if (!tb_lead_ok(t, t_now, fs)) {
+        tl_last_result = TB_RES_REFUSED_NOT_READY;          // seen too late (or too early)
+        return false;
+    }
+    return siggen_tb_accept(tb, t, t_now, fs) == TB_OK;
+}
+
+void siggen_tb_poll(uint8_t tb, uint64_t t_now, uint32_t fs) {
+    if (tb_pend_tb != tb || tb_armed) return;
+    if ((int64_t)(tb_pend_t - t_now) > (int64_t)arm_lead_samples(fs)) return;
+    // Arming: the preconditions now (and again at T).  A failure completes
+    // the op without arming the DAC.
+    if (!tb_config_ok()) {
+        tb_finish(TB_RES_REFUSED_NOT_READY, ALINK_APPLY_REFUSED, true);
+        return;
+    }
+    tb_armed = true;
+    tb_dac_ready = false;
+    if (tb_idle()) engine_prepare();            // so that T needs engine_go() alone
+}
+
+uint8_t siggen_tb_fire(uint8_t tb, uint64_t t, bool late, bool ready) {
+    if (tb_pend_tb != tb || tb_pend_t != t) return ALINK_APPLY_REFUSED;   // not ours (never queued by us)
+    bool armed = tb_armed, dac = tb_dac_ready;
+    tb_pend_tb = TB_ID_NONE;
+    tb_pend_t = 0;
+    tb_armed = false;
+    tb_dac_ready = false;
+    // Never late, never into a DAC that is not open, a muted unit, a lost
+    // time base, a stale or unbounded config, or a generator still running:
+    // refused, and siggen_wants_output() is false again at once (the DAC
+    // override closes after its tail).
+    if (late) {
+        tl_last_result = TB_RES_REFUSED_LATE;
+        return ALINK_APPLY_REFUSED;
+    }
+    if (!ready || !tb_config_ok() || !tb_idle() || !armed || !dac || !siggen_output_ready_now()) {
+        tl_last_result = TB_RES_REFUSED_NOT_READY;
+        return ALINK_APPLY_REFUSED;
+    }
+    if (!tb_prepared) engine_prepare();
+    engine_go();                                // sample 0 is the next sample rendered: T
+    tl_begin(true, tb, t);
+    tl_last_result = TB_RES_STARTED;
+    return ALINK_APPLY_APPLIED;
+}
+
+void siggen_tb_stop_op(uint8_t arg) {
+    tb_fresh = false;                           // an applied op 10 clears (b)
+    do_stop(arg != 0);
+}
+
+void siggen_tb_dropped(uint8_t result) {
+    if (tb_pend_tb != TB_ID_NONE) tb_finish(result, ALINK_APPLY_CANCELLED, false);
+}
+
+void siggen_tb_cancel_all(void) {
+    tb_fresh = false;
+    if (tb_pend_tb != TB_ID_NONE) tb_finish(TB_RES_CANCELLED_HOST, ALINK_APPLY_CANCELLED, true);
+}
+
+void siggen_tb_loss(uint8_t tb, uint16_t n) {
+    tb_fresh = false;                           // any time base leaving LOCKED (R4 b)
+    if (tb_pend_tb == tb) tb_finish(TB_RES_CANCELLED_LOSS, ALINK_APPLY_CANCELLED, true);
+    if (!siggen_running || tl_tb != tb) return;
+    tl_disc += n ? n : 1u;
+    if (!tl_timed) return;                      // a plain START keeps today's behaviour
+    // R3: a generator op 9 started never outlives its time base.
+    do_stop(true);
+    tl_last_result = TB_RES_STOPPED_LOSS;
+}
+
+void siggen_tb_disturbed(uint8_t tb, uint16_t n) {
+    if (siggen_running && tl_tb == tb) tl_disc += n;
+}
+
+void siggen_tb_pipeline_reset(void) {
+    if (siggen_running) tl_disc++;
+}
+
+void siggen_tb_timeline(uint8_t o[40]) {
+    memset(o, 0, 40);
+    o[0] = TB_VERSION;
+    bool pend = tb_pend_tb != TB_ID_NONE;
+    o[1] = pend ? tb_pend_tb : tl_tb;
+    o[2] = siggen_running ? TB_TL_RUNNING : tb_armed ? TB_TL_ARMED : pend ? TB_TL_PENDING : TB_TL_IDLE;
+    o[3] = tl_last_result;
+    uint16_t lead = siggen_port_arm_lead_ms();
+    o[4] = (uint8_t)tl_disc;
+    o[5] = (uint8_t)(tl_disc >> 8);
+    o[6] = (uint8_t)lead;
+    o[7] = (uint8_t)(lead >> 8);
+    for (int i = 0; i < 8; i++) {
+        o[8 + i] = (uint8_t)(tl_start >> (8 * i));
+        o[16 + i] = (uint8_t)(tb_pend_t >> (8 * i));
+    }
+    for (int i = 0; i < 4; i++) {
+        o[24 + i] = (uint8_t)(tl_samples >> (8 * i));
+        o[28 + i] = (uint8_t)(tl_held >> (8 * i));
+        o[32 + i] = (uint8_t)(tl_run_id >> (8 * i));
+    }
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Capabilities

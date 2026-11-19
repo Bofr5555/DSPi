@@ -11,8 +11,43 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define DSPI_SIGGEN_SYNC 1      // WP FWTB1: the time-base tracker and ops 9/10 (an RP2350 build)
 #include "alink/alink_phase.c"
 #include "alink_usb/alink_usb_core.c"
+// WP FWTB1: the real generator and the time-base aggregator behind ops 9/10.
+#include "siggen_host.h"
+#include "timebase.c"
+
+static alink_usb_t *fw_us;                  // the unit the "glue" below serves
+static bool fw_user_mute;
+// As alink_usb.c: op 9 fires the generator (ready: LOCKED, not muted by the
+// user or the host's UAC mute), op 10 stops it.
+static uint8_t fwtb1_port_apply(const alink_apply_op_t *op, bool late) {
+    if (op->op == ALINK_OP_SIGGEN_START)
+        return siggen_tb_fire(TB_ID_USB, op->frame, late,
+                              fw_us && fw_us->tbk.state == TB_ST_LOCKED && !fw_user_mute && !audio_state.mute);
+    if (op->op == ALINK_OP_SIGGEN_STOP) {
+        siggen_tb_stop_op(op->arg);
+        return ALINK_APPLY_APPLIED;
+    }
+    return ALINK_APPLY_APPLIED;
+}
+static uint8_t fwtb1_op9_accept(uint64_t t, uint64_t t_now) { return siggen_tb_accept(TB_ID_USB, t, t_now, 48000u); }
+// timebase.c's port.
+static int n_tb_events;
+static uint8_t tb_ev_state, tb_ev_reason;
+uint32_t timebase_port_irq_save(void) { return 0; }
+void timebase_port_irq_restore(uint32_t s) { (void)s; }
+uint32_t timebase_port_now_us(void) { return 0; }
+bool timebase_port_ring(uint32_t *wr, uint32_t *played) { *wr = *played = 0; return false; }
+void timebase_port_event(uint8_t tb, uint8_t st, uint8_t rs, uint32_t t) { (void)tb; (void)t; tb_ev_state = st; tb_ev_reason = rs; n_tb_events++; }
+// The USB provider, as alink_usb.c registers it.
+static uint8_t fw_tb_now(void) { return fw_us ? alink_usb_tb_state(fw_us) : TB_ST_NONE; }
+static bool fw_tb_present(void) { return fw_us && fw_us->mode != ALINK_USB_MODE_OFF; }
+static void fw_tb_read(tb_entry_t *e, bool ring, uint32_t wr, uint32_t played) { (void)e; (void)ring; (void)wr; (void)played; }
+static bool fw_tb_next(uint64_t *t) { if (!fw_us || !fw_us->started) return false; *t = fw_us->ph.next_w; return true; }
+static void fw_tb_drop(uint8_t r) { if (fw_us) alink_usb_drop_op9(fw_us, r); }
+static tb_provider_t fw_prov = { TB_ID_USB, TB_ROLE_FOLLOWER, NULL, fw_tb_now, fw_tb_present, fw_tb_read, fw_tb_next, fw_tb_drop };
 
 static int failures, checks;
 #define CHECK(c, ...)                                                                                                \
@@ -31,7 +66,7 @@ static int failures, checks;
 // ---------------------------------------------------------------------------
 
 alink_usb_tb_t alink_usb_tb;
-const alink_apply_limits_t alink_usb_apply_limits = { 10, 9, 2048 };
+const alink_apply_limits_t alink_usb_apply_limits = { 10, 9, 2048, true };   // ops 9/10 (WP FWTB1)
 static uint32_t now48, now_us, fs = 48000;
 static int n_actuate, n_park, n_events, n_writes, n_results, n_mute;
 static float vcxo;
@@ -68,7 +103,8 @@ void alink_usb_port_actuate(float hz, float trim, bool ff, float slew) { (void)t
 void alink_usb_port_preset(float ppm) { n_preset++; vcxo = ppm; }
 void alink_usb_port_park(void) { n_park++; vcxo = 0.0f; }
 float alink_usb_port_vcxo_ppm(void) { return vcxo; }
-uint8_t alink_usb_port_apply(const alink_apply_op_t *op) { (void)op; return ALINK_APPLY_APPLIED; }
+uint8_t alink_usb_port_apply(const alink_apply_op_t *op, bool late) { return fwtb1_port_apply(op, late); }
+uint8_t alink_usb_port_op9_accept(uint64_t t, uint64_t t_now) { return fwtb1_op9_accept(t, t_now); }
 void alink_usb_port_apply_result(uint8_t op, uint8_t r, uint32_t f) { (void)op; last_result = r; last_result_frame = f; n_results++; }
 void alink_usb_port_event(uint8_t st, uint8_t rs, uint32_t f) { (void)st; (void)rs; (void)f; n_events++; }
 void alink_usb_port_soft_mute(uint32_t s) { (void)s; n_mute++; }
@@ -1063,6 +1099,216 @@ static void test_usb3_nits(void) {
     CHECK(us.parked, "parked at init");
 }
 
+// ---------------------------------------------------------------------------
+// WP FWTB1: ops 9 SIGGEN_START / 10 SIGGEN_STOP on the USB time base
+// ---------------------------------------------------------------------------
+
+static void op9_bytes(uint8_t p[16], uint64_t t, uint8_t tb) {
+    memset(p, 0, 16);
+    memcpy(p, &t, 8);
+    p[8] = ALINK_OP_SIGGEN_START;
+    p[12] = tb;
+}
+
+// One pass as the firmware does it: alink_usb_fw_service() (exemption,
+// service, arming), the DAC gate (main.c), the generator, the aggregator.
+static void fw_pass(alink_usb_t *us, uint32_t k) {
+    siggen_tb_poll(TB_ID_USB, us->ph.next_w, 48000u);
+    siggen_output_gate(siggen_wants_output());
+    siggen_service();
+    if (k) write_span(us, NULL, 0, k, RAMP_NONE);
+    timebase_service(now_us / 1000u);
+}
+
+static void run_host_sg(alink_usb_t *us, double ppm, int i0, int i1) {
+    double period = 48000.0 / (1.0 + ppm * 1e-6);
+    for (int i = i0; i < i1; i++) {
+        now48 = (uint32_t)(uint64_t)(i * period);
+        now_us = now48 / 48u;
+        alink_usb_tb_sof(&alink_usb_tb, (uint32_t)i & 0x7FF, now48, 0);
+        us->stream = false;
+        us->siggen_exempt = siggen_wants_output();      // alink_usb_fw_service()
+        alink_usb_service(us, now_us / 1000u);
+    }
+}
+
+static void test_fwtb1(void) {
+    static alink_usb_t us;
+    for (int o = 0; o < NUM_OUTPUT_CHANNELS; o++) matrix_mixer.outputs[o].enabled = 1;
+    locked_engine(&us);
+    us.stream = false;
+    fw_us = &us;
+    fw_prov.track = &us.tbk;
+    timebase_register(TB_SLOT_USB, &fw_prov);
+    set_state(&us, ALINK_USB_ST_PHASE_LOCK, ALINK_USB_RS_LOCKED);
+    CHECK(us.tbk.state == TB_ST_LOCKED && alink_usb_tb_state(&us) == TB_ST_LOCKED, "FWTB1 phase-locked = LOCKED");
+    SiggenConfig c = sh_cfg(SIGGEN_SWEEP_LOG, 1, 2);
+    CHECK(siggen_stage_config(&c, sizeof c), "FWTB1 stage");
+    uint64_t now = us.ph.next_w, lead = 150u * 48u;
+    uint8_t p[16];
+    // R5: never the bus-frame form (VC_ERR_VALUE); S with too little lead
+    // (VC_ERR_STATE); then accepted by S.
+    op9_bytes(p, (now / 48u + 400u) & 0x7FFu, 2);
+    CHECK(alink_usb_apply_code(&us, p) == TB_ERR_VALUE && us.aq.n == 0, "FWTB1 op 9 in bus-frame form refused (VALUE)");
+    op9_bytes(p, now + lead - 1u, 1);
+    CHECK(alink_usb_apply_code(&us, p) == TB_ERR_STATE && us.aq.n == 0, "FWTB1 op 9 lead under arm_lead refused (STATE)");
+    op9_bytes(p, now + 48u * 120000u + 1u, 1);
+    CHECK(alink_usb_apply_code(&us, p) == TB_ERR_STATE && us.aq.n == 0, "FWTB1 op 9 lead over 120 s refused (STATE)");
+    uint64_t T = now + 48u * 300u + 7u;                // 300 ms ahead, mid-frame
+    op9_bytes(p, T, 1);
+    CHECK(alink_usb_apply_code(&us, p) == TB_OK && us.aq.n == 1 && us.aq.q[0].frame == T, "FWTB1 op 9 by S queued");
+    op9_bytes(p, T + 48000u, 1);
+    CHECK(alink_usb_apply_code(&us, p) == TB_ERR_STATE && us.aq.n == 1, "FWTB1 a second op 9 refused (STATE)");
+    // Op 10 may use the bus-frame form.
+    uint8_t q[16] = { 0 };
+    uint32_t bf = (uint32_t)((T / 48u + 1000u) & 0x7FFu);
+    memcpy(q, &bf, 4);
+    q[8] = ALINK_OP_SIGGEN_STOP;
+    q[12] = 2;
+    CHECK(alink_usb_apply_code(&us, q) == TB_OK && us.aq.n == 2, "FWTB1 op 10 in bus-frame form accepted");
+    // Run to T in blocks of 37: armed 150 ms ahead, sample 0 on T.
+    sh_timeline_t tl = sh_timeline();
+    CHECK(tl.state == TB_TL_PENDING && tl.pending == T && tl.tb == TB_ID_USB, "FWTB1 timeline: pending on S");
+    bool early = false;
+    while (us.ph.next_w + 37u <= T) {
+        fw_pass(&us, 37u);
+        if (T - us.ph.next_w > lead + 37u && siggen_wants_output()) early = true;
+    }
+    CHECK(!early && siggen_wants_output() && !siggen_running, "FWTB1 armed at T - arm_lead, not before");
+    CHECK(sh_timeline().state == TB_TL_ARMED, "FWTB1 timeline: armed");
+    fw_pass(&us, 37u);
+    tl = sh_timeline();
+    CHECK(siggen_running && tl.result == TB_RES_STARTED && tl.start == T && tl.state == TB_TL_RUNNING,
+          "FWTB1 started on T (start %llu)", (unsigned long long)tl.start);
+    CHECK(last_result == ALINK_APPLY_APPLIED, "FWTB1 0xE2 applied");
+
+    // A whole-sample correction while LOCKED: a disturbance (C4), no loss,
+    // the timed run plays on with a discontinuity counted.
+    uint16_t d0 = us.tbk.dist;
+    phase_act(&us, ALINK_PHASE_ACT_CORRECT, 2, 2.0f);
+    CHECK(us.tbk.dist == d0 + 1u && us.tbk.state == TB_ST_LOCKED && us.tbk.last_reason == TB_RS_CORRECTION,
+          "FWTB1 a correction counts once, stays LOCKED");
+    timebase_service(now_us / 1000u + 500u);
+    CHECK(siggen_running && sh_timeline().disc == 1, "FWTB1 a correction is a discontinuity of the run");
+
+    // R3: the time base leaves LOCKED (a re-anchor): the generator op 9
+    // started stops (STOPPED_LOSS, a discontinuity), the pending op 10 stays.
+    int ev0 = n_tb_events;
+    reanchor_for(&us, ALINK_USB_END_RE_PHASE);
+    CHECK(us.tbk.state == TB_ST_ANCHORING && us.tbk.dist == d0 + 2u, "FWTB1 re-anchor: ANCHORING, one more disturbance");
+    timebase_service(now_us / 1000u + 1000u);
+    tl = sh_timeline();
+    CHECK(!siggen_running && tl.result == TB_RES_STOPPED_LOSS && tl.disc == 2, "FWTB1 a loss stops it (disc %u)", tl.disc);
+    CHECK(!siggen_wants_output(), "FWTB1 the DAC is handed back");
+    CHECK(n_tb_events >= ev0 + 1 && tb_ev_state == TB_ST_ANCHORING && tb_ev_reason == TB_RS_REANCHOR, "FWTB1 0xE4 REANCHOR");
+    // A plain START keeps today's behaviour through a loss.
+    locked_engine(&us);
+    us.stream = false;
+    set_state(&us, ALINK_USB_ST_PHASE_LOCK, ALINK_USB_RS_LOCKED);
+    timebase_service(now_us / 1000u + 2000u);
+    CHECK(siggen_control(SIGGEN_CTL_START) && siggen_running, "FWTB1 plain START");
+    tl = sh_timeline();
+    CHECK(tl.start == us.ph.next_w && tl.tb == TB_ID_USB, "FWTB1 a plain START is stamped with T");
+    reanchor_for(&us, ALINK_USB_END_RE_PHASE);
+    timebase_service(now_us / 1000u + 3000u);
+    CHECK(siggen_running && sh_timeline().disc == 1, "FWTB1 plain START plays on through the loss (counted)");
+    siggen_control(SIGGEN_CTL_STOP_NOW);
+    siggen_service();
+
+    // R4: the loss cleared the fresh flag: a new op 9 completes refused at
+    // arming (REFUSED_NOT_READY), the DAC never opens.
+    locked_engine(&us);
+    us.stream = false;
+    set_state(&us, ALINK_USB_ST_PHASE_LOCK, ALINK_USB_RS_LOCKED);
+    timebase_service(now_us / 1000u + 4000u);
+    T = us.ph.next_w + lead + 480u;
+    op9_bytes(p, T, 1);
+    CHECK(alink_usb_apply_code(&us, p) == TB_OK, "FWTB1 op 9 queued on a stale config");
+    reset_counts();
+    bool opened = false;
+    while (sh_timeline().pending && us.ph.next_w < T) {
+        fw_pass(&us, 41u);
+        opened = opened || siggen_wants_output();
+    }
+    tl = sh_timeline();
+    uint64_t at_arm = T - (us.ph.next_w - 41u);       // the poll ran before the pass's write
+    CHECK(!opened && at_arm <= lead && at_arm > lead - 41u, "FWTB1 refused at T - arm_lead");
+    CHECK(tl.result == TB_RES_REFUSED_NOT_READY && us.aq.n == 0 && last_result == ALINK_APPLY_REFUSED && !siggen_wants_output(),
+          "FWTB1 stale config: refused at arming, dropped from the queue");
+
+    // Under the host's UAC mute at T: refused NOT_READY (review fwtb0: as CLICK).
+    CHECK(siggen_stage_config(&c, sizeof c), "FWTB1 restage");
+    T = us.ph.next_w + lead + 100u;
+    op9_bytes(p, T, 1);
+    CHECK(alink_usb_apply_code(&us, p) == TB_OK, "FWTB1 op 9 queued");
+    audio_state.mute = true;
+    while (us.ph.next_w <= T) fw_pass(&us, 41u);
+    audio_state.mute = false;
+    tl = sh_timeline();
+    CHECK(!siggen_running && tl.result == TB_RES_REFUSED_NOT_READY && last_result == ALINK_APPLY_REFUSED,
+          "FWTB1 UAC mute at T: refused, not started");
+
+    // A late op 10 is applied at once, reported late.
+    CHECK(siggen_stage_config(&c, sizeof c), "FWTB1 restage");
+    T = us.ph.next_w + lead + 100u;
+    op9_bytes(p, T, 1);
+    CHECK(alink_usb_apply_code(&us, p) == TB_OK, "FWTB1 op 9 queued");
+    while (us.ph.next_w <= T) fw_pass(&us, 41u);
+    CHECK(siggen_running, "FWTB1 running");
+    alink_apply_op_t stop = { us.ph.next_w - 3u, ALINK_OP_SIGGEN_STOP, 1, 0 };
+    CHECK(alink_apply_push(&us.aq, &stop), "FWTB1 a late op 10 queued");
+    fw_pass(&us, 8u);
+    CHECK(!siggen_running && last_result == ALINK_APPLY_LATE, "FWTB1 late op 10: applied at once, reported late");
+
+    // CANCEL_ALL (as alink_usb_fw_apply: the generator first): CANCELLED_HOST.
+    CHECK(siggen_stage_config(&c, sizeof c), "FWTB1 restage");
+    op9_bytes(p, us.ph.next_w + 48000u, 1);
+    CHECK(alink_usb_apply_code(&us, p) == TB_OK, "FWTB1 op 9 queued");
+    reset_counts();
+    siggen_tb_cancel_all();
+    uint8_t ca[16] = { 0 };
+    ca[12] = 1;
+    CHECK(alink_usb_apply_code(&us, ca) == TB_OK, "FWTB1 CANCEL_ALL");
+    CHECK(sh_timeline().result == TB_RES_CANCELLED_HOST && us.aq.n == 0 && n_results == 1 &&
+          last_result == ALINK_APPLY_CANCELLED, "FWTB1 CANCEL_ALL cancels op 9 once (CANCELLED_HOST)");
+    // ... and the staged config may no longer start (R4).
+    op9_bytes(p, us.ph.next_w + lead + 48u, 1);
+    CHECK(alink_usb_apply_code(&us, p) == TB_OK, "FWTB1 op 9 after CANCEL_ALL queued");
+    for (int i = 0; i < 100000 && sh_timeline().pending; i++) fw_pass(&us, 41u);
+    CHECK(sh_timeline().result == TB_RES_REFUSED_NOT_READY, "FWTB1 ... and refused at arming");
+
+    // The out-of-step soft mute is back after a cancelled START, a refused
+    // START and a loss stop (FWSIGGEN exempts a generator that wants output).
+    alink_usb_init(&us);
+    alink_usb_limits(&us, 48000, 96, 49, 448);
+    us.mode = 2;
+    memset(&alink_usb_tb, 0, sizeof(alink_usb_tb));
+    run_host_sg(&us, 35.0, 0, 200);
+    CHECK(alink_usb_out_of_step(&us), "FWTB1 out of step");
+    for (int sc = 0; sc < 3; sc++) {
+        CHECK(siggen_stage_config(&c, sizeof c), "FWTB1 restage %d", sc);
+        CHECK(siggen_tb_accept(TB_ID_USB, 1000000u, 1000000u - lead, 48000u) == TB_OK, "FWTB1 accept %d", sc);
+        siggen_tb_poll(TB_ID_USB, 1000000u - lead, 48000u);
+        siggen_output_gate(true);
+        CHECK(siggen_wants_output(), "FWTB1 armed %d", sc);
+        if (sc == 2) CHECK(siggen_tb_fire(TB_ID_USB, 1000000u, false, true) == ALINK_APPLY_APPLIED && siggen_running,
+                           "FWTB1 started (loss-stop case)");
+        reset_counts();
+        run_host_sg(&us, 35.0, 200 + sc * 200, 300 + sc * 200);
+        CHECK(n_mute == 0, "FWTB1 case %d: exempt while the generator wants output (%d)", sc, n_mute);
+        if (sc == 0) siggen_tb_loss(TB_ID_USB, 1);                                  // cancelled by a loss
+        if (sc == 1) CHECK(siggen_tb_fire(TB_ID_USB, 1000000u, false, false) == ALINK_APPLY_REFUSED, "refused");
+        if (sc == 2) siggen_tb_loss(TB_ID_USB, 1);                                  // the loss stop
+        uint8_t want_res[3] = { TB_RES_CANCELLED_LOSS, TB_RES_REFUSED_NOT_READY, TB_RES_STOPPED_LOSS };
+        CHECK(sh_timeline().result == want_res[sc] && !siggen_wants_output(), "FWTB1 case %d result %u", sc,
+              sh_timeline().result);
+        reset_counts();
+        run_host_sg(&us, 35.0, 300 + sc * 200, 400 + sc * 200);
+        CHECK(n_mute == 100, "FWTB1 case %d: the out-of-step mute is back (%d of 100)", sc, n_mute);
+    }
+    fw_us = NULL;
+}
+
 int main(void) {
     test_time_base();
     test_estimator();
@@ -1083,6 +1329,7 @@ int main(void) {
     test_bad_sof();
     test_lock_error();
     test_usb3_nits();
+    test_fwtb1();
     printf("test_alink_usb: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

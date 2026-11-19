@@ -49,10 +49,13 @@ PRESET_SLOTS = 10
 MAX_DELAY_SAMPLES = 2048                # RP2350 (config.h)
 
 # -- alink block (extension_channel_spec.md 2.8) ------------------------------
-ALINK_RX_IDS = (0x8000, 0x8001, 0x8002, 0x8003, 0x8004, 0x8005, 0x8006, 0x8008, 0x8009, 0x800A)
+# WP FWTB1: a receiver build also lists the time-base block (0x8030, 0x8031,
+# extension_channel_spec.md 2.11) and has ops 9/10 (features bit 6 SIGGEN_SYNC);
+# a sender carries ops 9/10 in EXT_ALINK_CTRL_MSG (bit 6 too).
+ALINK_RX_IDS = (0x8000, 0x8001, 0x8002, 0x8003, 0x8004, 0x8005, 0x8006, 0x8008, 0x8009, 0x800A, 0x8030, 0x8031)
 ALINK_TX_IDS = (0x8000, 0x8001, 0x8002, 0x8005, 0x8007, 0x8008, 0x8009, 0x800A)
-ALINK_FEAT_RX = 0x23                    # PHASE_LOCK | APPLY_AT_FRAME | LOS_PIN
-ALINK_FEAT_TX = 0x38                    # FAN_OUT | TEST_PATTERNS | LOS_PIN
+ALINK_FEAT_RX = 0x63                    # PHASE_LOCK | APPLY_AT_FRAME | LOS_PIN | SIGGEN_SYNC
+ALINK_FEAT_TX = 0x78                    # FAN_OUT | TEST_PATTERNS | LOS_PIN | SIGGEN_SYNC
 D_LOCAL_MIN, D_LOCAL_MAX = 112, 1024    # 1 ms latency option (SYS2 3.2)
 APPLY_QUEUE = 4
 # (class, rate code) -> C: a copy of alink_max_channels() (alink_protocol_spec.md 5.7, the only
@@ -62,6 +65,10 @@ MAX_CHANNELS = {(1, 0): 8, (2, 0): 19, (3, 0): 41, (1, 1): 8, (2, 1): 18, (3, 1)
 SF_LEN = 32                             # frames per superframe
 RATE_LEAD = 2400                        # frames of lead for a RATE the sender schedules itself
 OP_RATE = 6
+OP_SIGGEN_START, OP_SIGGEN_STOP = 9, 10
+ARM_LEAD_MS = 150                       # max(hold_ms, release_ms) + 50 on a K340 (2.8.7.1)
+ARM_LEAD_FRAMES = ARM_LEAD_MS * 48      # the fake runs at 48 kHz
+LEAD_MAX_FRAMES = 120 * 48000           # op 9 at most 120 s ahead (2.8.7.1, WP FWTB1)
 
 
 def alink_pin_ok(p: int) -> bool:
@@ -95,6 +102,11 @@ class FakeAlink:
         self.injected = None            # sender: the pending superframe apply (frame, op, arg, value)
         self.tx_layout = (1, 1, 8)      # sender: (class, rate, C) the stream carries now
         self.tx_pending = None          # sender: the layout its own RATE switches to
+        # WP FWTB1: the generator on the time base (no audio: only the
+        # timeline record) and the contract's disturbance counter.
+        self.tl = dict(tb=0xFF, state=0, result=0, disc=0, start=0, pending=0, samples=0, held=0, run_id=0)
+        self.tb_dist = 0
+        self.tb_reason = 0
 
     @property
     def role(self) -> int:
@@ -145,11 +157,40 @@ class FakeAlink:
         return (struct.pack("<BBH3f4I", 1, 7, 0, self.vcxo_ppm, 0.0, 0.0, 4096, 3072, 8192, 1 << 20)
                 + struct.pack("<bbbBI4I8x", -4, 5, 0, 2, 0x3FF << 5, *self.bench))
 
+    def tb_state(self) -> int:
+        """The line's contract state (alink_protocol_spec.md 11.2)."""
+        if not self.config[0] or self.state == 0 or self.mode == 0:
+            return 0
+        if self.state == 3:
+            return 4
+        if self.state == 1:
+            return 1
+        return 3 if self.phase_state == 2 else 2
+
+    def time_base(self) -> bytes:
+        """EXT_TIME_BASE (2.11.1): one line entry while the alink is enabled."""
+        head = struct.pack("<BBHII", 1, 1 if self.config[0] else 0, 0, 12_345_678, (self.frame - 1000) & 0xFFFFFFFF)
+        if not self.config[0]:
+            return head + bytes(52)
+        st = self.tb_state()
+        t = self.frame if st in (2, 3, 4) else 0
+        entry = struct.pack("<BBBBIQHHf", 0, 0, st, self.tb_reason, 0x5A if self.state else 0, t,
+                            self.tb_dist & 0xFFFF, self.d_local + self.hops_offset,
+                            self.phase_error if st == 3 else 0.0)
+        return head + entry + bytes(28)
+
+    def timeline(self) -> bytes:
+        """EXT_SIGGEN_TIMELINE (2.11.2)."""
+        t = self.tl
+        state = 3 if t["state"] == 3 else (1 if t["pending"] else 0)
+        return struct.pack("<BBBBHHQQIII4x", 1, t["tb"], state, t["result"], t["disc"], ARM_LEAD_MS, t["start"],
+                           t["pending"], t["samples"], t["held"], t["run_id"])
+
     def get(self, sub: int) -> bytes | None:
         return {0x8000: self.info, 0x8001: self.status, 0x8002: lambda: bytes(self.config),
                 0x8003: lambda: bytes(self.slots), 0x8004: self.phase, 0x8005: self.frame_counter,
                 0x8006: self.apply_status, 0x8007: lambda: bytes(self.tx), 0x8008: self.ctrl_msg,
-                0x800A: self.diag}.get(sub, lambda: None)()
+                0x800A: self.diag, 0x8030: self.time_base, 0x8031: self.timeline}.get(sub, lambda: None)()
 
     # -- OUT -----------------------------------------------------------------
     SET_LEN = {0x8002: 8, 0x8003: 8, 0x8004: 8, 0x8006: 16, 0x8007: 16, 0x8008: 16, 0x8009: 1}
@@ -160,9 +201,11 @@ class FakeAlink:
         return self.SET_LEN.get(sub)
 
     def _apply_ok(self, op: int, arg: int, value: int) -> bool:
-        """Arguments of ops 1-5, 7, 8 (2.8.7); RATE is checked by its callers."""
-        if op in (1, 2, 8):
+        """Arguments of ops 1-5, 7-10 (2.8.7, 2.8.7.1); RATE is checked by its callers."""
+        if op in (1, 2, 8, OP_SIGGEN_START):
             return arg == 0 and value == 0
+        if op == OP_SIGGEN_STOP:
+            return arg <= 1 and value == 0
         if op == 3:
             return arg < PRESET_SLOTS and value == 0
         if op == 4:
@@ -202,16 +245,23 @@ class FakeAlink:
             return True
         if sub == 0x8006:
             frame, op, arg, value = struct.unpack_from("<QBBh", p)
-            if any(p[12:]) or op > 8:
+            if any(p[12:]) or op > OP_SIGGEN_STOP:
                 return False
             if op == 0:
                 for f, o, _a, _v in self.queue:
                     self.last = (o, 2, f)
                     dev.notify_apply(o, 2, f)
+                    if o == OP_SIGGEN_START:
+                        self.tl.update(result=6, pending=0)     # CANCELLED_HOST
                 self.queue.clear()
                 return True
             if not self._apply_ok(op, arg, value) or self.state != 2 or len(self.queue) >= APPLY_QUEUE:
                 return False
+            if op == OP_SIGGEN_START:
+                # One op 9 per unit; the lead between arm_lead and 120 s (2.8.7.1).
+                if self.tl["pending"] or not ARM_LEAD_FRAMES <= frame - self.frame <= LEAD_MAX_FRAMES:
+                    return False
+                self.tl.update(pending=frame, tb=0)
             self.queue.append((frame, op, arg, value))
             self.advance(0, dev)
             return True
@@ -245,7 +295,7 @@ class FakeAlink:
             # alink_tx_schedule(): one pending apply, a full superframe of lead,
             # RATE on a superframe boundary with value 0 and a layout that fits.
             frame, op, arg, value, sysflags = struct.unpack_from("<QBBhB", p)
-            if op > 8 or sysflags & ~1 or any(p[13:]):
+            if op > OP_SIGGEN_STOP or sysflags & ~1 or any(p[13:]):
                 return False
             if op:
                 cls, _rate, chans = self.tx_layout
@@ -291,6 +341,16 @@ class FakeAlink:
         for q in due:
             self.queue.remove(q)
             res = 1 if q in late else 0
+            if q[1] == OP_SIGGEN_START:
+                # Never late: refused (2.8.7.1); on time it starts on its frame.
+                if res:
+                    res = 3
+                    self.tl.update(result=2, pending=0)
+                else:
+                    self.tl.update(result=1, pending=0, state=3, start=q[0], disc=0, samples=0, held=0,
+                                   run_id=self.tl["run_id"] + 1, tb=0)
+            elif q[1] == OP_SIGGEN_STOP:
+                self.tl["state"] = 0
             self.last = (q[1], res, q[0])
             dev.notify_apply(q[1], res, q[0])
 
@@ -354,6 +414,7 @@ class FakeDevice:
             ln.sf_flags |= 0x08
         if state in (0, 3) and ln.state == 2:
             ln.counters[1] += 1
+        was_tb = ln.tb_state()
         ln.state = state
         ln.phase_state = 2 if state == 2 and ln.mode == 1 else 0
         if state == 0:
@@ -361,6 +422,29 @@ class FakeDevice:
         self.notify(bytes([2, mc.NOTIFY_EVT_ALINK_STATE, 0, self.seq & 0xFF, state, ln.cls, reason, 0])
                     + struct.pack("<I", ln.frame & 0xFFFFFFFF))
         self.seq += 1
+        if ln.sender:
+            return
+        # WP FWTB1: the contract's view (0xE4, the disturbance counter, R3).
+        now_tb = ln.tb_state()
+        tb_reason = 5 if reason == 5 else 7 if reason == 7 else 0
+        if not tb_reason and now_tb != was_tb:
+            tb_reason = {3: 1, 4: 3}.get(now_tb, 2 if was_tb in (3, 4) else 0)
+        if (was_tb == 3 and now_tb != 3) or tb_reason in (3, 4, 5, 6, 11):
+            ln.tb_dist += 1
+        if was_tb == 3 and now_tb != 3:
+            if ln.tl["pending"]:                        # a pending op 9: CANCELLED_LOSS
+                ln.queue = [q for q in ln.queue if q[1] != OP_SIGGEN_START]
+                self.notify_apply(OP_SIGGEN_START, 2, ln.tl["pending"])
+                ln.last = (OP_SIGGEN_START, 2, ln.tl["pending"])
+                ln.tl.update(result=4, pending=0)
+            if ln.tl["state"] == 3:                     # a run op 9 started: STOPPED_LOSS
+                ln.tl.update(result=7, state=0, disc=ln.tl["disc"] + 1)
+        if tb_reason:
+            ln.tb_reason = tb_reason
+        if now_tb != was_tb or tb_reason:
+            self.notify(bytes([2, mc.NOTIFY_EVT_TIME_BASE, 0, self.seq & 0xFF, 0, now_tb, tb_reason, 0])
+                        + struct.pack("<I", ln.frame & 0xFFFFFFFF))
+            self.seq += 1
 
     def notify_apply(self, op: int, result: int, frame: int) -> None:
         """NOTIFY_EVT_APPLY_RESULT (0xE2) for one applied or cancelled op."""
@@ -516,6 +600,8 @@ class FakeDevice:
                 feats = mc.NOTIFY_FEAT_BULK_SOURCE | mc.NOTIFY_FEAT_CLIP_EVENT
                 if self.alink:
                     feats |= mc.NOTIFY_FEAT_ALINK_STATE | mc.NOTIFY_FEAT_APPLY_RESULT
+                    if not self.alink.sender:
+                        feats |= mc.NOTIFY_FEAT_TIME_BASE      # 0xE4 (WP FWTB1)
                 data = struct.pack("<I", feats)
             elif sub == mc.EXT_IDENTIFY:
                 # RP2350 A2 on a pico2 build; the hw_rev string as a board build sets it

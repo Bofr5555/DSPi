@@ -238,6 +238,13 @@ bool snd_op_args_ok(uint8_t op, uint8_t arg, int16_t value) {
         return arg < SND_OP_OUTPUTS && value >= 0 && value <= SND_OP_DELAY_MAX;
     case ALINK_OP_CLICK:
         return arg < SND_OP_OUTPUTS && value == 0;
+    // WP FWTB1: the sender only carries ops 9 and 10 in its superframe
+    // (it has no generator); a host sends them only when every receiver
+    // lists SIGGEN_SYNC (extension_channel_spec.md 2.8.9).
+    case ALINK_OP_SIGGEN_START:
+        return arg == 0 && value == 0;
+    case ALINK_OP_SIGGEN_STOP:
+        return arg <= 1u && value == 0;
     default:
         return false;
     }

@@ -60,9 +60,10 @@
     +float since
     +if(!running || !arrival_since(ph.next_w,&since))return false
     +*e = alink_phase_error(&ph,since,ring_fill_exact())
-### phase_act: 15 port statements
+### phase_act: 16 port statements
     - static void phase_act(int act,int32_t frames){if(act == ALINK_PHASE_ACT_REANCHOR){reanchor()
-    -}else if(act == ALINK_PHASE_ACT_CORRECT){if(frames > 0){drop_rows +=(uint32_t)frames
+    -}else if(act == ALINK_PHASE_ACT_CORRECT){#if DSPI_SIGGEN_SYNC tb_line_note(TB_RS_CORRECTION)
+    -#endif if(frames > 0){drop_rows +=(uint32_t)frames
     -}else{uint32_t k =(uint32_t)-frames,cap = output_ring_block_cap
     -while(k){uint32_t n = k < cap ? k : cap
     + static void phase_act(int act,int32_t frames){if(act == ALINK_PHASE_ACT_RESUME){t_resume = t
@@ -129,38 +130,48 @@
     +uint64_t words =(uint64_t)floor(t * baud_s / 32.0)
     +uint64_t now_bits = words >= w0 ?(words - w0)* 32u : 0
     +*since = alink_phase_since(pub_f,fx,(int32_t)((uint32_t)now_bits - pub_p),(float)alink_class_baud(lf.cls)/(float)detected_rate)
-### apply_exec: 22 port statements
-    - static uint8_t apply_exec(const alink_apply_op_t *op){switch(op->op){case ALINK_OP_MUTE: case ALINK_OP_UNMUTE:{user_mute = op->op == ALINK_OP_MUTE
+### apply_exec: 29 port statements
+    - static uint8_t apply_exec(const alink_apply_op_t *op,bool late){switch(op->op){#if DSPI_SIGGEN_SYNC case ALINK_OP_SIGGEN_START: return siggen_tb_fire(TB_ID_LINE,op->frame,late,tb_line.state == TB_ST_LOCKED && !user_mute && !(sf_last.flags
+    -case ALINK_OP_SIGGEN_STOP: siggen_tb_stop_op(op->arg)
+    + static uint8_t apply_exec(const alink_apply_op_t *op,bool late){(void)late
+    +switch(op->op){case ALINK_OP_MUTE: user_mute = true
+    -#endif case ALINK_OP_MUTE: case ALINK_OP_UNMUTE:{user_mute = op->op == ALINK_OP_MUTE
     -uint8_t v = user_mute ? 1 : 0
     -notify_param_write(offsetof(WireBulkParams,user_volume.user_mute),sizeof(uint8_t),&v)
-    + static uint8_t apply_exec(const alink_apply_op_t *op){switch(op->op){case ALINK_OP_MUTE: user_mute = true
+    +case ALINK_OP_UNMUTE: user_mute = false
     -}case ALINK_OP_PRESET_LOAD: pending_preset_load_slot = op->arg
     -__dmb()
     -preset_load_pending = true
-    +case ALINK_OP_UNMUTE: user_mute = false
-    -case ALINK_OP_MASTER_VOLUME: update_master_volume((float)op->value * 0.01f)
     +case ALINK_OP_MASTER_VOLUME: master_db = op->value * 0.01f
     +vol_frame = -2
+    -case ALINK_OP_MASTER_VOLUME: update_master_volume((float)op->value * 0.01f)
+    +case ALINK_OP_CLICK: if(op->arg >= 8 || user_mute || stream_mute)return ALINK_APPLY_REFUSED
+    +click_out =(int8_t)op->arg
     -case ALINK_OP_OUT_DELAY:{float fs =(float)(audio_state.freq ? audio_state.freq : 48000u)
     -float ms =((float)op->value + 0.5f)* 1000.0f / fs
     -channel_delays_ms[CH_OUT_1 + op->arg] = ms
     -dsp_update_delay_samples(fs)
     -notify_param_write((uint16_t)(offsetof(WireBulkParams,delays.delay_ms)+(CH_OUT_1 + op->arg)* sizeof(float)),sizeof(float),&ms)
-    +case ALINK_OP_CLICK: if(op->arg >= 8 || user_mute || stream_mute)return ALINK_APPLY_REFUSED
-    +click_out =(int8_t)op->arg
+    -return ALINK_APPLY_APPLIED
     -}case ALINK_OP_CLICK: if(op->arg >= NUM_SPDIF_INSTANCES * 2 || user_mute || stream_mute)return ALINK_APPLY_REFUSED
     -pipeline_click_output =(int8_t)op->arg
     -return ALINK_APPLY_APPLIED
+    -default:(void)late
+    -return ALINK_APPLY_REFUSED
     +case ALINK_OP_PRESET_LOAD: case ALINK_OP_OUT_DELAY: return ALINK_APPLY_APPLIED
+    +default: return ALINK_APPLY_REFUSED
 ### apply_run: 6 port statements
-    -uint8_t r = apply_exec(&op)
+    -uint8_t r = apply_exec(&op,late)
     -if(late && r == ALINK_APPLY_APPLIED)r = ALINK_APPLY_LATE
     -apply_report(op.op,r,op.frame)
-    +uint8_t res = apply_exec(&op)
+    +uint8_t res = apply_exec(&op,late)
     +if(late && res == ALINK_APPLY_APPLIED)res = ALINK_APPLY_LATE
     +apply_report(op.op,res,op.frame)
-### apply_report: 5 port statements
+### apply_report: 8 port statements
+    - static void apply_report(uint8_t op,uint8_t result,uint64_t frame){#if DSPI_SIGGEN_SYNC if(op == ALINK_OP_SIGGEN_START && result == ALINK_APPLY_CANCELLED)siggen_tb_dropped(TB_RES_CANCELLED_LOSS)
+    -#endif alink_apply_done(&aq,op,result,frame)
     -notify_push_apply_result(op,result,(uint32_t)frame)
+    + static void apply_report(uint8_t op,uint8_t result,uint64_t frame){alink_apply_done(&aq,op,result,frame)
     +if(result == ALINK_APPLY_APPLIED)ev_applied++
     +else if(result == ALINK_APPLY_LATE)ev_late++
     +else if(result == ALINK_APPLY_CANCELLED)ev_cancel++

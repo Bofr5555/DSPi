@@ -69,7 +69,12 @@ void alink_usb_fw_get_status(uint8_t o[ALINK_USB_STATUS_LEN]);
 // The USB time base answers EXT_FRAME_COUNTER / EXT_APPLY_AT_FRAME IN.
 bool alink_usb_fw_time_base_active(void);
 void alink_usb_fw_get_frame_counter(uint8_t o[20]);
-bool alink_usb_fw_apply(const uint8_t p[ALINK_APPLY_LEN]);
+// EXT_APPLY_AT_FRAME OUT on the USB time base: 0 accepted, else the refusal
+// (timebase.h TB_ERR_*, the tunnel's VC_ERR_* code).
+uint8_t alink_usb_fw_apply(const uint8_t p[ALINK_APPLY_LEN]);
+#if DSPI_SIGGEN_SYNC
+void alink_usb_fw_tb_register(void);       // WP FWTB1: the time-base provider
+#endif
 void alink_usb_fw_get_apply(uint8_t o[ALINK_APPLY_LEN]);
 
 // EXT_ALINK_USB_DIAG (WP USB2).

@@ -622,6 +622,8 @@
 {"type": "sf", "name": "apply_volume", "pack": 1, "result": 0, "bytes": "a501040110020107604b0f0000000000a04b0f0000000000040030f80000b86b", "flags": 4, "rate": 1, "channels": 16, "cls": 2, "hops": 1, "sender": 7, "frame": 1002336, "apply_frame": 1002400, "apply_op": 4, "apply_arg": 0, "apply_value": -2000}
 {"type": "sf", "name": "apply_rate", "pack": 1, "result": 0, "bytes": "a5010601200302ff00e0ffffffffffff00f0ffffffffffff0602100000002231", "flags": 6, "rate": 1, "channels": 32, "cls": 3, "hops": 2, "sender": 255, "frame": 18446744073709543424, "apply_frame": 18446744073709547520, "apply_op": 6, "apply_arg": 2, "apply_value": 16}
 {"type": "sf", "name": "max_441", "pack": 1, "result": 0, "bytes": "a5013f002903ff0000000000000000000000000000000000000000000000b83a", "flags": 63, "rate": 0, "channels": 41, "cls": 3, "hops": 255, "sender": 0, "frame": 0, "apply_frame": 0, "apply_op": 0, "apply_arg": 0, "apply_value": 0}
+{"type": "sf", "name": "apply_siggen_start", "pack": 1, "result": 0, "bytes": "a50104010801004200a60e0000000000e0d40e0000000000090000000000c553", "flags": 4, "rate": 1, "channels": 8, "cls": 1, "hops": 0, "sender": 66, "frame": 960000, "apply_frame": 972000, "apply_op": 9, "apply_arg": 0, "apply_value": 0}
+{"type": "sf", "name": "apply_siggen_stop", "pack": 1, "result": 0, "bytes": "a50104010801004200a60e000000000060af0e00000000000a0100000000f9c5", "flags": 4, "rate": 1, "channels": 8, "cls": 1, "hops": 0, "sender": 66, "frame": 960000, "apply_frame": 962400, "apply_op": 10, "apply_arg": 1, "apply_value": 0}
 {"type": "sf", "name": "bad_crc", "pack": 0, "result": 1, "bytes": "a50108010801004200000000000100000000000000000000000000000000d746"}
 {"type": "sf", "name": "bad_magic", "pack": 0, "result": 2, "bytes": "5a0108010801004200000000000100000000000000000000000000000000c53a"}
 {"type": "sf", "name": "bad_version", "pack": 0, "result": 3, "bytes": "a50208010801004200000000000100000000000000000000000000000000dc46"}
@@ -630,10 +632,12 @@
 {"type": "sf", "name": "bad_rate", "pack": 0, "result": 5, "bytes": "a501080308010042000000000001000000000000000000000000000000001b6d"}
 {"type": "sf", "name": "zero_channels", "pack": 0, "result": 5, "bytes": "a501080100010042000000000001000000000000000000000000000000007a74"}
 {"type": "sf", "name": "too_many_channels", "pack": 0, "result": 5, "bytes": "a50108010901004200000000000100000000000000000000000000000000b6eb"}
-{"type": "sf", "name": "bad_op", "pack": 0, "result": 6, "bytes": "a50108010801004200000000000100008813000000000000090000000000316a"}
+{"type": "sf", "name": "bad_op", "pack": 0, "result": 6, "bytes": "a501080108010042000000000001000088130000000000000b000000000071e1"}
 {"type": "sf", "name": "op_without_target", "pack": 0, "result": 6, "bytes": "a501080108010042000000000001000000000000000000000100000000007702"}
 {"type": "sf", "name": "target_without_op", "pack": 0, "result": 6, "bytes": "a50108010801004200000000000100008813000000000000000000000000d322"}
 {"type": "sf", "name": "reserved_ignored", "pack": 0, "result": 0, "bytes": "a5010801080100420000000000010000000000000000000000000000770019d6"}
+{"type": "sf", "name": "apply_siggen_start_pre_fwtb1", "pack": 0, "result": 6, "op_max": 8, "bytes": "a50104010801004200a60e0000000000e0d40e0000000000090000000000c553"}
+{"type": "sf", "name": "apply_siggen_stop_pre_fwtb1", "pack": 0, "result": 6, "op_max": 8, "bytes": "a50104010801004200a60e000000000060af0e00000000000a0100000000f9c5"}
 {"type": "sf_repeat", "name": "typical", "cls": 1, "bytes_in": "a50108010801004200000000000100000000000000000000000000000000d747", "bytes_out": "a50108010801014200000000000100000000000000000000000000000000d470"}
 {"type": "sf_repeat", "name": "typical", "cls": 3, "bytes_in": "a50108010801004200000000000100000000000000000000000000000000d747", "bytes_out": "a50108010803014200000000000100000000000000000000000000000000bcfb"}
 {"type": "sf_repeat", "name": "apply_volume", "cls": 1, "bytes_in": "a501040110020107604b0f0000000000a04b0f0000000000040030f80000b86b", "bytes_out": "a501040110010207604b0f0000000000a04b0f0000000000040030f8000061fc"}

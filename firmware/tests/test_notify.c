@@ -197,6 +197,20 @@ int main(void) {
         CHECK(NOTIFY_FEAT_ALINK_USB == (1u << 4));
     }
 
+    // Time-base event 0xE4 (WP FWTB1): 2.11.3's example byte for byte (seq
+    // aside): an S/PDIF follower (time base 3) LOCKED, reason LOCKED, F = 960 000.
+    {
+        uint8_t buf[NOTIFY_MAX_PACKET];
+        notify_init();
+        notify_push_time_base(3, 3, 1, 960000u);
+        CHECK(notify_peek_next_for(NOTIFY_CONSUMER_USB, buf, sizeof buf) == 12);
+        static const uint8_t e4[12] = { 2, 0xE4, 0, 0, 3, 3, 1, 0, 0x00, 0xa6, 0x0e, 0x00 };
+        buf[3] = 0;
+        CHECK(memcmp(buf, e4, 12) == 0);
+        notify_commit_pop_for(NOTIFY_CONSUMER_USB);
+        CHECK(NOTIFY_FEAT_TIME_BASE == (1u << 5));
+    }
+
     if (failures) { printf("test_notify: %d failure(s)\n", failures); return 1; }
     printf("test_notify: OK\n");
     return 0;

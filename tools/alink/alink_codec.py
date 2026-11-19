@@ -38,7 +38,9 @@ FLAGS_DEFINED = 0x3F
 
 OP_NONE, OP_MUTE, OP_UNMUTE, OP_PRESET_LOAD, OP_MASTER_VOLUME = 0, 1, 2, 3, 4
 OP_OUT_DELAY, OP_RATE, OP_CLICK, OP_SYNC_PULSE = 5, 6, 7, 8
-OP_MAX = 8
+OP_SIGGEN_START, OP_SIGGEN_STOP = 9, 10      # WP FWTB1 (alink_protocol_spec.md 6.4)
+OP_MAX = 10
+OP_MAX_V1_PRE_FWTB1 = 8                      # a version-1 receiver without ops 9 and 10
 
 SF_OK, SF_ERR_CRC, SF_ERR_MAGIC, SF_ERR_VERSION = 0, 1, 2, 3
 SF_ERR_FRAME, SF_ERR_LAYOUT, SF_ERR_APPLY = 4, 5, 6
@@ -258,8 +260,11 @@ class Superframe:
         return b + struct.pack("<H", crc16(b))
 
     @classmethod
-    def unpack(cls_, data):
-        """Return (error, Superframe or None); the Superframe is set once CRC, magic, version pass."""
+    def unpack(cls_, data, op_max=OP_MAX):
+        """Return (error, Superframe or None); the Superframe is set once CRC, magic, version pass.
+
+        op_max: the highest apply op the receiver knows (OP_MAX_V1_PRE_FWTB1 for a
+        version-1 receiver built before ops 9 and 10, which rejects them, 6.3)."""
         data = bytes(data)
         if crc16(data[:30]) != struct.unpack_from("<H", data, 30)[0]:
             return SF_ERR_CRC, None
@@ -274,7 +279,7 @@ class Superframe:
         if (sf.cls not in CLASS_BAUD or sf.rate not in RATE_HZ or sf.channels < 1
                 or sf.channels > max_channels(sf.cls, sf.rate)):
             return SF_ERR_LAYOUT, sf
-        if sf.apply_op > OP_MAX or (sf.apply_op == OP_NONE) != (sf.apply_frame == 0):
+        if sf.apply_op > op_max or (sf.apply_op == OP_NONE) != (sf.apply_frame == 0):
             return SF_ERR_APPLY, sf
         return SF_OK, sf
 

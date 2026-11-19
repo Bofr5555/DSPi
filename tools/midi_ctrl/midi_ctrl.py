@@ -117,16 +117,31 @@ NOTIFY_FEAT_ALINK_STATE = 1 << 2   # alink state event 0xE1
 NOTIFY_FEAT_APPLY_RESULT = 1 << 3  # apply-at-frame result event 0xE2
 NOTIFY_EVT_ALINK_STATE = 0xE1
 NOTIFY_EVT_APPLY_RESULT = 0xE2
+# Time-base and measurement block 0x8030-0x803F (extension_channel_spec.md 2.11,
+# WP FWTB1): RP2350 builds with a time base; never RP2040.
+EXT_TIME_BASE = 0x8030           # GET: the contract in one read (64 B)
+EXT_SIGGEN_TIMELINE = 0x8031     # GET: the generator on the time base (40 B)
+TIME_BASE_LEN, SIGGEN_TIMELINE_LEN = 64, 40
+NOTIFY_FEAT_TIME_BASE = 1 << 5   # time-base event 0xE4
+NOTIFY_EVT_TIME_BASE = 0xE4
+OP_SIGGEN_START, OP_SIGGEN_STOP = 9, 10
+TB_IDS = {0: "line", 1: "usb", 2: "usb-bus", 3: "spdif", 0xFF: "none"}
+TB_STATES = {0: "NONE", 1: "ACQUIRING", 2: "ANCHORING", 3: "LOCKED", 4: "HOLDOVER", 5: "LOCK_ERROR"}
+TB_REASONS = {0: "NONE", 1: "LOCKED", 2: "LOST", 3: "HOLDOVER", 4: "RESUMED", 5: "REANCHOR", 6: "CORRECTION",
+              7: "DISABLED", 8: "CONFIG", 9: "LOCK_ERROR", 10: "LOCK_OK", 11: "EPOCH"}
+TL_STATES = {0: "idle", 1: "pending", 2: "armed", 3: "running"}
+TL_RESULTS = {0: "none", 1: "started", 2: "refused_late", 3: "refused_not_ready", 4: "cancelled_loss",
+              5: "cancelled_config", 6: "cancelled_host", 7: "stopped_loss"}
 ALINK_ROLES = {0: "none", 1: "receiver", 2: "sender", 3: "repeater", 4: "fan-out"}
 ALINK_STATES = {0: "off", 1: "searching", 2: "locked", 3: "holdover"}
 ALINK_PHASE_STATES = {0: "free", 1: "anchoring", 2: "locked", 3: "re-anchor pending"}
 ALINK_REASONS = {0: "NONE", 1: "LOCKED", 2: "LOS", 3: "FRAME_ERRORS", 4: "COMMA_LOST",
                 5: "REANCHOR", 6: "VCXO_LIMIT", 7: "DISABLED"}
 ALINK_FEATURES = ((1 << 0, "PHASE_LOCK"), (1 << 1, "APPLY_AT_FRAME"), (1 << 2, "REPEATER"),
-                 (1 << 3, "FAN_OUT"), (1 << 4, "TEST_PATTERNS"), (1 << 5, "LOS_PIN"))
+                 (1 << 3, "FAN_OUT"), (1 << 4, "TEST_PATTERNS"), (1 << 5, "LOS_PIN"), (1 << 6, "SIGGEN_SYNC"))
 RATE_CODES = {0: "44.1k", 1: "48k", 2: "96k"}
 APPLY_OPS = {0: "CANCEL_ALL", 1: "MUTE", 2: "UNMUTE", 3: "PRESET_LOAD", 4: "MASTER_VOLUME",
-             5: "OUT_DELAY", 6: "RATE", 7: "CLICK", 8: "SYNC_PULSE"}
+             5: "OUT_DELAY", 6: "RATE", 7: "CLICK", 8: "SYNC_PULSE", 9: "SIGGEN_START", 10: "SIGGEN_STOP"}
 APPLY_RESULTS = {0: "applied", 1: "late", 2: "cancelled", 3: "refused"}
 
 # Commands that are reads on the wire although they act ("write-as-read",
@@ -279,7 +294,8 @@ def decode_notify(pkt: bytes) -> str:
              0x05: "INPUT_FORMAT", 0x07: "SIGGEN_STATE", 0x08: "ADAT_STATE",
              0x09: "I2S_SLAVE_STATE", 0x0A: "CS_IR_LEARN", 0x0B: "ADAT_INPUT_STATE",
              0x0C: "CS_AUX", 0x0D: "RTA_CONFIG", NOTIFY_EVT_EXT_CLIP: "EXT_CLIP",
-             NOTIFY_EVT_ALINK_STATE: "ALINK_STATE", NOTIFY_EVT_APPLY_RESULT: "APPLY_RESULT"}
+             NOTIFY_EVT_ALINK_STATE: "ALINK_STATE", NOTIFY_EVT_APPLY_RESULT: "APPLY_RESULT",
+             NOTIFY_EVT_TIME_BASE: "TIME_BASE"}
     s = f"v{ver} seq={seq:3d} {names.get(evt, f'evt 0x{evt:02X}')}"
     if evt == 0x02 and len(pkt) >= 12:
         # [ver, evt, flags, seq, off_LE16, size_LE16, src, 0, 0, 0, value...]
@@ -302,6 +318,10 @@ def decode_notify(pkt: bytes) -> str:
         # [ver, evt, flags, seq, op, result, 0, 0, target_frame_low32_LE]
         s += (f" op={APPLY_OPS.get(pkt[4], pkt[4])} result={APPLY_RESULTS.get(pkt[5], pkt[5])} "
               f"frame_low32={struct.unpack_from('<I', pkt, 8)[0]}")
+    elif evt == NOTIFY_EVT_TIME_BASE and len(pkt) >= 12:
+        # [ver, evt, flags, seq, time_base, state, reason, 0, T_low32_LE]
+        s += (f" time_base={TB_IDS.get(pkt[4], pkt[4])} state={TB_STATES.get(pkt[5], pkt[5])} "
+              f"reason={TB_REASONS.get(pkt[6], pkt[6])} T_low32={struct.unpack_from('<I', pkt, 8)[0]}")
     else:
         s += f" {pkt[4:].hex()}"
     return s
@@ -656,7 +676,8 @@ def cmd_ext_list(args) -> int:
             names = [n for bit, n in ((NOTIFY_FEAT_BULK_SOURCE, "BULK_SOURCE"),
                                       (NOTIFY_FEAT_CLIP_EVENT, "CLIP_EVENT"),
                                       (NOTIFY_FEAT_ALINK_STATE, "ALINK_STATE"),
-                                      (NOTIFY_FEAT_APPLY_RESULT, "APPLY_RESULT")) if flags & bit]
+                                      (NOTIFY_FEAT_APPLY_RESULT, "APPLY_RESULT"),
+                                      (NOTIFY_FEAT_TIME_BASE, "TIME_BASE")) if flags & bit]
             print(f"notify features: 0x{flags:08X} {' '.join(names)}".rstrip())
     return 0
 
@@ -755,6 +776,30 @@ def decode_alink_info(b: bytes) -> str:
     return (f"role={ALINK_ROLES.get(role, role)} protocol=v{ver} classes={classes} max_alinks={alinks} "
             f"max_channels={chans} slots={slots} rx_pin={_pin(rx)} tx_pin={_pin(tx)} "
             f"features=0x{feats:08X} {names} d_local={dmin}..{dmax}").replace("  ", " ")
+
+
+def decode_time_base(b: bytes) -> str:
+    """EXT_TIME_BASE (extension_channel_spec.md 2.11.1)."""
+    if len(b) < TIME_BASE_LEN:
+        return f"short reply {b.hex()}"
+    ver, count, _res, us, frames = struct.unpack_from("<BBHII", b)
+    out = [f"v{ver} entries={count} time_us={us} output_frames={frames}"]
+    for i in range(min(count, 2)):
+        tb, role, st, rs, dom, t, dist, d, pe = struct.unpack_from("<BBBBIQHHf", b, 12 + 24 * i)
+        out.append(f"  [{i}] time_base={TB_IDS.get(tb, tb)} role={'source' if role else 'follower'} "
+                   f"state={TB_STATES.get(st, st)} last_reason={TB_REASONS.get(rs, rs)} domain=0x{dom:08X} "
+                   f"t={t} disturbances={dist} d={d} phase_error={pe:+.3f}")
+    return "\n".join(out)
+
+
+def decode_siggen_timeline(b: bytes) -> str:
+    """EXT_SIGGEN_TIMELINE (extension_channel_spec.md 2.11.2)."""
+    if len(b) < SIGGEN_TIMELINE_LEN:
+        return f"short reply {b.hex()}"
+    ver, tb, st, res, disc, lead, start, pend, samples, held, run = struct.unpack_from("<BBBBHHQQIII", b)
+    return (f"v{ver} time_base={TB_IDS.get(tb, tb)} state={TL_STATES.get(st, st)} "
+            f"last_result={TL_RESULTS.get(res, res)} discontinuities={disc} arm_lead_ms={lead} start={start} "
+            f"pending={pend} samples={samples} held={held} run_id={run}")
 
 
 def decode_alink_status(b: bytes) -> str:

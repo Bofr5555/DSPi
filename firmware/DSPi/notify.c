@@ -546,6 +546,20 @@ void notify_push_alink_usb(uint8_t state, uint8_t phase_state, uint8_t reason, u
     restore_interrupts(flags);
 }
 
+void notify_push_time_base(uint8_t time_base, uint8_t state, uint8_t reason, uint32_t t_low) {
+    uint32_t flags = save_and_disable_interrupts();
+    NotifyRingEntry e = {
+        .event_id = NOTIFY_EVT_TIME_BASE,
+        .source   = PARAM_SRC_INTERNAL,
+    };
+    e.value[0] = time_base;
+    e.value[1] = state;
+    e.value[2] = reason;
+    memcpy(&e.value[3], &t_low, 4);
+    ring_push_locked(&e);
+    restore_interrupts(flags);
+}
+
 void notify_clip_service(uint32_t now_ms) {
     if (clip_notify_latch == 0) return;
     if (clip_pushed_once && (uint32_t)(now_ms - clip_last_push_ms) < NOTIFY_CLIP_MIN_INTERVAL_MS)
@@ -870,7 +884,8 @@ uint16_t notify_peek_next_for(NotifyConsumer c, uint8_t *out_buf, uint16_t max_l
 
         case NOTIFY_EVT_ALINK_STATE:
         case NOTIFY_EVT_APPLY_RESULT:
-        case NOTIFY_EVT_ALINK_USB: {
+        case NOTIFY_EVT_ALINK_USB:
+        case NOTIFY_EVT_TIME_BASE: {
             // 12 bytes.  0xE1: state, class, reason, pad, F low 32 bits LE.
             // 0xE2: op, result, 2 pads (value[2] stays 0), target F low 32 LE.
             if (max_len < 12) return 0;

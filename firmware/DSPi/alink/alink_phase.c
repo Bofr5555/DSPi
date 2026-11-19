@@ -186,6 +186,10 @@ bool alink_apply_args_ok(const alink_apply_limits_t *lim, uint8_t op, uint8_t ar
         return arg < lim->outputs && value >= 0 && value < (int32_t)lim->max_delay;
     case ALINK_OP_CLICK:
         return arg < lim->outputs && value == 0;
+    case ALINK_OP_SIGGEN_START:
+        return lim->siggen_ops && arg == 0 && value == 0;
+    case ALINK_OP_SIGGEN_STOP:
+        return lim->siggen_ops && arg <= 1u && value == 0;
     default:
         return false;
     }
@@ -219,6 +223,23 @@ void alink_apply_pop(alink_apply_q_t *q, alink_apply_op_t *op) {
     *op = q->q[0];
     q->n--;
     memmove(&q->q[0], &q->q[1], q->n * sizeof(q->q[0]));
+}
+
+unsigned alink_apply_count(const alink_apply_q_t *q, uint8_t op) {
+    unsigned n = 0;
+    for (unsigned i = 0; i < q->n; i++) n += q->q[i].op == op;
+    return n;
+}
+
+bool alink_apply_remove(alink_apply_q_t *q, uint8_t op, alink_apply_op_t *out) {
+    for (unsigned i = 0; i < q->n; i++) {
+        if (q->q[i].op != op) continue;
+        *out = q->q[i];
+        q->n--;
+        memmove(&q->q[i], &q->q[i + 1], (q->n - i) * sizeof(q->q[0]));
+        return true;
+    }
+    return false;
 }
 
 void alink_apply_done(alink_apply_q_t *q, uint8_t op, uint8_t result, uint64_t frame) {

@@ -8,6 +8,12 @@
 #define PICO_RP2350 1
 #include "dac_hw_mute.c"
 #include "siggen_dac.h"
+// WP FWTB1: the real generator for the op 9 cases (arming, hand-back).
+#include "siggen_host.h"
+static int n_drop9;
+static uint8_t drop9_res;
+void siggen_port_drop_op9(uint8_t tb, uint8_t r) { (void)tb; n_drop9++; drop9_res = r; }
+bool siggen_port_tb_now(uint8_t *tb, uint64_t *t) { (void)tb; (void)t; return false; }
 
 #include <stdio.h>
 
@@ -91,6 +97,127 @@ static void start(void) {
         playing = true;
         started_us = stub_time_us;
     }
+}
+
+// ---- WP FWTB1: op 9 through the DAC machine ----------------------------------
+// The time base runs at 48 kHz from tb0_us; t_now is the sample entering the
+// pipeline.  One pass: the transport's arming poll, main.c's
+// siggen_dac_service() with the real generator, and at T the transport's
+// split block (siggen_tb_fire()).
+static uint64_t tb0_us, tb_T;
+static bool tb_fired;
+static uint8_t tb_fire_res;
+static uint64_t tb_now(void) { return (stub_time_us - tb0_us) * 48u / 1000u; }
+
+static void pass_tb(void) {
+    stub_time_us += PASS_US;
+    dac_hw_mute_tick();
+    siggen_tb_poll(TB_ID_LINE, tb_now(), 48000u);
+    siggen_dac_in_t in = {
+        .want = siggen_wants_output(), .pin_muted = dac_hw_mute_is_asserted(),
+        .bracket = dac_hw_mute_bracket_active(), .now_us = (uint32_t)stub_time_us,
+        .settle_us = (HOLD_MS > REL_MS ? HOLD_MS : REL_MS) * 1000u, .tail_us = TAIL_US,
+    };
+    bool was_muted = muted();
+    bool ready = siggen_dac_step(&sd, &in);
+    dac_hw_mute_siggen_override(sd.override);
+    if (was_muted && !muted()) unmuted_us = stub_time_us;
+    sh_ready_now = siggen_dac_ready_now(&sd, dac_hw_mute_is_asserted(), dac_hw_mute_bracket_active());
+    siggen_output_gate(ready);
+    siggen_service();
+    if (!tb_fired && tb_T && tb_now() >= tb_T) {
+        tb_fired = true;
+        tb_fire_res = siggen_tb_fire(TB_ID_LINE, tb_T, false, true);
+        if (tb_fire_res == ALINK_APPLY_APPLIED) started_us = stub_time_us;
+    }
+}
+
+static void run_tb(uint64_t us) { for (uint64_t t = 0; t < us; t += PASS_US) pass_tb(); }
+
+// The USB phase mode out of step: an idle hold mutes the DAC.  A fresh finite
+// config; op 9 written lead_ms ahead.
+static uint8_t setup_tb(uint32_t lead_ms) {
+    setup();
+    dac_hw_mute_assert_idle();
+    run_us(200000u);
+    tb0_us = stub_time_us;
+    tb_fired = false;
+    tb_T = 0;
+    n_drop9 = 0;
+    SiggenConfig c = sh_cfg(SIGGEN_SWEEP_LOG, 2, 1);
+    (void)siggen_stage_config(&c, sizeof c);
+    uint64_t T = tb_now() + lead_ms * 48u;
+    uint8_t r = siggen_tb_accept(TB_ID_LINE, T, tb_now(), 48000u);
+    if (r == TB_OK) tb_T = T;
+    return r;
+}
+
+static void test_fwtb1(void) {
+    const uint32_t ARM_US = (HOLD_MS + TB_ARM_MARGIN_MS) * 1000u;    // 150 ms on the K340
+    CHECK(siggen_port_arm_lead_ms() == HOLD_MS + TB_ARM_MARGIN_MS);
+    // A. Armed at T - arm_lead: the DAC opens then (not at the write), its
+    //    un-mute ramp is over at T, and generator sample 0 plays on T.
+    CHECK(setup_tb(400) == TB_OK);
+    int edges = pin_edges;
+    uint64_t t_write = stub_time_us;
+    while (!siggen_wants_output() && stub_time_us - t_write < 1000000u) pass_tb();
+    uint64_t t_arm = stub_time_us;
+    CHECK(t_arm - t_write >= 400000u - ARM_US - PASS_US && t_arm - t_write <= 400000u - ARM_US + 2 * PASS_US);
+    CHECK(pin_edges == edges + 1 && unmuted_us == t_arm);   // nothing moved before arming; opened then
+    CHECK(sh_timeline().state == TB_TL_ARMED);
+    run_tb(t_arm - t_write < 400000u ? 400000u - (t_arm - t_write) + 2 * PASS_US : 0u);
+    CHECK(tb_fired && tb_fire_res == ALINK_APPLY_APPLIED && siggen_running);
+    CHECK(!muted() && started_us - unmuted_us >= HOLD_MS * 1000u);   // open and settled at T
+    CHECK(unmuted_us - t_arm <= 2 * PASS_US);       // opened right at arming
+    CHECK(sh_timeline().result == TB_RES_STARTED && sh_timeline().start == tb_T);
+    siggen_control(SIGGEN_CTL_STOP_NOW);            // done: the pin is handed back after the tail
+    run_tb(TAIL_US + 2 * PASS_US);
+    CHECK(muted() && sd.st == SIGGEN_DAC_IDLE && !sd.override);
+
+    // B. Too little lead: refused at the write, no pin edge, nothing armed.
+    CHECK(setup_tb(149) == TB_ERR_STATE);
+    edges = pin_edges;
+    run_tb(300000u);
+    CHECK(muted() && pin_edges == edges && !siggen_wants_output() && !tb_fired);
+
+    // C. Cancelled after arming (a SET_CONFIG: CANCELLED_CONFIG): wants output
+    //    is false at once; the override closes after its tail and the idle
+    //    hold drives the pin again.  The transport drops the queued op.
+    CHECK(setup_tb(300) == TB_OK);
+    run_tb(300000u - ARM_US + 20000u);              // armed, the pin open 20 ms
+    CHECK(siggen_wants_output() && !muted());
+    SiggenConfig c2 = sh_cfg(SIGGEN_IMPULSE, 1, 1);
+    CHECK(siggen_stage_config(&c2, sizeof c2));
+    CHECK(!siggen_wants_output() && n_drop9 == 1 && drop9_res == ALINK_APPLY_CANCELLED);
+    CHECK(sh_timeline().result == TB_RES_CANCELLED_CONFIG);
+    run_tb(TAIL_US + 2 * PASS_US);
+    CHECK(muted() && !sd.override && dac_hw_mute_latched());
+    tb_T = 0;
+
+    // D. Refused at T (here: the time base not LOCKED or the unit muted, the
+    //    transport's `ready`): not started, the DAC handed back the same way.
+    CHECK(setup_tb(300) == TB_OK);
+    run_tb(300000u - 1000u);
+    CHECK(siggen_wants_output() && !muted() && !tb_fired);
+    tb_fired = true;                                // the transport fires it itself
+    CHECK(siggen_tb_fire(TB_ID_LINE, tb_T, false, false) == ALINK_APPLY_REFUSED && !siggen_running);
+    CHECK(!siggen_wants_output() && sh_timeline().result == TB_RES_REFUSED_NOT_READY);
+    run_tb(TAIL_US - 2 * PASS_US);
+    CHECK(!muted());                                // the tail first
+    run_tb(4 * PASS_US);
+    CHECK(muted() && !sd.override);
+
+    // E. Arming with a stale config (a STOP since the SET_CONFIG): refused at
+    //    T - arm_lead, the DAC never opens.
+    CHECK(setup_tb(300) == TB_OK);
+    siggen_control(SIGGEN_CTL_STOP);                // a host stop: cancels it (CANCELLED_HOST)...
+    CHECK(sh_timeline().result == TB_RES_CANCELLED_HOST && n_drop9 == 1);
+    CHECK(siggen_tb_accept(TB_ID_LINE, tb_now() + 300u * 48u, tb_now(), 48000u) == TB_OK);   // ... a new op 9 on it
+    tb_T = 0;
+    edges = pin_edges;
+    run_tb(300000u);
+    CHECK(sh_timeline().result == TB_RES_REFUSED_NOT_READY && n_drop9 == 2 && drop9_res == ALINK_APPLY_REFUSED);
+    CHECK(muted() && pin_edges == edges);
 }
 
 int main(void) {
@@ -278,6 +405,8 @@ int main(void) {
     CHECK(muted());
     run_us(1000000u + 1000u);
     CHECK(!muted());
+
+    test_fwtb1();
 
     printf("test_siggen_dac: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

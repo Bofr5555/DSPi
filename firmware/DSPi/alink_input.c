@@ -27,6 +27,8 @@ volatile bool alink_input_restart_pending = false;
 #include "output_latency.h"
 #include "soft_vcxo.h"
 #include "usb_audio.h"
+#include "siggen.h"
+#include "timebase.h"
 
 #include "alink/bench_trim.h"
 #include "alink/alink_fast.h"
@@ -173,7 +175,13 @@ static bool pull_in;                        // the drain waits for the VCXO: row
 static uint32_t fast_settle_us;             // 0: none pending
 static uint64_t hold_f, hold_us;            // holdover: F extrapolated from here
 static bool relocked;                       // back from a holdover, the long rate window not yet valid again
-static const alink_apply_limits_t apply_lim = { PRESET_SLOTS, NUM_OUTPUT_CHANNELS, MAX_DELAY_SAMPLES };
+static const alink_apply_limits_t apply_lim = { PRESET_SLOTS, NUM_OUTPUT_CHANNELS, MAX_DELAY_SAMPLES,
+                                                DSPI_SIGGEN_SYNC };    // ops 9/10 (WP FWTB1)
+#if DSPI_SIGGEN_SYNC
+// WP FWTB1: the time-base contract's tracker of the line (timebase.h).
+static tb_track_t tb_line;
+static void tb_line_note(uint8_t reason);
+#endif
 extern volatile bool preset_loading;        // main.c: the prefill handshake's flag
 
 #if DSPI_ALINK_DECODE_CORE1
@@ -286,6 +294,12 @@ static uint64_t ring_bits_read(uint64_t *us) {
 }
 
 static void event(uint8_t state, uint8_t reason) {
+#if DSPI_SIGGEN_SYNC
+    // The contract's own reasons; a lock, a loss or a holdover is derived
+    // from the state transition by the tracker.
+    if (reason == ALINK_REASON_REANCHOR) tb_line_note(TB_RS_REANCHOR);
+    else if (reason == ALINK_REASON_DISABLED) tb_line_note(TB_RS_DISABLED);
+#endif
     if (state == pub_state && reason != ALINK_REASON_REANCHOR) return;
     pub_state = state;
     ev_state = state;
@@ -774,8 +788,20 @@ static void silence_block(uint32_t n) {
 // What an op does (extension_channel_spec.md 2.8.7).  Mute, volume and click
 // act on the next sample the pipeline processes, which the caller has made
 // the op's frame; a preset load and a delay change start there.
-static uint8_t apply_exec(const alink_apply_op_t *op) {
+static uint8_t apply_exec(const alink_apply_op_t *op, bool late) {
     switch (op->op) {
+#if DSPI_SIGGEN_SYNC
+    case ALINK_OP_SIGGEN_START:
+        // WP FWTB1: the generator's sample 0 is this frame's (the caller split
+        // the block here).  Not ready muted (user mute, the superframe's
+        // system mute) or without a LOCKED time base; never late.
+        return siggen_tb_fire(TB_ID_LINE, op->frame, late,
+                              tb_line.state == TB_ST_LOCKED && !user_mute &&
+                              !(sf_last.flags & ALINK_SF_FLAG_MUTE));
+    case ALINK_OP_SIGGEN_STOP:
+        siggen_tb_stop_op(op->arg);
+        return ALINK_APPLY_APPLIED;
+#endif
     case ALINK_OP_MUTE:
     case ALINK_OP_UNMUTE: {
         user_mute = op->op == ALINK_OP_MUTE;
@@ -810,11 +836,18 @@ static uint8_t apply_exec(const alink_apply_op_t *op) {
         return ALINK_APPLY_APPLIED;
     default:
         // SYNC_PULSE: a receiver has no sync GPIO (EXT_ALINK_CONFIG has none).
+        (void)late;
         return ALINK_APPLY_REFUSED;
     }
 }
 
 static void apply_report(uint8_t op, uint8_t result, uint64_t frame) {
+#if DSPI_SIGGEN_SYNC
+    // A pending op 9 this receiver cancelled itself (it stopped: no frames
+    // any more) is a loss; a cancel the generator asked for has already
+    // cleared its pending op (siggen_tb_dropped() is then a no-op).
+    if (op == ALINK_OP_SIGGEN_START && result == ALINK_APPLY_CANCELLED) siggen_tb_dropped(TB_RES_CANCELLED_LOSS);
+#endif
     alink_apply_done(&aq, op, result, frame);
     notify_push_apply_result(op, result, (uint32_t)frame);
 }
@@ -822,7 +855,7 @@ static void apply_report(uint8_t op, uint8_t result, uint64_t frame) {
 static void apply_run(bool late) {
     alink_apply_op_t op;
     alink_apply_pop(&aq, &op);
-    uint8_t r = apply_exec(&op);
+    uint8_t r = apply_exec(&op, late);
     if (late && r == ALINK_APPLY_APPLIED) r = ALINK_APPLY_LATE;
     apply_report(op.op, r, op.frame);
 }
@@ -939,6 +972,9 @@ static void phase_act(int act, int32_t frames) {
     if (act == ALINK_PHASE_ACT_REANCHOR) {
         reanchor();
     } else if (act == ALINK_PHASE_ACT_CORRECT) {
+#if DSPI_SIGGEN_SYNC
+        tb_line_note(TB_RS_CORRECTION);         // WP FWTB1: a disturbance of the timeline
+#endif
         if (frames > 0) {
             drop_rows += (uint32_t)frames;      // the next deliveries skip them
         } else {
@@ -1018,11 +1054,32 @@ uint32_t alink_input_poll(void) {
             lock_comma0 = lf.stats.comma_errors;
             lock_crc80 = lf.stats.crc8_errors;
             // The superframe's apply (the broadcast path): same queue.
-            if (alink_apply_take_sf(&aq, &apply_lim, &sf_last) == 2)
+            int took = alink_apply_take_sf(&aq, &apply_lim, &sf_last);
+#if DSPI_SIGGEN_SYNC
+            // A broadcast op 9 (2.8.7.1): refused at once when another is
+            // pending or it was first seen less than arm_lead before T.
+            if (took == 1 && sf_last.apply_op == ALINK_OP_SIGGEN_START &&
+                !siggen_tb_accept_broadcast(TB_ID_LINE, sf_last.apply_frame, ph.next_w,
+                                            detected_rate ? detected_rate : audio_state.freq)) {
+                // Take back the one just queued (a pending op 9 stays).
+                for (unsigned i = aq.n; i-- > 0;)
+                    if (aq.q[i].op == ALINK_OP_SIGGEN_START && aq.q[i].frame == sf_last.apply_frame) {
+                        aq.n--;
+                        memmove(&aq.q[i], &aq.q[i + 1], (aq.n - i) * sizeof(aq.q[0]));
+                        break;
+                    }
+                took = 2;
+            }
+#endif
+            if (took == 2)
                 apply_report(sf_last.apply_op, ALINK_APPLY_REFUSED, sf_last.apply_frame);
         }
     }
     measure();
+#if DSPI_SIGGEN_SYNC
+    // An op 9 pending on F arms at T - arm_lead (WP FWTB1).
+    if (phase == PH_LOCKED && ph.timeline) siggen_tb_poll(TB_ID_LINE, ph.next_w, detected_rate);
+#endif
     uint32_t n = deliver();
     if (alink_phase_active(&ph)) {
         if (ph.started && ph.state == ALINK_PHASE_ANCHORING && !ph.hold && !ph.resync && !drop_rows &&
@@ -1394,19 +1451,95 @@ void alink_input_get_frame_counter(uint8_t o[ALINK_FRAME_COUNTER_LEN]) {
     put32(o + 12, played);
 }
 
-bool alink_input_apply(const uint8_t p[ALINK_APPLY_LEN]) {
+uint8_t alink_input_apply(const uint8_t p[ALINK_APPLY_LEN]) {
     alink_apply_op_t op;
-    if (!alink_apply_parse(&apply_lim, p, &op)) return false;
+    if (!alink_apply_parse(&apply_lim, p, &op)) return TB_ERR_VALUE;
     if (op.op == ALINK_APPLY_CANCEL_ALL) {
+#if DSPI_SIGGEN_SYNC
+        // CANCEL_ALL of any time base: the generator first (CANCELLED_HOST,
+        // and no later START on the staged config, R4), then the queue.
+        siggen_tb_cancel_all();
+#endif
         while (aq.n) {
             alink_apply_pop(&aq, &op);
             apply_report(op.op, ALINK_APPLY_CANCELLED, op.frame);
         }
-        return true;
+        return TB_OK;
     }
-    if (alink_input_get_state() != ALINK_INPUT_LOCKED) return false; // no lock, no F
-    return alink_apply_push(&aq, &op);
+    if (alink_input_get_state() != ALINK_INPUT_LOCKED) return TB_ERR_STATE; // no lock, no F
+    if (aq.n >= ALINK_APPLY_DEPTH) return TB_ERR_STATE;
+#if DSPI_SIGGEN_SYNC
+    if (op.op == ALINK_OP_SIGGEN_START) {
+        // The lead against the frame entering the pipeline now, one op 9 per
+        // unit (2.8.7.1): the generator decides.
+        if (!ph.timeline) return TB_ERR_STATE;
+        uint8_t r = siggen_tb_accept(TB_ID_LINE, op.frame, ph.next_w, detected_rate);
+        if (r != TB_OK) return r;
+    }
+#endif
+    return alink_apply_push(&aq, &op) ? TB_OK : TB_ERR_STATE;
 }
+
+#if DSPI_SIGGEN_SYNC
+// ----------------------------------------------------------------------------
+// The time-base provider of the line (timebase.c, WP FWTB1)
+// ----------------------------------------------------------------------------
+
+static bool tb_line_present(void) {
+    return alink_config[ALINK_CFG_ENABLE] && active_input_source == INPUT_SOURCE_ALINK;
+}
+
+static uint8_t tb_line_now(void) {
+    if (!tb_line_present()) return TB_ST_NONE;
+    return tb_line_state((uint8_t)alink_input_get_state(), ph.mode == 1, alink_phase_active(&ph), ph.state,
+                         ph.started);
+}
+
+static void tb_line_note(uint8_t reason) {
+    (void)tb_track_note(&tb_line, tb_line_now(), reason, (uint32_t)ph.next_w);
+}
+
+static void tb_line_read(tb_entry_t *e, bool ring, uint32_t wr, uint32_t played) {
+    e->domain = sf_valid ? sf_last.sender : 0u;     // C5: the sender id in byte 0
+    int32_t d = alink_phase_delay(&ph);
+    e->d = d > 0 ? (uint16_t)d : 0u;
+    e->phase_error = ph.e;
+    uint8_t st = tb_line.state;
+    if (st == TB_ST_NONE || st == TB_ST_ACQUIRING) {
+        e->t = 0;
+    } else if (ph.timeline && ph.started && ring) {
+        e->t = tb_t_at_output(ph.next_w, wr, played, d);     // R7c: whole samples at the output instant
+    } else {
+        bool valid;
+        uint64_t f = frame_now(&valid);
+        e->t = valid ? f : 0;
+    }
+}
+
+// The frame entering the pipeline next (timebase.c uses it only while LOCKED
+// for a plain START's stamp, and for the T of a polled transition).
+static bool tb_line_next(uint64_t *t) {
+    if (!running || !ph.timeline) return false;
+    *t = ph.next_w;
+    return true;
+}
+
+static void tb_line_drop(uint8_t r) {
+    alink_apply_op_t op;
+    if (alink_apply_remove(&aq, ALINK_OP_SIGGEN_START, &op)) apply_report(op.op, r, op.frame);
+}
+
+static const tb_provider_t tb_line_provider = {
+    .tb = TB_ID_LINE, .role = TB_ROLE_FOLLOWER, .track = &tb_line,
+    .state_now = tb_line_now, .present = tb_line_present, .read = tb_line_read,
+    .t_next = tb_line_next, .drop_op9 = tb_line_drop,
+};
+
+void alink_input_tb_register(void) {
+    tb_track_init(&tb_line);
+    timebase_register(TB_SLOT_LINE, &tb_line_provider);
+}
+#endif
 
 void alink_input_get_apply(uint8_t o[ALINK_APPLY_LEN]) {
     alink_apply_in(&aq, o);
@@ -1422,7 +1555,8 @@ void alink_input_get_info(uint8_t o[ALINK_INFO_LEN]) {
     o[5] = ALINK_SLOTS_LEN;
     o[8] = alink_config[ALINK_CFG_RX_PIN] == 0xFF ? ALINK_RX_PIN_DEFAULT : alink_config[ALINK_CFG_RX_PIN];
     o[9] = 0xFF;                            // no repeater
-    put32(o + 12, 1u << 0 | 1u << 1 | 1u << 5);  // PHASE_LOCK, APPLY_AT_FRAME, LOS_PIN
+    // PHASE_LOCK, APPLY_AT_FRAME, LOS_PIN; SIGGEN_SYNC (ops 9 and 10, WP FWTB1)
+    put32(o + 12, 1u << 0 | 1u << 1 | 1u << 5 | (DSPI_SIGGEN_SYNC ? 1u << 6 : 0u));
     refresh_limits();
     put16(o + 16, ph.d_min);
     put16(o + 18, ph.d_max);

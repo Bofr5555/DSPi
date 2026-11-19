@@ -33,7 +33,7 @@
 #define FS      48000u
 
 alink_usb_tb_t alink_usb_tb;
-const alink_apply_limits_t alink_usb_apply_limits = { 10, 9, 2048 };
+const alink_apply_limits_t alink_usb_apply_limits = { 10, 9, 2048, false };   // no generator here (WP FWTB1)
 
 static int checks, failures;
 #define CHECK(c, ...)                                                                                                \
@@ -260,7 +260,9 @@ void alink_usb_port_park(void) {
     cur->vcxo = cur->last_cmd = 0;
 }
 float alink_usb_port_vcxo_ppm(void) { return (float)cur->vcxo; }
-uint8_t alink_usb_port_apply(const alink_apply_op_t *op) {
+uint8_t alink_usb_port_op9_accept(uint64_t t, uint64_t t_now) { (void)t; (void)t_now; return TB_ERR_VALUE; }
+uint8_t alink_usb_port_apply(const alink_apply_op_t *op, bool late) {
+    (void)late;
     if (op->op == ALINK_OP_CLICK) {
         cur->click_w = cur->W;          // the next sample written
         cur->click_armed = true;

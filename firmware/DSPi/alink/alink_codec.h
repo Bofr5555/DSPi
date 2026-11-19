@@ -76,7 +76,10 @@
 #define ALINK_OP_RATE           6u      // arg = rate code, value = channels C (0 = unchanged)
 #define ALINK_OP_CLICK          7u      // arg = output
 #define ALINK_OP_SYNC_PULSE     8u
-#define ALINK_OP_MAX            8u
+#define ALINK_OP_SIGGEN_START   9u      // WP FWTB1: the generator's sample 0 is frame N (test_signals_spec.md 15)
+#define ALINK_OP_SIGGEN_STOP    10u     // WP FWTB1: arg 0 fade, 1 now
+#define ALINK_OP_MAX            10u
+#define ALINK_OP_MAX_PRE_FWTB1  8u      // a version-1 receiver built before ops 9 and 10 (6.3)
 
 // alink_sf_unpack() results.
 #define ALINK_SF_OK             0
@@ -203,6 +206,9 @@ void alink_sf_pack(const alink_sf_t *sf, uint8_t out[ALINK_SF_LEN]);
 // Parse and validate; ALINK_SF_OK or ALINK_SF_ERR_*.  *sf is filled whenever
 // the CRC, magic and version are good.
 int alink_sf_unpack(const uint8_t in[ALINK_SF_LEN], alink_sf_t *sf);
+// The same with the highest apply op the receiver knows (ALINK_OP_MAX, or
+// ALINK_OP_MAX_PRE_FWTB1 for the vectors of a receiver without ops 9 and 10).
+int alink_sf_unpack_ops(const uint8_t in[ALINK_SF_LEN], alink_sf_t *sf, unsigned op_max);
 
 // The superframe a repeater or fan-out re-emits on a line of class out_cls:
 // the same content with hops + 1 (saturating at 255) and the new class.

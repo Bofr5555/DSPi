@@ -38,7 +38,8 @@
 alink_usb_t alink_usb;
 alink_usb_tb_t alink_usb_tb;                // .bss; stamp set to NONE by alink_usb_fw_init()
 volatile bool alink_usb_fb_nominal;
-const alink_apply_limits_t alink_usb_apply_limits = { PRESET_SLOTS, NUM_OUTPUT_CHANNELS, MAX_DELAY_SAMPLES };
+const alink_apply_limits_t alink_usb_apply_limits = { PRESET_SLOTS, NUM_OUTPUT_CHANNELS, MAX_DELAY_SAMPLES,
+                                                      DSPI_SIGGEN_SYNC };   // ops 9/10 on RP2350 (WP FWTB1)
 
 #if defined(DSPI_ALINK_USB_GPIO)
 // Bench builds only: the sync GPIO is high for one frame at every SOF whose
@@ -189,8 +190,27 @@ void alink_usb_port_preset(float ppm) { input_servo_preset(ppm); }
 void alink_usb_port_park(void) { input_servo_reset(); }
 float alink_usb_port_vcxo_ppm(void) { return soft_vcxo_current_ppm(); }
 
-uint8_t alink_usb_port_apply(const alink_apply_op_t *op) {
+#if DSPI_SIGGEN_SYNC
+uint8_t alink_usb_port_op9_accept(uint64_t t, uint64_t t_now) {
+    return siggen_tb_accept(TB_ID_USB, t, t_now, alink_usb.fs);
+}
+#else
+uint8_t alink_usb_port_op9_accept(uint64_t t, uint64_t t_now) { (void)t; (void)t_now; return TB_ERR_VALUE; }
+#endif
+
+uint8_t alink_usb_port_apply(const alink_apply_op_t *op, bool late) {
     switch (op->op) {
+#if DSPI_SIGGEN_SYNC
+    case ALINK_OP_SIGGEN_START:
+        // WP FWTB1: the generator's sample 0 is this sample.  Not ready under
+        // a user mute or the host's UAC mute (review fwtb0: as CLICK, 2.9.4),
+        // or without a LOCKED time base.
+        return siggen_tb_fire(TB_ID_USB, op->frame, late,
+                              alink_usb.tbk.state == TB_ST_LOCKED && !user_mute && !audio_state.mute);
+    case ALINK_OP_SIGGEN_STOP:
+        siggen_tb_stop_op(op->arg);
+        return ALINK_APPLY_APPLIED;
+#endif
     case ALINK_OP_MUTE:
     case ALINK_OP_UNMUTE: {
         user_mute = op->op == ALINK_OP_MUTE;
@@ -231,11 +251,18 @@ uint8_t alink_usb_port_apply(const alink_apply_op_t *op) {
         return ALINK_APPLY_REFUSED;
 #endif
     default:
+        (void)late;
         return ALINK_APPLY_REFUSED;
     }
 }
 
 void alink_usb_port_apply_result(uint8_t op, uint8_t result, uint32_t frame) {
+#if DSPI_SIGGEN_SYNC
+    // The core cancelled a pending op 9 itself (the timeline ended, mode 0,
+    // the source left USB): the time base is gone (CANCELLED_LOSS).  A cancel
+    // the generator asked for has already cleared its pending op.
+    if (op == ALINK_OP_SIGGEN_START && result == ALINK_APPLY_CANCELLED) siggen_tb_dropped(TB_RES_CANCELLED_LOSS);
+#endif
     notify_push_apply_result(op, result, frame);
 }
 
@@ -352,6 +379,10 @@ void alink_usb_fw_service(void) {
     if (alink_usb.mode != ALINK_USB_MODE_OFF) refresh_limits();
     alink_usb.siggen_exempt = siggen_wants_output();   // WP FWSIGGEN: out-of-step soft mute
     alink_usb_service(&alink_usb, to_ms_since_boot(get_absolute_time()));
+#if DSPI_SIGGEN_SYNC
+    // An op 9 pending on S arms at T - arm_lead (WP FWTB1).
+    if (alink_usb.started) siggen_tb_poll(TB_ID_USB, alink_usb.ph.next_w, alink_usb.fs);
+#endif
     alink_usb_fb_nominal = alink_usb_nominal_feedback(&alink_usb);
     dac_hold_update();
 }
@@ -439,10 +470,54 @@ void alink_usb_fw_get_frame_counter(uint8_t o[20]) {
     o[19] = (uint8_t)(bus >> 8);
 }
 
-bool alink_usb_fw_apply(const uint8_t p[ALINK_APPLY_LEN]) {
-    if (active_input_source != INPUT_SOURCE_USB && p[8] != ALINK_APPLY_CANCEL_ALL) return false;
-    return alink_usb_apply(&alink_usb, p);
+uint8_t alink_usb_fw_apply(const uint8_t p[ALINK_APPLY_LEN]) {
+    if (active_input_source != INPUT_SOURCE_USB && p[8] != ALINK_APPLY_CANCEL_ALL) return TB_ERR_STATE;
+#if DSPI_SIGGEN_SYNC
+    // CANCEL_ALL of any time base: the generator first (CANCELLED_HOST, and
+    // no later START on the staged config, R4), then the queue.
+    if (p[8] == ALINK_APPLY_CANCEL_ALL && p[12] <= 2u && !(p[9] | p[10] | p[11] | p[13] | p[14] | p[15]))
+        siggen_tb_cancel_all();
+#endif
+    return alink_usb_apply_code(&alink_usb, p);
 }
+
+#if DSPI_SIGGEN_SYNC
+// The time-base provider (timebase.c, WP FWTB1).
+static uint8_t tb_usb_now(void) {
+    return alink_usb_fw_time_base_active() ? alink_usb_tb_state(&alink_usb) : TB_ST_NONE;
+}
+
+static void tb_usb_read(tb_entry_t *e, bool ring, uint32_t wr, uint32_t played) {
+    alink_usb_t *us = &alink_usb;
+    e->d = us->d;
+    e->phase_error = us->ph.e;
+    uint8_t st = us->tbk.state;
+    if (st == TB_ST_NONE || st == TB_ST_ACQUIRING) {
+        e->t = 0;
+    } else if (us->started && us->ph.timeline && ring) {
+        e->t = tb_t_at_output(us->ph.next_w, wr, played, (int32_t)us->d);
+    } else {
+        uint64_t s = 0;
+        e->t = alink_usb_sample_now(us, &s, NULL) ? s : 0;
+    }
+}
+
+static bool tb_usb_next(uint64_t *t) {
+    if (!alink_usb.started || !alink_usb.ph.timeline) return false;
+    *t = alink_usb.ph.next_w;
+    return true;
+}
+
+static void tb_usb_drop(uint8_t r) { alink_usb_drop_op9(&alink_usb, r); }
+
+static const tb_provider_t tb_usb_provider = {
+    .tb = TB_ID_USB, .role = TB_ROLE_FOLLOWER, .track = &alink_usb.tbk,
+    .state_now = tb_usb_now, .present = alink_usb_fw_time_base_active, .read = tb_usb_read,
+    .t_next = tb_usb_next, .drop_op9 = tb_usb_drop,
+};
+
+void alink_usb_fw_tb_register(void) { timebase_register(TB_SLOT_USB, &tb_usb_provider); }
+#endif
 
 void alink_usb_fw_get_apply(uint8_t o[ALINK_APPLY_LEN]) {
     alink_apply_in(&alink_usb.aq, o);

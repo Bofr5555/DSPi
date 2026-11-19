@@ -22,7 +22,8 @@ static int failures, checks;
         }                                                                                                            \
     } while (0)
 
-static const alink_apply_limits_t LIM = { 10, 9, 2048 };
+static const alink_apply_limits_t LIM = { 10, 9, 2048, false };
+static const alink_apply_limits_t LIM_TB = { 10, 9, 2048, true };   // WP FWTB1: ops 9 and 10
 
 // 1 ms option at 48 kHz: target 48, block cap 17; the rings' writable span 448.
 static void limits_1ms(alink_phase_t *ph) { alink_phase_limits(ph, 48, 17, 448); }
@@ -228,6 +229,60 @@ static void test_servo(void) {
     }
 }
 
+// WP FWTB1: ops 9 SIGGEN_START and 10 SIGGEN_STOP in the queue (2.8.7.1).
+static void test_fwtb1_queue(void) {
+    uint8_t p[ALINK_APPLY_LEN] = { 0 };
+    alink_apply_op_t op;
+    uint64_t T = 960000u;
+    memcpy(p, &T, 8);
+    p[8] = ALINK_OP_SIGGEN_START;
+    CHECK(!alink_apply_parse(&LIM, p, &op), "FWTB1 op 9 unknown on a build without the ops (RP2040)");
+    CHECK(alink_apply_parse(&LIM_TB, p, &op) && op.op == 9 && op.frame == T, "FWTB1 op 9 parses");
+    p[9] = 1;
+    CHECK(!alink_apply_parse(&LIM_TB, p, &op), "FWTB1 op 9 arg 1 refused");
+    p[9] = 0; p[10] = 1;
+    CHECK(!alink_apply_parse(&LIM_TB, p, &op), "FWTB1 op 9 value 1 refused");
+    p[10] = 0; p[8] = ALINK_OP_SIGGEN_STOP;
+    CHECK(alink_apply_parse(&LIM_TB, p, &op) && op.arg == 0, "FWTB1 op 10 fade parses");
+    p[9] = 1;
+    CHECK(alink_apply_parse(&LIM_TB, p, &op) && op.arg == 1, "FWTB1 op 10 now parses");
+    p[9] = 2;
+    CHECK(!alink_apply_parse(&LIM_TB, p, &op), "FWTB1 op 10 arg 2 refused");
+    p[9] = 0; p[8] = 11;
+    CHECK(!alink_apply_parse(&LIM_TB, p, &op), "FWTB1 op 11 refused");
+    p[8] = ALINK_OP_SIGGEN_STOP; p[9] = 0; p[11] = 0x80;
+    CHECK(!alink_apply_parse(&LIM_TB, p, &op), "FWTB1 op 10 value -32768 refused");
+
+    // Queued in frame order with the other ops; counted and removed by kind.
+    alink_apply_q_t q;
+    alink_apply_init(&q);
+    alink_apply_op_t a = { 500, ALINK_OP_MUTE, 0, 0 }, b = { T, ALINK_OP_SIGGEN_START, 0, 0 },
+                     c = { 400, ALINK_OP_SIGGEN_STOP, 1, 0 }, d = { T, ALINK_OP_UNMUTE, 0, 0 };
+    CHECK(alink_apply_push(&q, &a) && alink_apply_push(&q, &b) && alink_apply_push(&q, &c) &&
+          alink_apply_push(&q, &d), "FWTB1 four ops queued");
+    CHECK(alink_apply_count(&q, ALINK_OP_SIGGEN_START) == 1 && alink_apply_count(&q, ALINK_OP_SIGGEN_STOP) == 1,
+          "FWTB1 one op 9, one op 10");
+    CHECK(q.q[0].op == ALINK_OP_SIGGEN_STOP && q.q[2].op == ALINK_OP_SIGGEN_START && q.q[3].op == ALINK_OP_UNMUTE,
+          "FWTB1 frame order, op 9 before a later op of the same frame");
+    CHECK(alink_apply_remove(&q, ALINK_OP_SIGGEN_START, &op) && op.frame == T && q.n == 3, "FWTB1 op 9 removed");
+    CHECK(q.q[0].frame == 400 && q.q[1].frame == 500 && q.q[2].op == ALINK_OP_UNMUTE, "FWTB1 the rest in order");
+    CHECK(!alink_apply_remove(&q, ALINK_OP_SIGGEN_START, &op) && q.n == 3, "FWTB1 none left to remove");
+
+    // From the superframe (the broadcast path): op 9 and op 10 queue like the
+    // others; without the ops they are refused (and a receiver built before
+    // them rejected the whole superframe already, 6.3).
+    alink_apply_init(&q);
+    alink_sf_t sf;
+    memset(&sf, 0, sizeof sf);
+    sf.apply_frame = T; sf.apply_op = ALINK_OP_SIGGEN_START;
+    CHECK(alink_apply_take_sf(&q, &LIM, &sf) == 2 && q.n == 0, "FWTB1 broadcast op 9 refused without the ops");
+    sf.apply_frame = T + 32;
+    CHECK(alink_apply_take_sf(&q, &LIM_TB, &sf) == 1 && q.n == 1 && q.q[0].op == 9, "FWTB1 broadcast op 9 queued");
+    CHECK(alink_apply_take_sf(&q, &LIM_TB, &sf) == 0 && q.n == 1, "FWTB1 the same op 9 again is a repeat");
+    sf.apply_frame = T + 64; sf.apply_op = ALINK_OP_SIGGEN_STOP; sf.apply_arg = 1;
+    CHECK(alink_apply_take_sf(&q, &LIM_TB, &sf) == 1 && q.n == 2, "FWTB1 broadcast op 10 now queued");
+}
+
 static void test_apply(void) {
     alink_apply_op_t op;
     // 2.8.7 example: MASTER_VOLUME -20 dB at frame 1 002 400.
@@ -237,8 +292,8 @@ static void test_apply(void) {
     uint8_t p[16];
     memcpy(p, ex, 16); p[8] = 6; p[10] = 0; p[11] = 0;
     CHECK(!alink_apply_parse(&LIM, p, &op), "LK6 RATE refused on the per-unit path");
-    memcpy(p, ex, 16); p[8] = 9;
-    CHECK(!alink_apply_parse(&LIM, p, &op), "LK6 unknown op refused");
+    memcpy(p, ex, 16); p[8] = 11;
+    CHECK(!alink_apply_parse(&LIM_TB, p, &op), "LK6 unknown op refused");
     memcpy(p, ex, 16); p[13] = 1;
     CHECK(!alink_apply_parse(&LIM, p, &op), "LK6 reserved byte refused");
     memcpy(p, ex, 16); p[10] = 1; p[11] = 0;
@@ -312,6 +367,7 @@ int main(void) {
     test_error();
     test_servo();
     test_apply();
+    test_fwtb1_queue();
     printf("test_alink_phase: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

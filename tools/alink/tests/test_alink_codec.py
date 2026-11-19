@@ -248,7 +248,7 @@ class TestLK1Vectors(unittest.TestCase):
             elif t == "prbs7":
                 self.assertEqual(lc.prbs7(48).hex(), v["bytes"])
             elif t == "sf":
-                err, sf = lc.Superframe.unpack(bytes.fromhex(v["bytes"]))
+                err, sf = lc.Superframe.unpack(bytes.fromhex(v["bytes"]), v.get("op_max", lc.OP_MAX))
                 self.assertEqual(err, v["result"], v["name"])
                 if v["pack"]:
                     want = lc.Superframe(**{f: v[f] for f in lc.Superframe.FIELDS})

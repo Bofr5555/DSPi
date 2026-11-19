@@ -280,6 +280,18 @@ if (DSPI_ALINK_USB)
     endif()
 endif()
 
+# -- WP FWTB1 -- the time-base contract's control plane (EXT_TIME_BASE,
+# EXT_SIGGEN_TIMELINE, event 0xE4) and apply ops 9 SIGGEN_START / 10
+# SIGGEN_STOP: RP2350 builds with a time base (the alink or USB-direct).  Never
+# RP2040 (PLAN-AT OD-ATm: its RAM is spent); DSPI_SIGGEN_SYNC is 0 there.
+if (NOT PICO_PLATFORM STREQUAL "rp2040" AND (DSPI_ALINK OR DSPI_ALINK_USB))
+    target_sources(DSPi PRIVATE timebase.c timebase_port.c)
+    target_compile_definitions(DSPi PRIVATE DSPI_SIGGEN_SYNC=1)
+else()
+    target_compile_definitions(DSPi PRIVATE DSPI_SIGGEN_SYNC=0)
+endif()
+# -- end WP FWTB1 --
+
 # -- WP SCOPE1 -- scope marker, TEST BUILDS ONLY (off by default).
 # -DALINK_SCOPE_MARKER=ON: the marker on GPIO 22 (Pico pin 29), the bench pin;
 # -DALINK_SCOPE_MARKER_GPIO=<pin> picks another (fallback GPIO 21, Pico pin 27)

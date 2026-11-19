@@ -38,6 +38,7 @@
 #include <stdint.h>
 
 #include "alink/alink_phase.h"
+#include "timebase.h"
 
 // ---------------------------------------------------------------------------
 // Constants (extension_channel_spec.md 2.9)
@@ -368,6 +369,9 @@ typedef struct {
     uint32_t idle_ms;                        // no stream since then (0: a stream plays)
     // WP USB3b
     uint8_t  on_lock_error;                  // ALINK_USB_LOCKERR_*
+    // WP FWTB1: the time-base contract's tracker (timebase.h): the contract
+    // state, the disturbance counter and event 0xE4 of time base 1.
+    tb_track_t tbk;
     bool     lock_err;                       // in lock error (status flags bit 6, event 10/11)
     bool     parked;                         // the VCXO is parked at 0 (init, stop, rejection): the seed may preset it
     bool     drained;                        // the anchor drained the outputs and has not started them yet
@@ -463,6 +467,16 @@ bool alink_usb_sample_now(alink_usb_t *us, uint64_t *s, uint16_t *bus_frame);
 
 // EXT_APPLY_AT_FRAME OUT with time_base 1 (S) or 2 (bus frame): false = refused.
 bool alink_usb_apply(alink_usb_t *us, const uint8_t p[ALINK_APPLY_LEN]);
+// The same with the refusal code (timebase.h TB_ERR_*; 0 accepted): VALUE for
+// a payload field (an unknown op or argument, a bad bus-frame form, op 9 with
+// time base 2), STATE for the current state (no phase lock, a full queue,
+// op 9's lead or a second op 9, WP FWTB1).
+uint8_t alink_usb_apply_code(alink_usb_t *us, const uint8_t p[ALINK_APPLY_LEN]);
+// WP FWTB1: remove the pending op 9 (the generator gave it up) and report it.
+void alink_usb_drop_op9(alink_usb_t *us, uint8_t apply_result);
+// WP FWTB1: the contract state of time base 1 (alink_protocol_spec.md 11.2);
+// builds with DSPI_SIGGEN_SYNC only.
+uint8_t alink_usb_tb_state(const alink_usb_t *us);
 void alink_usb_cancel_all(alink_usb_t *us);
 // The 0xE2 frame field of a USB op: bus frame (bits 0-10) and the sample in
 // it (bits 16-23).
@@ -503,7 +517,11 @@ void     alink_usb_port_actuate(float hz, float trim, bool ff_trim, float slew);
 void     alink_usb_port_preset(float ppm);
 void     alink_usb_port_park(void);                     // input_servo_reset()
 float    alink_usb_port_vcxo_ppm(void);
-uint8_t  alink_usb_port_apply(const alink_apply_op_t *op);
+// late: the op's sample had passed (WP FWTB1: op 9 is then refused, never late).
+uint8_t  alink_usb_port_apply(const alink_apply_op_t *op, bool late);
+// WP FWTB1: op 9 written by S at t with t_now entering the pipeline now:
+// 0 accepted (the core queues it), else the refusal (siggen_tb_accept()).
+uint8_t  alink_usb_port_op9_accept(uint64_t t, uint64_t t_now);
 void     alink_usb_port_apply_result(uint8_t op, uint8_t result, uint32_t frame);
 void     alink_usb_port_event(uint8_t state, uint8_t reason, uint32_t frame);
 void     alink_usb_port_soft_mute(uint32_t samples);

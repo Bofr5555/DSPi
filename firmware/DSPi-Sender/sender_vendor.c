@@ -43,6 +43,7 @@
 #define ALINK_FEAT_FAN_OUT      0x08u
 #define ALINK_FEAT_TEST_PATTERNS 0x10u
 #define ALINK_FEAT_LOS_PIN      0x20u
+#define ALINK_FEAT_SIGGEN_SYNC  0x40u   // EXT_ALINK_CTRL_MSG carries ops 9 and 10 (WP FWTB1)
 
 // Sender layout of EXT_ALINK_DIAG (byte 0; a receiver's layout is 1).
 #define SENDER_DIAG_VERSION     0x81u
@@ -193,7 +194,7 @@ static uint16_t get_info(uint8_t *o) {
     o[5] = 0;                                       // slots: a sender has none
     o[8] = snd.config[1] == 0xFF ? SND_FANOUT_RX_PIN : snd.config[1];
     o[9] = 0xFF;
-    put32(o + 12, ALINK_FEAT_FAN_OUT | ALINK_FEAT_TEST_PATTERNS | ALINK_FEAT_LOS_PIN);
+    put32(o + 12, ALINK_FEAT_FAN_OUT | ALINK_FEAT_TEST_PATTERNS | ALINK_FEAT_LOS_PIN | ALINK_FEAT_SIGGEN_SYNC);
     return 32;
 }
 

@@ -270,7 +270,9 @@ static void check_sf(const char *l) {
     CHECK(get_hex(l, "bytes", b, sizeof(b)) == ALINK_SF_LEN, "sf %s: length", name);
     alink_sf_t sf;
     memset(&sf, 0, sizeof(sf));
-    int res = alink_sf_unpack(b, &sf);
+    // op_max (WP FWTB1): the vector of a receiver without ops 9 and 10.
+    int res = find_key(l, "op_max") ? alink_sf_unpack_ops(b, &sf, (unsigned)get_u64(l, "op_max"))
+                                    : alink_sf_unpack(b, &sf);
     CHECK(res == (int)get_i64(l, "result"), "sf %s: result %d", name, res);
     if (!get_u64(l, "pack")) return;
     alink_sf_t want = {

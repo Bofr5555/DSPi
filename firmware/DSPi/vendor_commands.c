@@ -38,6 +38,7 @@
 #include "build_info.h"
 #include "pdm_generator.h"
 #include "siggen.h"
+#include "timebase.h"
 #include "rta.h"
 #include "tube.h"
 #include "limiter.h"
@@ -621,6 +622,10 @@ static const uint16_t ext_ids[] = {
     EXT_ALINK_USB_STATUS,
     EXT_ALINK_USB_DIAG,
 #endif
+#if DSPI_SIGGEN_SYNC
+    EXT_TIME_BASE,
+    EXT_SIGGEN_TIMELINE,
+#endif
 };
 
 // Exact OUT payload length of a sub-command; 0 = no OUT form (STALL).
@@ -646,9 +651,17 @@ static uint16_t ext_set_len(uint16_t id) {
     }
 }
 
+// The refusal of the last ext_handle_set() that failed with a known reason
+// (timebase.h TB_ERR_*: the tunnel's VC_ERR_* code, WP FWTB1).  The 1.1.6
+// envelope STALLs / answers ERROR whatever it is; WP FWPG2's tunnel maps it.
+static uint8_t ext_last_refusal;
+uint8_t vendor_ext_last_refusal(void) { return ext_last_refusal; }
+
 static bool ext_handle_set(uint16_t id, const uint8_t *p, uint16_t len) {
     uint16_t want = ext_set_len(id);
-    if (want == 0 || len != want) return false;
+    ext_last_refusal = TB_ERR_VALUE;
+    if (want == 0) { ext_last_refusal = TB_ERR_DIRECTION; return false; }
+    if (len != want) { ext_last_refusal = TB_ERR_LENGTH; return false; }
     switch (id) {
         case EXT_CROSSFEED_PAIR_MAP: {
             // Whole map in one write (pairs must stay disjoint, so a single
@@ -713,17 +726,23 @@ static bool ext_handle_set(uint16_t id, const uint8_t *p, uint16_t len) {
             return alink_input_stats_reset(p[0]);
 #endif
 #if DSPI_ALINK || DSPI_ALINK_USB
-        case EXT_APPLY_AT_FRAME:
+        case EXT_APPLY_AT_FRAME: {
             // Byte 12 (reserved on the alink) selects the time base: 0 the
             // alink frame F, 1 the USB sample index S, 2 a USB bus frame (2.9.6).
+            // The handlers answer the refusal (timebase.h TB_ERR_*).
+            uint8_t r = TB_ERR_VALUE;
 #if DSPI_ALINK_USB
-            if (p[12] != 0) return alink_usb_fw_apply(p);
+            if (p[12] != 0) r = alink_usb_fw_apply(p);
+            else
 #endif
+            {
 #if DSPI_ALINK
-            return alink_input_apply(p);
-#else
-            return false;
+                r = alink_input_apply(p);
 #endif
+            }
+            ext_last_refusal = r;
+            return r == TB_OK;
+        }
 #endif
 #if DSPI_ALINK_USB
         case EXT_ALINK_USB:
@@ -820,6 +839,10 @@ static bool ext_handle_get(uint16_t id, uint16_t wLength, uint8_t *resp) {
 #endif
             n = ALINK_APPLY_LEN;
             break;
+#endif
+#if DSPI_SIGGEN_SYNC
+        case EXT_TIME_BASE:       timebase_read(resp);        n = TB_READ_LEN;     break;
+        case EXT_SIGGEN_TIMELINE: siggen_tb_timeline(resp);   n = TB_TIMELINE_LEN; break;
 #endif
 #if DSPI_ALINK_USB
         case EXT_ALINK_USB:        alink_usb_fw_get_config(resp); n = ALINK_USB_CFG_LEN;    break;

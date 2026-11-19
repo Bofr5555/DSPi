@@ -391,7 +391,8 @@ static void apply_report(rx_t *r, uint8_t op, uint8_t result, uint64_t frame) {
     else r->ev_refused++;
 }
 
-static uint8_t apply_exec(rx_t *r, const alink_apply_op_t *op) {
+static uint8_t apply_exec(rx_t *r, const alink_apply_op_t *op, bool late) {
+    (void)late;     // ops 9/10 (WP FWTB1) are the firmware's: no generator here
     switch (op->op) {
     case ALINK_OP_MUTE: r->user_mute = true; return ALINK_APPLY_APPLIED;
     case ALINK_OP_UNMUTE: r->user_mute = false; return ALINK_APPLY_APPLIED;
@@ -409,7 +410,7 @@ static uint8_t apply_exec(rx_t *r, const alink_apply_op_t *op) {
 static void apply_run(rx_t *r, bool late) {
     alink_apply_op_t op;
     alink_apply_pop(&r->aq, &op);
-    uint8_t res = apply_exec(r, &op);
+    uint8_t res = apply_exec(r, &op, late);
     if (late && res == ALINK_APPLY_APPLIED) res = ALINK_APPLY_LATE;
     apply_report(r, op.op, res, op.frame);
 }
@@ -695,7 +696,7 @@ static void poll(rx_t *r) {
     decode_service(r);
     alink_up_step(r);
     if (r->lf.state == ALINK_RX_LOCKED && r->phase == PH_LOCKED) {
-        if (alink_apply_take_sf(&r->aq, &(alink_apply_limits_t){ 10, 9, 2048 }, &r->lf.sf) == 2)
+        if (alink_apply_take_sf(&r->aq, &(alink_apply_limits_t){ 10, 9, 2048, false }, &r->lf.sf) == 2)
             apply_report(r, r->lf.sf.apply_op, ALINK_APPLY_REFUSED, r->lf.sf.apply_frame);
     }
     if (r->phase == PH_LOCKED && r->detected_rate)

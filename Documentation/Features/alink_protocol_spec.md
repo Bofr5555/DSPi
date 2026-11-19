@@ -651,7 +651,8 @@ SYS2 section 2 is the design; these points make it precise or change it:
 
 *Normative (WP FWTB0, PLAN-AT section 1.1, owner decisions AT1 and AT4 of 2026-11-19). The control plane is in
 `extension_channel_spec.md`: 2.8.6, 2.8.7, 2.9.4, 2.10 (the S/PDIF block) and 2.11 (`EXT_TIME_BASE`,
-`EXT_SIGGEN_TIMELINE`, event `0xE4`). Implemented by WP FWTB1 (line and USB-direct) and WP FWSP2 (S/PDIF).*
+`EXT_SIGGEN_TIMELINE`, event `0xE4`). Implemented by WP FWTB1 (line and USB-direct, 2026-11-19: `firmware/DSPi/
+timebase.{c,h}`, host test `firmware/tests/test_timebase.c`) and WP FWSP2 (S/PDIF, not yet).*
 
 A **time base** is a sample counter T shared by a set of units, the **domain**: every unit of one domain numbers the
 same audio sample with the same T (or with a T a single read maps, C1). A **follower** receives a time base, a
@@ -702,7 +703,7 @@ hub and the console talk to "a unit with a time base". Nothing in this section i
 | 2 `ANCHORING` | drain, prefill, start, verify (muted) | 2 / 1 | 4 | anchoring (follower); outputs restarting (source) |
 | 3 `LOCKED` | T valid, play-out fixed, apply-at-T works | 2 / 2 | 5 | phase-locked (follower); outputs running in sync (source) |
 | 4 `HOLDOVER` | T extrapolated, muted, the timeline kept | 3 | 5 with STATUS flags bit 4 `HOLDOVER` | holdover (12.5) |
-| 5 `LOCK_ERROR` | configured to lock but cannot | 2 / 3 (re-anchor pending) | 6; or STATUS flags bit 6 `LOCK_ERROR` | no valid superframe in mode 1, D out of range, a rate it cannot lock at (12.5) |
+| 5 `LOCK_ERROR` | configured to lock but cannot | 2 / 3 (re-anchor pending); or mode 1 with the delay outside `d_local_min..max` (`EXT_ALINK_PHASE` flags `D_BELOW_MIN`: it runs the fill servo) | 6; or STATUS flags bit 6 `LOCK_ERROR` | no valid superframe in mode 1, D out of range, a rate it cannot lock at (12.5) |
 
 Only `LOCKED` carries a usable T: apply-at-T, the play-out guarantee of C2 and the invariant of C4 hold only there.
 In every other state `t` is the transport's own report (extrapolated in `HOLDOVER`, 0 where the transport has no T)
