@@ -23,7 +23,9 @@ import sys
 
 NAMES = ["deliver_rows", "silence_block", "deliver_span", "reanchor", "deliver_hold", "deliver_place", "deliver",
          "phase_error", "phase_act", "phase_verify", "phase_servo_tick", "enter_locked", "enter_holdover",
-         "arrival_since", "apply_exec", "apply_run", "apply_report"]
+         "arrival_since", "apply_exec", "apply_run", "apply_report",
+         # WP FWTB3: the line's time base and the write path (ops 9/10)
+         "tb_line_now", "tb_line_note", "tb_line_read", "tb_line_next", "tb_line_drop", "alink_input_apply"]
 
 
 def body(src, name):

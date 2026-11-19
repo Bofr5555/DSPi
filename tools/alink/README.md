@@ -18,6 +18,8 @@ no devices). Protocol: `Documentation/Features/alink_protocol_spec.md`.
 | `skew_xcorr.py` | test (e) of SYS2 8 (WP LK6): the skew between two receivers from one stereo recording, by cross-correlation (programme material) or by impulse (the CLICK train), sub-sample, with the interface's own channel skew calibrated out; PASS under one alink sample; `--selftest`; `Documentation/Bench/alink_phase_bench.md` |
 | `bench.py clicks` | test (e): one CLICK apply a second through the sender's superframe (WP LK6) |
 | `tests/test_skew_xcorr.py`, `tests/test_bench_clicks.py` | the two above on synthetic recordings and a stub sender |
+| `siggen_sync_bench.py` | the bench driver of PLAN-AT ATHIL Part A (WP FWTB3): every unit's time base (`EXT_TIME_BASE`), one finite `SiggenConfig` staged per unit, apply op 9 `SIGGEN_START` (or op 7 `CLICK`) for one T on the shared counter (USB-direct S origins resolved per unit), optional staggers, then the read-back: `EXT_SIGGEN_TIMELINE` per unit and the disturbance counter / `t - output_frames` before and after; `status`, `start`, `click`, `click-impulse` (H3), `leads` (H7), `abort`; units over the USB MIDI control channel (`NAME=midi:/dev/snd/midiCxDy`) or EP0 on usbfs (`NAME=usb:/dev/bus/usb/BBB/DDD`); JSON report, exit 0 PASS / 1 FAIL / 2 refused; at most -20 dBFS; no audio capture (that is `skew_xcorr.py`'s) |
+| `tests/test_siggen_sync_bench.py` | the driver against `tools/midi_ctrl`'s fake receivers on a virtual clock (one T, staggers, USB origins, refusals, a loss mid-run, CLICK, H3, H7, abort); no device is opened |
 | `tests/test_sender_tool.py` | `bench.py sender` against a simulated RX board and LK7's `FakeAlink("sender")` |
 
 ```sh

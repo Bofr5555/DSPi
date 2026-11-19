@@ -4,7 +4,9 @@
 #   tools/alink_phase_sim/run.sh [scenario substring]    (from the repository root)
 #   tools/alink_phase_sim/run.sh pio                     (the line model against LK2's PIO model)
 #
-# Needs a C compiler and Python 3 (the glue drift check, mirror_diff.py); run it
+# Needs a C compiler, nm and objcopy (WP FWTB3: one copy of the real siggen.c
+# and timebase.c per receiver, tools/alink_usb_sim/sg_unit.sh) and Python 3
+# (the glue drift check, mirror_diff.py); run it
 # in a container, e.g.
 #   podman run --rm --network none -v "$PWD:/repo:ro" -v "$OUT:/out" -w /repo \
 #       localhost/dspi-console-build-debian sh tools/alink_phase_sim/run.sh
@@ -37,8 +39,12 @@ fi
 # The simulation's copy of alink_input.c's glue must not drift (review lk6):
 # mirror_diff.py fails unless the differences are the recorded port lines.
 python3 -I "$here/mirror_diff.py" "$root"
-cc -std=c11 -O2 -Wall -Wextra -Werror -I"$fw/DSPi/alink" -I"$fw/DSPi-Sender" \
+# WP FWTB3: one copy of the real siggen.c + timebase.c per receiver (needs nm, objcopy).
+mkdir -p "$out/sg"
+sg=$(sh "$root/tools/alink_usb_sim/sg_unit.sh" "$out/sg" "$fw")
+cc -std=c11 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$fw/DSPi/alink" -I"$fw/DSPi-Sender" -I"$fw/DSPi" -I"$fw/tests/stubs" \
+    -I"$root/tools/alink_usb_sim" \
     -o "$out/alink_phase_sim" "$here/alink_phase_sim.c" \
     "$fw/DSPi/alink/alink_codec.c" "$fw/DSPi/alink/alink_fast.c" "$fw/DSPi/alink/alink_phase.c" \
-    "$fw/DSPi-Sender/sender_alink.c" -lm
+    "$fw/DSPi-Sender/sender_alink.c" $sg -lm
 exec "$out/alink_phase_sim" "$@"
