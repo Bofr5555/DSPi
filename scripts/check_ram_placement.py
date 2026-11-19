@@ -30,7 +30,7 @@ RAM_LEN = {"rp2040": 262144, "rp2350": 524288}
 # RAM-resident code+data budgets, set about 2.5 KB above the measured image.
 # Raise deliberately and record the measured numbers in current_architecture.md
 # "Memory Layout" (history of every raise is there).
-DATA_BUDGET = {"rp2040": 72704, "rp2350": 100352}
+DATA_BUDGET = {"rp2040": 72704, "rp2350": 102912}  # rp2350 raised 2026-11-19 (alink time base + S/PDIF carriage)
 
 # Flash callees that are cold-path-only and safe for a hot caller to reference.
 # (ALINK_COLD is merged in after its definition below.)

@@ -2622,6 +2622,13 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 
 ## Memory Layout
 
+> **Alink time base and S/PDIF carriage (2026-11-19).** FWTB1 (ops 9/10, the time-base trackers) adds 96 B of
+> `.data`, FWSP1 (the S/PDIF user-bit table and stampers) 416 B and FWSP2 (the S/PDIF roles, a 56-byte RAM filler)
+> 80 B: `.data` 100,320 B on the K340 and 100,208 B on the Pico 2 (68,516 B on RP2040, unchanged). That left 32 B
+> under the RP2350 budget, so `DATA_BUDGET["rp2350"]` in `scripts/check_ram_placement.py` is raised from 100,352
+> to 102,912 B (measured plus about 2.5 KB, a multiple of 512). RP2040 stays at 72,704 B. About 99 KB stays free
+> between `__bss_end__` and the stack limit on the K340.
+
 > **Device name (2026-11-01).** The board name adds 67 bytes of BSS on both
 > platforms. The shared staging table gains a ninth 32-byte entry plus its
 > tag and generation bytes, the pending mask widens to 16 bits, and

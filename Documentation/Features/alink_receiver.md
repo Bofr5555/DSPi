@@ -82,7 +82,7 @@ has never run on hardware.
 
 ## 6. RAM
 
-The alink's RAM-resident set is about 5.4 KB. `.data` against the budget of 100352 B in `check_ram_placement.py`
+The alink's RAM-resident set is about 5.4 KB. `.data` against the budget of 102912 B (raised from 100352 B on 2026-11-19) in `check_ram_placement.py`
 (after LK45F):
 
 | Build | `.data` after LK45F | after LK6 | Headroom |
