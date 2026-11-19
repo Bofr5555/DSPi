@@ -227,6 +227,19 @@ static inline uint8_t alink_spdif_rate_code(uint32_t hz) {
 
 // ---- the source ----
 
+// The source's first epoch byte (review fwbc N7): the glue seeds it once at
+// boot from a random value, so a source back after a power cycle carries
+// another domain id (C5) and its followers see EPOCH, not a same-numbering
+// REANCHOR.  Before mode 2 runs; init leaves it 0.
+void alink_spdif_seed_epoch(alink_spdif_t *u, uint8_t epoch);
+// The S/PDIF slots that carry the superframe (bit n = slot n): a source's
+// tx_mask, 0 = every S/PDIF-type slot (spdif_slots); none in another mode.
+uint8_t alink_spdif_carry_slots(const alink_spdif_t *u, uint8_t spdif_slots);
+// The same as output channels (slot n = outputs 2n and 2n + 1): never in an
+// op 9 generator mask (review fwbc N11, the hub's S-AT6), since followers
+// would play the stimulus as programme.
+uint16_t alink_spdif_carry_outputs(const alink_spdif_t *u, uint8_t spdif_slots);
+
 // The outputs are about to restart (teardown): a new epoch follows.  F
 // played now is f_now; the transmit table is emptied by the caller.
 void alink_spdif_src_stopping(alink_spdif_t *u, uint64_t f_now);

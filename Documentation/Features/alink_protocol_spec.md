@@ -847,7 +847,9 @@ too): `a5 01 00 01 02 10 00 42 c0 a6 0e 00 00 00 00 00`, 12 zero bytes,
 - **Epochs.** Any output restart (preset load, rate change, pipeline reset, output-type switch, a flash write that
   restarts the outputs, a USB mode-0 stream start, `usb_audio.c`) breaks the frame sequence. The source then starts a
   new **epoch**: a new origin, byte 28 incremented (mod 256), a disturbance counted, `0xE4` reason 11 `EPOCH`; every
-  follower re-anchors (12.5). A source SHOULD therefore run USB-direct mode 2 or a non-USB input, whose timeline
+  follower re-anchors (12.5). The epoch byte starts at a random value at boot (review fwbc N7), so a source back
+  after a power cycle carries another domain id (C5) with probability 255/256 and its followers report `EPOCH`; F's
+  continuity check (12.4 d) and the queue rule (`extension_channel_spec.md` 2.10.4) cover the rest. A source SHOULD therefore run USB-direct mode 2 or a non-USB input, whose timeline
   survives stream restarts; on USB mode 0 every "play" is a new epoch. The transmit library's frame index is 32 bits
   and wraps after 24.8 h of uninterrupted output at 48 kHz, 12.4 h at 96 kHz. Nothing happens there: the library keeps
   the block phase continuous across the wrap (its block index is unwrapped, WP FWSP1), and the source unwraps the ring
@@ -894,6 +896,11 @@ audio writer later overwrites the same frames. So:
   it is frozen, b), which the followers coast over (d) and, past 8 blocks, hold over. Every real flash write (tens of
   milliseconds, and an output restart after it, which is a new epoch anyway, 12.3) therefore costs the followers a
   holdover or a re-anchor. A measurement never overlaps a flash write (the holdover is a disturbance).
+- **(c2) Between an output stop and the teardown** the source has already staged the new epoch's first blocks (the
+  ring reset stamps them), while a slot not yet torn down may still be stamped by the blackout pump at its old ring
+  positions, whose block numbers are as small when the old epoch is younger than the staging (8 blocks). So the
+  source turns every slot's carry off at the stop (zero user bits, the table untouched) and on again for each slot
+  just before its ring reset: no block of the old ring ever carries a superframe of the new epoch (review fwbc N10).
 - **(d) The follower's coast rule.** A block whose superframe is missing or invalid (zero user bits, a failed check)
   is ridden through on counter continuity: the follower takes F of that block as the previous F + 192, counts it in
   `sf_errors`, and changes nothing else (no disturbance, no event, the timeline unmoved). After

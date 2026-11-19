@@ -1,32 +1,57 @@
 {
-  "generated": "2026-07-05",
-  "git_head": "556ffc3",
-  "note": "copy_to_ram baseline before XIP migration",
+  "generated": "2026-11-19",
+  "git_head": "bofr-main 4f7114c + WP FWNITS",
+  "note": "XIP build baseline refreshed by WP FWNITS after the rp2350 .data budget raise to 102912 (alink time base + S/PDIF carriage). rp2350 = the K340 image (pico2, -DDSPI_USB_MIDI=ON -DDSPI_VREG_MV=1200), rp2040 = the pico image, default options. ram_image_bytes is .data (the RAM-resident code and data copied at boot); free_ram_bytes is RAM minus vector table, .data, .bss, heap and slot rings, as check_ram_placement.py Check C computes it. The copy_to_ram baseline of 2026-07-05 (556ffc3) is kept under history.",
   "rp2040": {
-    "ram_image_bytes": 108692,
-    "time_critical_bytes": 17954,
-    "bss_bytes": 134932,
-    "free_ram_bytes": 10476,
-    "uf2_bytes": 287744,
-    "xip_ctrl_text_bytes": 34456,
+    "ram_image_bytes": 68516,
+    "bss_bytes": 116188,
+    "free_ram_bytes": 58816,
+    "flash_code_bytes": 235452,
+    "uf2_bytes": 608256,
     "elf_size_totals": {
-      "text": 147928,
+      "text": 308096,
       "data": 0,
-      "bss": 137172,
-      "dec": 285100
+      "bss": 134812,
+      "dec": 442908
     }
   },
   "rp2350": {
-    "ram_image_bytes": 147332,
-    "time_critical_bytes": 23152,
-    "bss_bytes": 291052,
-    "free_ram_bytes": 75540,
-    "uf2_bytes": 296448,
+    "ram_image_bytes": 100320,
+    "bss_bytes": 291732,
+    "free_ram_bytes": 97148,
+    "flash_code_bytes": 291048,
+    "uf2_bytes": 783872,
     "elf_size_totals": {
-      "text": 151980,
+      "text": 395524,
       "data": 0,
-      "bss": 293372,
-      "dec": 445352
+      "bss": 326836,
+      "dec": 722360
+    },
+    "pico2_default_image": {
+      "ram_image_bytes": 100208,
+      "free_ram_bytes": 98660,
+      "uf2_bytes": 770048
+    }
+  },
+  "history": {
+    "2026-07-05 copy_to_ram (556ffc3)": {
+      "rp2040": {
+        "ram_image_bytes": 108692,
+        "time_critical_bytes": 17954,
+        "bss_bytes": 134932,
+        "free_ram_bytes": 10476,
+        "uf2_bytes": 287744,
+        "xip_ctrl_text_bytes": 34456,
+        "elf_size_totals": { "text": 147928, "data": 0, "bss": 137172, "dec": 285100 }
+      },
+      "rp2350": {
+        "ram_image_bytes": 147332,
+        "time_critical_bytes": 23152,
+        "bss_bytes": 291052,
+        "free_ram_bytes": 75540,
+        "uf2_bytes": 296448,
+        "elf_size_totals": { "text": 151980, "data": 0, "bss": 293372, "dec": 445352 }
+      }
     }
   }
 }

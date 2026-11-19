@@ -121,7 +121,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | File | Purpose |
 |------|---------|
 | `scripts/check_ram_placement.py` | Verifies the XIP build: hot symbols resolve to RAM (A), no hot-function branch reaches flash (B), no Core-1 flash literal-pool pointers (B2), sizes vs baseline + `.data` budgets (C). Accepts release and loopback ELFs. |
-| `scripts/ram_baseline.json` | Recorded copy_to_ram baseline sizes used by `check_ram_placement.py` Check C. |
+| `scripts/ram_baseline.json` | Recorded XIP baseline sizes (K340 image for RP2350, pico for RP2040; refreshed 2026-11-19, WP FWNITS; the 2026-07-05 copy_to_ram baseline under `history`) used by `check_ram_placement.py` Check C. |
 
 ### LUFA Compatibility (`firmware/DSPi/lufa/`)
 
@@ -2627,7 +2627,8 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 > 80 B: `.data` 100,320 B on the K340 and 100,208 B on the Pico 2 (68,516 B on RP2040, unchanged). That left 32 B
 > under the RP2350 budget, so `DATA_BUDGET["rp2350"]` in `scripts/check_ram_placement.py` is raised from 100,352
 > to 102,912 B (measured plus about 2.5 KB, a multiple of 512). RP2040 stays at 72,704 B. About 99 KB stays free
-> between `__bss_end__` and the stack limit on the K340.
+> between `__bss_end__` and the stack limit on the K340. `scripts/ram_baseline.json` is refreshed to these
+> images (WP FWNITS, the same day: `.data` unchanged by its fixes, `.bss` +36 B, flash +1.3 KB for `pico_rand`).
 
 > **Device name (2026-11-01).** The board name adds 67 bytes of BSS on both
 > platforms. The shared staging table gains a ninth 32-byte entry plus its
@@ -2891,9 +2892,10 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 and warns on flash reached through linker long-call veneers (cold paths); Check
 > B2 scans Core-1 function bodies for flash-range literal-pool pointers
 > (whitelisting two provably init-time-only references); Check C compares sizes
-> against `scripts/ram_baseline.json` (the recorded copy_to_ram baseline) and
-> enforces the `.data` budgets (60 KB RP2040, 72 KB RP2350; RP2350 raised from
-> 64K for the ADAT input receiver's RAM-pinned decode code). All four build
+> against `scripts/ram_baseline.json` (the recorded XIP baseline, refreshed
+> 2026-11-19; it was the copy_to_ram baseline until then) and enforces the
+> `.data` budgets in `DATA_BUDGET` (72,704 B RP2040, 102,912 B RP2350; the
+> history of every raise is under "Memory Layout"). All four build
 > variants currently pass with 0 FAIL.
 
 > **Control Surfaces footprint (2026-07-06, format v2).** The engine adds

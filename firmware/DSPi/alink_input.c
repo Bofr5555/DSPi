@@ -297,8 +297,10 @@ static void event(uint8_t state, uint8_t reason) {
 #if DSPI_SIGGEN_SYNC
     // The contract's own reasons; a lock, a loss or a holdover is derived
     // from the state transition by the tracker.
+    // mirror-begin event_tb_notes (review fwbc N3: tools/alink_phase_sim/mirror_diff.py)
     if (reason == ALINK_REASON_REANCHOR) tb_line_note(TB_RS_REANCHOR);
     else if (reason == ALINK_REASON_DISABLED) tb_line_note(TB_RS_DISABLED);
+    // mirror-end event_tb_notes
 #endif
     if (state == pub_state && reason != ALINK_REASON_REANCHOR) return;
     pub_state = state;
@@ -1056,6 +1058,7 @@ uint32_t alink_input_poll(void) {
             // The superframe's apply (the broadcast path): same queue.
             int took = alink_apply_take_sf(&aq, &apply_lim, &sf_last);
 #if DSPI_SIGGEN_SYNC
+            // mirror-begin broadcast_op9
             // A broadcast op 9 (2.8.7.1): refused at once when another is
             // pending or it was first seen less than arm_lead before T.
             if (took == 1 && sf_last.apply_op == ALINK_OP_SIGGEN_START &&
@@ -1070,6 +1073,7 @@ uint32_t alink_input_poll(void) {
                     }
                 took = 2;
             }
+            // mirror-end broadcast_op9
 #endif
             if (took == 2)
                 apply_report(sf_last.apply_op, ALINK_APPLY_REFUSED, sf_last.apply_frame);
@@ -1077,8 +1081,10 @@ uint32_t alink_input_poll(void) {
     }
     measure();
 #if DSPI_SIGGEN_SYNC
+    // mirror-begin op9_poll
     // An op 9 pending on F arms at T - arm_lead (WP FWTB1).
     if (phase == PH_LOCKED && ph.timeline) siggen_tb_poll(TB_ID_LINE, ph.next_w, detected_rate);
+    // mirror-end op9_poll
 #endif
     uint32_t n = deliver();
     if (alink_phase_active(&ph)) {

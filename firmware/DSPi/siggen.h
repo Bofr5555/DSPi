@@ -297,6 +297,11 @@ void siggen_tb_disturbed(uint8_t tb, uint16_t n);
 void siggen_tb_pipeline_reset(void);
 // EXT_SIGGEN_TIMELINE (40 bytes).
 void siggen_tb_timeline(uint8_t out[40]);
+// Outputs (channel_mask bits) an op 9 must never drive: an S/PDIF source's
+// slots that carry the time base (alink_spdif_port.c, every pass; review fwbc
+// N11, the hub's S-AT6).  A config that names one is refused at arming and at
+// T (REFUSED_NOT_READY).  0 at boot; plain STARTs are not affected.
+void siggen_tb_set_no_outputs(uint16_t mask);
 
 // Port: main.c / timebase.c (firmware), the host tests.
 uint16_t siggen_port_arm_lead_ms(void);      // max(hold_ms, release_ms) + 50

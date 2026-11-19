@@ -40,6 +40,7 @@
 #include "pico/audio_spdif.h"
 #include "pico/stdlib.h"
 #include "pico/unique_id.h"
+#include "pico/rand.h"
 #include "hardware/dma.h"
 #include "hardware/sync.h"
 #include "hardware/timer.h"
@@ -118,12 +119,20 @@ bool alink_spdif_port_play(float *fill, uint32_t *played) { return slot_ring_pla
 uint32_t alink_spdif_port_fill(void) { return slot_ring_fill_frames(0); }
 uint32_t alink_spdif_port_ring_span(void) { return output_latency_ring_span(); }
 
+// The host's UAC mute silences the outputs only while USB is the active input
+// (audio_pipeline.c): an S/PDIF source fed by USB is then muted, as a
+// USB-direct unit is (review fwbc N6).
+static bool uac_muted(void) {
+    return audio_state.mute && active_input_source == INPUT_SOURCE_USB;
+}
+
 uint8_t alink_spdif_port_apply(const alink_apply_op_t *op, bool late, bool locked) {
     switch (op->op) {
     case ALINK_OP_SIGGEN_START:
-        // The generator's sample 0 is this sample; not ready muted or
-        // without a LOCKED time base; never late.
-        return siggen_tb_fire(TB_ID_SPDIF, op->frame, late, locked && !user_mute);
+        // The generator's sample 0 is this sample; not ready muted (user
+        // mute, the source's system-mute flag, the host's UAC mute on USB
+        // input) or without a LOCKED time base; never late.
+        return siggen_tb_fire(TB_ID_SPDIF, op->frame, late, locked && !user_mute && !uac_muted());
     case ALINK_OP_SIGGEN_STOP:
         siggen_tb_stop_op(op->arg);
         return ALINK_APPLY_APPLIED;
@@ -153,8 +162,8 @@ uint8_t alink_spdif_port_apply(const alink_apply_op_t *op, bool late, bool locke
     }
     case ALINK_OP_CLICK:
         // Never on the PDM sub, never a muted unit (the source's system-mute
-        // flag is the caller's `locked`).
-        if (op->arg >= NUM_SPDIF_INSTANCES * 2 || user_mute || !locked) return ALINK_APPLY_REFUSED;
+        // flag is the caller's `locked`; the host's UAC mute on USB input).
+        if (op->arg >= NUM_SPDIF_INSTANCES * 2 || user_mute || uac_muted() || !locked) return ALINK_APPLY_REFUSED;
         pipeline_click_output = (int8_t)op->arg;
         return ALINK_APPLY_APPLIED;
     default:
@@ -233,13 +242,16 @@ uint32_t alink_spdif_fw_ring_target(uint32_t fs, uint32_t target, uint32_t cap) 
 // Which S/PDIF slots carry the superframe (mode 2: tx_mask, 0 = every
 // S/PDIF-type slot; otherwise none: zero user bits).
 static void apply_carry(void) {
-    uint8_t m = 0;
-    if (alink_spdif.mode == ALINK_SPDIF_MODE_SOURCE) m = alink_spdif.tx_mask ? alink_spdif.tx_mask : spdif_slot_mask();
+    uint8_t m = alink_spdif_carry_slots(&alink_spdif, spdif_slot_mask());
     for (unsigned i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         if (output_types[i] == OUTPUT_TYPE_I2S) continue;
         audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
         if (inst) audio_spdif_ubits_set_carry(inst, (m >> i) & 1u);
     }
+#if DSPI_SIGGEN_SYNC
+    // An op 9 never drives a slot that carries the time base (N11, S-AT6).
+    siggen_tb_set_no_outputs(alink_spdif_carry_outputs(&alink_spdif, spdif_slot_mask()));
+#endif
 }
 
 // The source's table: stage eight blocks ahead of the reader and fill the
@@ -284,6 +296,9 @@ void alink_spdif_fw_init(void) {
     pico_unique_board_id_t id;
     pico_get_unique_board_id(&id);
     alink_spdif_init(&alink_spdif, id.id[7], id.id[6]);
+    // A random first epoch (review fwbc N7): after a power cycle the source's
+    // domain id differs from the one its followers last saw.
+    alink_spdif_seed_epoch(&alink_spdif, (uint8_t)get_rand_32());
     alink_spdif.fifo_words = SPDIF_RX_FIFO_SIZE;
     audio_spdif_ubits_set_filler(alink_spdif_tx_filler);
 }
@@ -371,11 +386,28 @@ void alink_spdif_fw_outputs_stopping(void) {
     if (u->mode == ALINK_SPDIF_MODE_SOURCE) {
         uint32_t wr, played;
         uint64_t f = (u->src_running && ring_counters(&wr, &played)) ? alink_spdif_src_f(u, played) : 0;
+        // Until each slot's teardown its old ring may still be stamped (a
+        // stall-timer pump): it stamps zero user bits from here on and leaves
+        // the table alone.  Otherwise an old epoch younger than the staging
+        // (8 blocks) would get the new epoch's superframes at its own block
+        // numbers (review fwbc N10).  alink_spdif_fw_slot_reset() sets the
+        // carry again before the slot's ring reset stamps the prefill.
+        for (unsigned i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (inst && output_types[i] != OUTPUT_TYPE_I2S) audio_spdif_ubits_set_carry(inst, false);
+        }
         audio_spdif_ubits_clear();          // before the group restart (FWSP1: no stale block)
         alink_spdif_src_stopping(u, f);
         alink_spdif_src_stage(u, 0, true);  // the prefill stamps the new epoch's blocks
         update_armed();
     }
+}
+
+void alink_spdif_fw_slot_reset(unsigned slot) {
+    if (slot >= NUM_SPDIF_INSTANCES || output_types[slot] == OUTPUT_TYPE_I2S) return;
+    audio_spdif_instance_t *inst = spdif_instance_ptrs[slot];
+    uint8_t m = alink_spdif_carry_slots(&alink_spdif, spdif_slot_mask());
+    if (inst) audio_spdif_ubits_set_carry(inst, (m >> slot) & 1u);
 }
 
 void alink_spdif_fw_outputs_started(void) {

@@ -737,6 +737,74 @@ static void test_collector_order(void) {
     for (unsigned i = 0; i < 16; i++) CHECK(((words[i] >> 29) & 1u) == first16[i], "first bits %u", i);
 }
 
+// Review fwbc N10 (WP FWNITS): two output restarts within the staging's 8
+// blocks.  The source stages the new epoch's blocks 0-7 before the teardown
+// (the ring reset's prefill stamps them); until a slot's teardown its old ring
+// may still be stamped (the stall-timer pump) at its own block numbers, which
+// are small too.  The glue turns the carry off at the stop
+// (alink_spdif_fw_outputs_stopping()) and on again just before each slot's
+// ring reset (alink_spdif_fw_slot_reset()): the old ring stamps zeros and
+// leaves the table alone, and the new ring gets the new epoch.
+static uint8_t corner_epoch;
+static void corner_filler(uint32_t block) {
+    if (block >= 8u) return;                // the staging: eight blocks of the epoch
+    alink_spdif_src_t src = { .rate = 1, .sender = 3, .epoch = corner_epoch };
+    uint8_t sf[48];
+    alink_spdif_sf_build(&src, 192u * (uint64_t)block, sf);
+    (void)audio_spdif_ubits_fill(block, sf);
+}
+static bool entry_is_epoch(uint32_t block, uint8_t epoch) {
+    spdif_ubits_entry_t *t = &spdif_ubits_table[block & 3u];
+    alink_spdif_src_t src = { .rate = 1, .sender = 3, .epoch = epoch };
+    uint8_t sf[48];
+    alink_spdif_sf_build(&src, 192u * (uint64_t)block, sf);
+    return t->block == block && (t->state & UB_HAS_DATA) && memcmp(t->sf, sf, 48) == 0;
+}
+static void corner_run(bool fix, int *old_new, int *table_touched, int *new_ok) {
+    corner_epoch = 4;
+    audio_spdif_ubits_set_filler(corner_filler);
+    slots_init(0, false);
+    for (int i = 0; i < 8; i++) {           // the old epoch plays 2 blocks
+        recover_all(96);
+        while (fill_of() < 96) write_all(48);
+        reader_advance(48);
+    }
+    // The stop: carry off (the fix), the table emptied, the new epoch staged.
+    if (fix) for (int k = 0; k < NSLOTS; k++) audio_spdif_ubits_set_carry(&slots[k].inst, false);
+    audio_spdif_ubits_clear();
+    corner_epoch = 5;
+    // Before the teardown the stall pump stamps the old rings a full ring ahead.
+    pump_all(PICO_AUDIO_SPDIF_RING_FRAMES);
+    *old_new = 0;
+    *table_touched = 0;
+    for (uint32_t b = 0; b < 8u; b++) if (entry_is_epoch(b, 5)) (*old_new)++;
+    for (unsigned i = 0; i < UB_TABLE; i++) if (spdif_ubits_table[i].state) (*table_touched)++;
+    // The teardown: per slot, carry again, then the ring reset and its prefill.
+    for (int k = 0; k < NSLOTS; k++) {
+        audio_spdif_instance_t *inst = &slots[k].inst;
+        inst->enabled = false;
+        if (fix) audio_spdif_ubits_set_carry(inst, slots[k].carry);
+        inst->wr_frames = inst->erased_frames = inst->consumed_frames = 0;
+        spdif_ubits_ring_reset(inst);
+        audio_spdif_ring_silence_pump(inst, PICO_AUDIO_SPDIF_RING_FRAMES);
+        inst->enabled = true;
+    }
+    *new_ok = 0;
+    for (uint32_t b = 0; b < 2u; b++) if (entry_is_epoch(b, 5)) (*new_ok)++;
+    audio_spdif_ubits_set_filler(NULL);
+}
+static void test_restart_corner(void) {
+    int old_new, touched, new_ok;
+    corner_run(false, &old_new, &touched, &new_ok);
+    // Without the fix the corner is real: the old ring takes new-epoch
+    // superframes at its own (young) block numbers.
+    CHECK(old_new > 0, "N10 unfixed: the old ring stamped %d new-epoch blocks (the corner is modelled)", old_new);
+    corner_run(true, &old_new, &touched, &new_ok);
+    CHECK(old_new == 0 && touched == 0, "FWNITS N10: the old ring stamps zeros and leaves the table alone (%d, %d)",
+          old_new, touched);
+    CHECK(new_ok == 2, "FWNITS N10: the new ring's blocks 0-1 carry the new epoch (%d of 2)", new_ok);
+}
+
 int main(void) {
     printf("test_spdif_ubits\n");
     build_lookup();
@@ -746,6 +814,7 @@ int main(void) {
     test_collector_order();
     test_fill_rules();
     test_cleared_table();
+    test_restart_corner();
 
     static const uint32_t rates[3] = { 44100, 48000, 96000 };
     char label[64];

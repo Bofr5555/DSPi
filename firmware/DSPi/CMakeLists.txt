@@ -317,6 +317,8 @@ endif()
 # reuse alink/alink_phase.c (built above on alink or USB-direct builds).
 if (DSPI_ALINK_SPDIF AND NOT PICO_PLATFORM STREQUAL "rp2040")
     target_sources(DSPi PRIVATE alink_spdif.c alink_spdif_port.c)
+    # review fwbc N7: the source's first epoch byte is random (get_rand_32()).
+    target_link_libraries(DSPi pico_rand)
     if (NOT DSPI_ALINK AND NOT DSPI_ALINK_USB)
         target_sources(DSPi PRIVATE alink/alink_phase.c)
     endif()

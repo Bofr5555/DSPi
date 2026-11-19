@@ -834,8 +834,59 @@ static void test_mode0(void) {
     CHECK(alink_spdif_src_staged(&s, 0) == NULL, "mode 0: no superframe staged (zero user bits)");
 }
 
+// WP FWNITS (review fwbc N7, N11): the seeded first epoch and the carrying
+// slots / outputs.
+static void test_fwnits(void) {
+    uint8_t c[8];
+    // N7: the glue seeds the epoch byte at boot; mode 2 starts the next one.
+    alink_spdif_t s;
+    alink_spdif_init(&s, 0x42, 0x37);
+    CHECK(s.epoch == 0, "FWNITS N7: init leaves the epoch 0 (the seed is the glue's)");
+    alink_spdif_seed_epoch(&s, 0xA7);
+    memcpy(c, (uint8_t[8]){ 2, 1, 0, 0, 0, 0, 0, 0 }, 8);
+    CHECK(alink_spdif_set_config(&s, c, 0x03) == TB_OK, "FWNITS N7: source");
+    alink_spdif_src_sync(&s, true, 5000u);
+    CHECK(s.epoch == 0xA8 && s.src.epoch == 0xA8, "FWNITS N7: the first epoch follows the seed (%02x %02x)",
+          s.epoch, s.src.epoch);
+    alink_spdif_src_stopping(&s, alink_spdif_src_f(&s, 6000u));
+    alink_spdif_src_started(&s);
+    CHECK(s.epoch == 0xA9 && s.src.epoch == 0xA9, "FWNITS N7: a restart increments it");
+    alink_spdif_t w;
+    alink_spdif_init(&w, 0x42, 0x37);
+    alink_spdif_seed_epoch(&w, 0xFF);
+    CHECK(alink_spdif_set_config(&w, c, 0x03) == TB_OK, "FWNITS N7: source");
+    alink_spdif_src_sync(&w, true, 5000u);
+    CHECK(w.epoch == 0x00 && w.src.epoch == 0x00, "FWNITS N7: the byte wraps (%02x)", w.epoch);
+    // A seed other than the last boot's gives another domain id (C5: byte 2).
+    CHECK(s.epoch != w.epoch, "FWNITS N7: two seeds, two domains");
+    // N11: the slots that carry the superframe, as outputs.
+    CHECK(alink_spdif_carry_slots(&s, 0x03) == 0x03 && alink_spdif_carry_outputs(&s, 0x03) == 0x000F,
+          "FWNITS N11: tx_mask 0: every S/PDIF slot carries (outputs %04x)", alink_spdif_carry_outputs(&s, 0x03));
+    CHECK(alink_spdif_carry_slots(&s, 0x0A) == 0x0A && alink_spdif_carry_outputs(&s, 0x0A) == 0x00CC,
+          "FWNITS N11: slots 1 and 3 S/PDIF: outputs 2, 3, 6, 7");
+    memcpy(c, (uint8_t[8]){ 2, 1, 0, 0, 0, 0, 0x02, 0 }, 8);
+    CHECK(alink_spdif_set_config(&s, c, 0x03) == TB_OK, "FWNITS N11: tx_mask slot 1");
+    CHECK(alink_spdif_carry_slots(&s, 0x03) == 0x02 && alink_spdif_carry_outputs(&s, 0x03) == 0x000C,
+          "FWNITS N11: tx_mask slot 1: outputs 2 and 3 (%04x)", alink_spdif_carry_outputs(&s, 0x03));
+    CHECK(alink_spdif_carry_slots(&s, 0x01) == 0x00 && alink_spdif_carry_outputs(&s, 0x01) == 0,
+          "FWNITS N11: a tx_mask slot that is not S/PDIF carries nothing");
+    alink_spdif_t m8;
+    alink_spdif_init(&m8, 1, 2);
+    memcpy(c, (uint8_t[8]){ 2, 1, 0, 0, 0, 0, 0, 0 }, 8);
+    CHECK(alink_spdif_set_config(&m8, c, 0xFF) == TB_OK && alink_spdif_carry_outputs(&m8, 0xFF) == 0xFFFF,
+          "FWNITS N11: eight slots: all sixteen outputs");
+    alink_spdif_t f;
+    alink_spdif_init(&f, 1, 2);
+    CHECK(alink_spdif_carry_outputs(&f, 0x03) == 0, "FWNITS N11: mode 0 carries nothing");
+    memcpy(c, (uint8_t[8]){ 1, 1, 0xc0, 0, 0, 0, 0, 0 }, 8);
+    alink_spdif_limits(&f, 49, 48, 448);
+    CHECK(alink_spdif_set_config(&f, c, 0x03) == TB_OK && alink_spdif_carry_outputs(&f, 0x03) == 0,
+          "FWNITS N11: a follower carries nothing");
+}
+
 int main(void) {
     test_config();
+    test_fwnits();
     test_status_layout();
     test_ctrl_layout();
     test_anchor_lock(48000);

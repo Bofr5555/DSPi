@@ -1372,6 +1372,9 @@ static void teardown_output_slot(int slot_idx) {
         if (!inst || !inst->ring) return;
 
         if (inst->enabled) audio_spdif_set_enabled(inst, false);
+#if DSPI_ALINK_SPDIF
+        alink_spdif_fw_slot_reset((unsigned)slot_idx);  // the ring reset stamps the new epoch (N10)
+#endif
         spdif_reset_consumer_pipeline(inst);
     }
 }

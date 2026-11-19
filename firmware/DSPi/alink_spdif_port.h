@@ -31,6 +31,9 @@ bool     alink_spdif_fw_servo(float hz, bool long_ok);
 bool     alink_spdif_fw_anchor_ready(void);
 void     alink_spdif_fw_outputs_stopping(void);
 void     alink_spdif_fw_outputs_started(void);
+// main.c teardown_output_slot(): slot `slot` is stopped and its ring reset
+// follows; the carry of its user bits is set again (review fwbc N10).
+void     alink_spdif_fw_slot_reset(unsigned slot);
 void     alink_spdif_fw_outputs_reset(void);
 // audio_pipeline.c: process_input_block()'s split hook (alink_spdif_split_armed).
 bool     alink_spdif_fw_src_block(uint32_t n);

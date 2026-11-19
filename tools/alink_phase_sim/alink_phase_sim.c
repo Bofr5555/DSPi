@@ -585,8 +585,10 @@ static sg_port_t sim_port = { port_ready_now, port_arm_lead_ms, port_slips, port
 static void event(rx_t *r, uint8_t state, uint8_t reason) {
     (void)state;
 #if DSPI_SIGGEN_SYNC
+    // mirror-begin event_tb_notes (review fwbc N3: tools/alink_phase_sim/mirror_diff.py)
     if (reason == ALINK_REASON_REANCHOR) tb_line_note(r, TB_RS_REANCHOR);
     else if (reason == ALINK_REASON_DISABLED) tb_line_note(r, TB_RS_DISABLED);
+    // mirror-end event_tb_notes
 #endif
     if (reason == ALINK_REASON_REANCHOR) r->reanchors++;
 }
@@ -934,6 +936,7 @@ static void poll(rx_t *r) {
             // The superframe's apply (the broadcast path): same queue.
             int took = alink_apply_take_sf(&r->aq, &apply_lim, &r->sf_last);
 #if DSPI_SIGGEN_SYNC
+            // mirror-begin broadcast_op9
             // A broadcast op 9 (2.8.7.1): refused at once when another is
             // pending or it was first seen less than arm_lead before T.
             if (took == 1 && r->sf_last.apply_op == ALINK_OP_SIGGEN_START &&
@@ -948,6 +951,7 @@ static void poll(rx_t *r) {
                     }
                 took = 2;
             }
+            // mirror-end broadcast_op9
 #endif
             if (took == 2)
                 apply_report(r, r->sf_last.apply_op, ALINK_APPLY_REFUSED, r->sf_last.apply_frame);
@@ -957,8 +961,10 @@ static void poll(rx_t *r) {
         alink_meas_sample(&r->meas, r->now_us, r->pub_bits,
                          1e6f * (float)r->detected_rate / (float)alink_class_baud(r->lf.cls));
 #if DSPI_SIGGEN_SYNC
+    // mirror-begin op9_poll
     // An op 9 pending on F arms at T - arm_lead (WP FWTB1).
     if (r->phase == PH_LOCKED && r->ph.timeline) siggen_tb_poll(TB_ID_LINE, r->ph.next_w, r->detected_rate);
+    // mirror-end op9_poll
 #endif
     deliver(r);
     if (alink_phase_active(&r->ph)) {

@@ -408,8 +408,45 @@ static void test_preconditions(void) {
     CHECK(siggen_stage_config(&fin, sizeof fin) && arm_case() == 1, "staged again: arms");
 }
 
+// Review fwbc N11 (the hub's S-AT6): an op 9 never drives an output that
+// carries an S/PDIF source's time base.  Refused NOT_READY at arming, and at
+// T when the slot started carrying after the arming; a plain START is not
+// affected.  (WP FWNITS)
+static void test_no_outputs(void) {
+    timebase_register(TB_SLOT_LINE, NULL);
+    SiggenConfig c = sh_cfg(SIGGEN_SWEEP_LOG, 2, 1);        // output 1: slot 0
+    siggen_tb_set_no_outputs(0x0003u);                     // slot 0 carries
+    CHECK(siggen_stage_config(&c, sizeof c) && arm_case() == 0 &&
+          sh_timeline().result == TB_RES_REFUSED_NOT_READY, "FWNITS N11: output 1 on a carrying slot 0: refused at arming");
+    siggen_tb_set_no_outputs(0x000Cu);                     // slot 1 carries
+    CHECK(siggen_stage_config(&c, sizeof c) && arm_case() == 1, "FWNITS N11: slot 1 carries, output 1 arms");
+    SiggenConfig two = c;
+    two.channel_mask = 0x0006u;                            // outputs 1 and 2: one on slot 1
+    CHECK(siggen_stage_config(&two, sizeof two) && arm_case() == 0, "FWNITS N11: one output of the mask carries: refused");
+    // Armed while allowed, the slot carries by T: refused at T, not started.
+    siggen_tb_set_no_outputs(0);
+    CHECK(siggen_stage_config(&c, sizeof c), "stage");
+    uint64_t T = 1000000u + 36000u;
+    CHECK(siggen_tb_accept(TB_ID_LINE, T, 1000000u, 48000u) == TB_OK, "op 9 accepted");
+    siggen_tb_poll(TB_ID_LINE, T - 7200u, 48000u);
+    siggen_output_gate(true);
+    CHECK(siggen_wants_output(), "armed");
+    siggen_tb_set_no_outputs(0x0003u);
+    CHECK(siggen_tb_fire(TB_ID_LINE, T, false, true) == ALINK_APPLY_REFUSED && !siggen_running &&
+          sh_timeline().result == TB_RES_REFUSED_NOT_READY && !siggen_wants_output(),
+          "FWNITS N11: the slot carries at T: refused, the DAC handed back");
+    // A plain START is not judged (the hub's rule; the legacy path unchanged).
+    CHECK(siggen_stage_config(&c, sizeof c) && siggen_control(SIGGEN_CTL_START) && siggen_running,
+          "FWNITS N11: a plain START still plays");
+    siggen_control(SIGGEN_CTL_STOP_NOW);
+    siggen_service();
+    siggen_tb_set_no_outputs(0);
+    CHECK(siggen_stage_config(&c, sizeof c) && arm_case() == 1, "FWNITS N11: mask cleared: arms");
+}
+
 int main(void) {
     test_preconditions();
+    test_no_outputs();
     test_states();
     test_disturbances();
     test_events();

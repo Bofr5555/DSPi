@@ -319,6 +319,24 @@ static void stage_invalidate(alink_spdif_t *u) {
     for (unsigned i = 0; i < ALINK_SPDIF_STAGE_BLOCKS; i++) u->stage[i].valid = false;
 }
 
+void alink_spdif_seed_epoch(alink_spdif_t *u, uint8_t epoch) {
+    u->epoch = epoch;
+    u->src.epoch = epoch;
+}
+
+uint8_t alink_spdif_carry_slots(const alink_spdif_t *u, uint8_t spdif_slots) {
+    if (u->mode != ALINK_SPDIF_MODE_SOURCE) return 0;
+    return u->tx_mask ? (uint8_t)(u->tx_mask & spdif_slots) : spdif_slots;
+}
+
+uint16_t alink_spdif_carry_outputs(const alink_spdif_t *u, uint8_t spdif_slots) {
+    uint8_t m = alink_spdif_carry_slots(u, spdif_slots);
+    uint16_t o = 0;
+    for (unsigned n = 0; n < 8; n++)
+        if (m & (1u << n)) o |= (uint16_t)(3u << (2u * n));
+    return o;
+}
+
 void alink_spdif_src_stopping(alink_spdif_t *u, uint64_t f_now) {
     if (f_now > u->f_seen) u->f_seen = f_now;
     if (u->mode != ALINK_SPDIF_MODE_SOURCE) return;

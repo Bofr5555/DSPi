@@ -181,3 +181,8 @@
     -if(r != TB_OK)return r
     +uint8_t res = siggen_tb_accept(TB_ID_LINE,op.frame,ph.next_w,detected_rate)
     +if(res != TB_OK)return res
+### region broadcast_op9: 2 port statements
+    - if(took == 1 && sf_last.apply_op == ALINK_OP_SIGGEN_START && !siggen_tb_accept_broadcast(TB_ID_LINE,sf_last.apply_frame,ph.next_w,detected_rate ? detected_rate : audio_state.freq)){for(unsigned i = aq.n
+    + if(took == 1 && sf_last.apply_op == ALINK_OP_SIGGEN_START && !siggen_tb_accept_broadcast(TB_ID_LINE,sf_last.apply_frame,ph.next_w,detected_rate ? detected_rate : fs)){for(unsigned i = aq.n
+### region event_tb_notes: identical
+### region op9_poll: identical

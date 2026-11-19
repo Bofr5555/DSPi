@@ -198,6 +198,7 @@ static uint8_t  notify_state, notify_reason;
 // Start on the time base (WP FWTB1, siggen.h).  The pending op 9 (one per
 // unit) and the timeline record behind EXT_SIGGEN_TIMELINE.
 static bool     tb_fresh;                    // R4 (b): SET_CONFIG since boot/stop/op 10/CANCEL_ALL/preset/loss
+static uint16_t tb_no_outputs;               // outputs an op 9 never drives (siggen_tb_set_no_outputs)
 static bool     tb_armed;                    // arming lead reached: the generator wants the outputs
 static bool     tb_dac_ready;                // siggen_output_gate() said the DAC is open
 static bool     tb_prepared;                 // engine_prepare() ran for cfg
@@ -1494,13 +1495,17 @@ static uint64_t arm_lead_samples(uint32_t fs) { return ms_samples(siggen_port_ar
 
 // R4 (a) and (b): a finite config (a sweep or pattern with a repeat count,
 // never continuous, never RAW), written since the last stop, op 10,
-// CANCEL_ALL, preset load or loss.
+// CANCEL_ALL, preset load or loss; and no output the unit forbids (an S/PDIF
+// source's slots that carry the time base, review fwbc N11).
 static bool tb_config_ok(void) {
     if (!cfg_valid || !tb_fresh) return false;
     uint8_t tm = type_timing[cfg.signal_type];
     if (tm != SIGGEN_TIMING_SWEEP && tm != SIGGEN_TIMING_PATTERN) return false;
+    if (cfg.channel_mask & tb_no_outputs) return false;     // an S/PDIF source's time-base slot (N11)
     return cfg.repeat >= 1 && !(cfg.flags & SIGGEN_FLAG_RAW);
 }
+
+void siggen_tb_set_no_outputs(uint16_t mask) { tb_no_outputs = mask; }
 
 static bool tb_idle(void) { return !siggen_running && !start_wait && !swap_pending; }
 

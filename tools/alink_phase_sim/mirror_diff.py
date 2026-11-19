@@ -10,6 +10,17 @@ itself (ring fill, DMA positions, the actuator, events, the flags byte); they
 are recorded in mirror_expected.txt.  Any other difference means one copy
 changed without the other: the check fails.
 
+Code inside a function that is not mirrored as a whole is marked in both files
+(review fwbc N3):
+
+    // mirror-begin <tag>
+    ...
+    // mirror-end <tag>
+
+Each marked region is diffed the same way.  A tag in only one file, a tag
+twice in one file, or a tag of MARKERS missing from both fails at once, and so
+does an unclosed region; --write does not accept those.
+
   python3 tools/alink_phase_sim/mirror_diff.py [ROOT]           check (exit 1 on drift)
   python3 tools/alink_phase_sim/mirror_diff.py [ROOT] --write   accept the current port differences
 
@@ -26,6 +37,34 @@ NAMES = ["deliver_rows", "silence_block", "deliver_span", "reanchor", "deliver_h
          "arrival_since", "apply_exec", "apply_run", "apply_report",
          # WP FWTB3: the line's time base and the write path (ops 9/10)
          "tb_line_now", "tb_line_note", "tb_line_read", "tb_line_next", "tb_line_drop", "alink_input_apply"]
+
+# Review fwbc N3: the marked regions that must exist (alink_input_poll()'s
+# broadcast op 9 and op 9 arming, event()'s tracker notes).
+MARKERS = ["broadcast_op9", "op9_poll", "event_tb_notes"]
+
+MARK_RE = re.compile(r"//\s*mirror-(begin|end)\s+(\w+)[^\n]*\n")
+
+
+def regions(src, label):
+    """{tag: text} of the marked regions; a list of structural errors."""
+    out, errs, open_tag, start = {}, [], None, 0
+    for m in MARK_RE.finditer(src):
+        kind, tag = m.group(1), m.group(2)
+        if kind == "begin":
+            if open_tag:
+                errs.append(f"{label}: mirror-begin {tag} inside {open_tag}")
+            open_tag, start = tag, m.end()
+        else:
+            if tag != open_tag:
+                errs.append(f"{label}: mirror-end {tag} without its begin")
+                continue
+            if tag in out:
+                errs.append(f"{label}: mirror region {tag} twice")
+            out[tag] = src[start:m.start()]
+            open_tag = None
+    if open_tag:
+        errs.append(f"{label}: mirror region {open_tag} not closed")
+    return out, errs
 
 
 def body(src, name):
@@ -56,7 +95,7 @@ def norm(s):
 def report(root):
     fw = open(os.path.join(root, "firmware/DSPi/alink_input.c")).read()
     sim = open(os.path.join(root, "tools/alink_phase_sim/alink_phase_sim.c")).read()
-    out = []
+    out, errs = [], []
     for n in NAMES:
         a, b = body(fw, n), body(sim, n)
         if a is None or b is None:
@@ -66,21 +105,37 @@ def report(root):
         lines = [l for l in d[2:] if l[:1] in "+-"]
         out.append(f"### {n}: " + ("identical" if not lines else f"{len(lines)} port statements"))
         out += ["    " + l[:240] for l in lines]
-    return "\n".join(out) + "\n"
+    rf, ef = regions(fw, "alink_input.c")
+    rs, es = regions(sim, "alink_phase_sim.c")
+    errs += ef + es
+    for tag in sorted(set(rf) | set(rs) | set(MARKERS)):
+        if tag not in rf or tag not in rs:
+            errs.append(f"mirror region {tag}: alink_input.c={tag in rf} alink_phase_sim.c={tag in rs}")
+            continue
+        d = list(difflib.unified_diff(norm(rf[tag]), norm(rs[tag]), "fw", "sim", lineterm="", n=0))
+        lines = [l for l in d[2:] if l[:1] in "+-"]
+        out.append(f"### region {tag}: " + ("identical" if not lines else f"{len(lines)} port statements"))
+        out += ["    " + l[:240] for l in lines]
+    return "\n".join(out) + "\n", errs
 
 
 def main(argv):
     args = [a for a in argv if not a.startswith("--")]
     root = args[0] if args else os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
     expected = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mirror_expected.txt")
-    now = report(root)
+    now, errs = report(root)
+    if errs:
+        print("mirror_diff: FAIL, the mirror markers are broken:")
+        print("\n".join("  " + e for e in errs))
+        return 1
     if "--write" in argv:
         open(expected, "w").write(now)
         print(f"mirror_diff: wrote {expected}")
         return 0
     want = open(expected).read() if os.path.exists(expected) else ""
     if now == want:
-        print(f"mirror_diff: the simulation's {len(NAMES)} mirrored functions match alink_input.c (port lines as recorded)")
+        print(f"mirror_diff: the simulation's {len(NAMES)} mirrored functions and {len(MARKERS)} marked regions "
+              "match alink_input.c (port lines as recorded)")
         return 0
     print("mirror_diff: FAIL, the simulation's glue and alink_input.c have drifted apart:")
     sys.stdout.writelines(difflib.unified_diff(want.splitlines(True), now.splitlines(True), "mirror_expected.txt",
