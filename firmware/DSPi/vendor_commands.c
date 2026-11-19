@@ -49,6 +49,11 @@
 #if DSPI_ALINK_USB
 #include "alink_usb.h"
 #endif
+#if DSPI_ALINK_SPDIF
+#include "alink_spdif_port.h"   // -- WP FWSP2 -- the S/PDIF block 0x8020-0x8022
+_Static_assert(EXT_ALINK_SPDIF == 0x8020 && EXT_ALINK_SPDIF_STATUS == 0x8021 && EXT_ALINK_SPDIF_CTRL == 0x8022,
+               "S/PDIF extension ids are a wire contract");
+#endif
 #include "input_source_names.h"
 #include "loopback.h"   // DSPI_LOOPBACK glitch counters (self-guarded; empty otherwise)
 #include "core_vreg.h"
@@ -622,6 +627,11 @@ static const uint16_t ext_ids[] = {
     EXT_ALINK_USB_STATUS,
     EXT_ALINK_USB_DIAG,
 #endif
+#if DSPI_ALINK_SPDIF
+    EXT_ALINK_SPDIF,            // -- WP FWSP2 --
+    EXT_ALINK_SPDIF_STATUS,
+    EXT_ALINK_SPDIF_CTRL,
+#endif
 #if DSPI_SIGGEN_SYNC
     EXT_TIME_BASE,
     EXT_SIGGEN_TIMELINE,
@@ -646,6 +656,10 @@ static uint16_t ext_set_len(uint16_t id) {
 #if DSPI_ALINK_USB
         case EXT_ALINK_USB:           return ALINK_USB_CFG_LEN;
         case EXT_ALINK_USB_DIAG:      return 1;
+#endif
+#if DSPI_ALINK_SPDIF
+        case EXT_ALINK_SPDIF:         return ALINK_SPDIF_CFG_LEN;     // -- WP FWSP2 --
+        case EXT_ALINK_SPDIF_CTRL:    return ALINK_SPDIF_CTRL_LEN;
 #endif
         default:                     return 0;
     }
@@ -731,6 +745,10 @@ static bool ext_handle_set(uint16_t id, const uint8_t *p, uint16_t len) {
             // alink frame F, 1 the USB sample index S, 2 a USB bus frame (2.9.6).
             // The handlers answer the refusal (timebase.h TB_ERR_*).
             uint8_t r = TB_ERR_VALUE;
+#if DSPI_ALINK_SPDIF
+            if (p[12] == TB_ID_SPDIF) r = alink_spdif_fw_apply(p);     // -- WP FWSP2 -- time base 3
+            else
+#endif
 #if DSPI_ALINK_USB
             if (p[12] != 0) r = alink_usb_fw_apply(p);
             else
@@ -749,6 +767,20 @@ static bool ext_handle_set(uint16_t id, const uint8_t *p, uint16_t len) {
             return alink_usb_fw_set_config(p);
         case EXT_ALINK_USB_DIAG:
             return alink_usb_fw_clear_diag(p[0]);
+#endif
+#if DSPI_ALINK_SPDIF
+        // -- WP FWSP2 -- the S/PDIF block (2.10): the handlers answer the
+        // refusal (timebase.h TB_ERR_* = VC_ERR_*).
+        case EXT_ALINK_SPDIF: {
+            uint8_t r = alink_spdif_fw_set_config(p);
+            ext_last_refusal = r;
+            return r == TB_OK;
+        }
+        case EXT_ALINK_SPDIF_CTRL: {
+            uint8_t r = alink_spdif_fw_ctrl_write(p);
+            ext_last_refusal = r;
+            return r == TB_OK;
+        }
 #endif
     }
     return false;
@@ -828,6 +860,11 @@ static bool ext_handle_get(uint16_t id, uint16_t wLength, uint8_t *resp) {
             n = 20;
             break;
         case EXT_APPLY_AT_FRAME:
+#if DSPI_ALINK_SPDIF
+            // -- WP FWSP2 -- the queue of the first EXT_TIME_BASE entry (2.10.4).
+            if (alink_spdif_fw_first_entry()) alink_spdif_fw_get_apply(resp);
+            else
+#endif
 #if DSPI_ALINK_USB
             if (alink_usb_fw_time_base_active()) alink_usb_fw_get_apply(resp);
             else
@@ -839,6 +876,11 @@ static bool ext_handle_get(uint16_t id, uint16_t wLength, uint8_t *resp) {
 #endif
             n = ALINK_APPLY_LEN;
             break;
+#endif
+#if DSPI_ALINK_SPDIF
+        case EXT_ALINK_SPDIF:        alink_spdif_fw_get_config(resp); n = ALINK_SPDIF_CFG_LEN;    break;  // -- WP FWSP2 --
+        case EXT_ALINK_SPDIF_STATUS: alink_spdif_fw_get_status(resp); n = ALINK_SPDIF_STATUS_LEN; break;
+        case EXT_ALINK_SPDIF_CTRL:   alink_spdif_fw_ctrl_read(resp);  n = ALINK_SPDIF_CTRL_LEN;   break;
 #endif
 #if DSPI_SIGGEN_SYNC
         case EXT_TIME_BASE:       timebase_read(resp);        n = TB_READ_LEN;     break;

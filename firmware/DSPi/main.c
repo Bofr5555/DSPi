@@ -44,6 +44,9 @@
 #if DSPI_ALINK_USB
 #include "alink_usb.h"
 #endif
+#if DSPI_ALINK_SPDIF
+#include "alink_spdif_port.h"   // -- WP FWSP2 -- S/PDIF time-base roles
+#endif
 #include "input_servo.h"
 #include "pdm_generator.h"
 #include "siggen.h"
@@ -1015,8 +1018,13 @@ bool pipeline_source_owns_rings(void) {
 #endif
         return usb_audio_stream_active();
     }
-    if (input_source_is_spdif(active_input_source))
+    if (input_source_is_spdif(active_input_source)) {
+#if DSPI_ALINK_SPDIF
+        // -- WP FWSP2 -- a follower's holdover writes the timeline's silence.
+        if (alink_spdif_fw_owns_rings()) return true;
+#endif
         return spdif_input_get_state() == SPDIF_INPUT_LOCKED;
+    }
     if (active_input_source == INPUT_SOURCE_I2S)
         return i2s_input_get_state() == I2S_INPUT_RUNNING;
 #if PICO_RP2350
@@ -1142,6 +1150,11 @@ static void pipeline_service_producer(bool lock_gated) {
     if (active_input_source == INPUT_SOURCE_USB) {
         usb_audio_drain_ring();
     } else if (input_source_is_spdif(active_input_source)) {
+#if DSPI_ALINK_SPDIF
+        // -- WP FWSP2 -- mode 1: the follower reads the FIFO (flash).
+        if (alink_spdif_fw_following()) spdif_input_poll_follower();
+        else
+#endif
         spdif_input_poll();
 #if PICO_RP2350
     } else if (active_input_source == INPUT_SOURCE_ADAT) {
@@ -1466,6 +1479,9 @@ static void complete_pipeline_reset(void) {
 #if DSPI_SIGGEN_SYNC
     siggen_tb_pipeline_reset();     // WP FWTB1: a discontinuity of a running generator
 #endif
+#if DSPI_ALINK_SPDIF
+    alink_spdif_fw_outputs_stopping();  // -- WP FWSP2 -- a source's new epoch
+#endif
     // Phase 1: per-slot teardown — interrupts enabled.
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         teardown_output_slot(i);
@@ -1486,6 +1502,11 @@ static void complete_pipeline_reset(void) {
 #if DSPI_ALINK_USB
     // The rings restarted under a USB phase timeline: it re-anchors (WP USB1).
     alink_usb_outputs_reset(&alink_usb);
+#endif
+#if DSPI_ALINK_SPDIF
+    // -- WP FWSP2 -- the source's epoch runs; a follower's timeline is gone.
+    alink_spdif_fw_outputs_started();
+    alink_spdif_fw_outputs_reset();
 #endif
 
     // Phase 3: USB feedback reset.  See B1 note in block comment above
@@ -1574,6 +1595,9 @@ static void complete_pipeline_reset(void) {
 // Like complete_pipeline_reset(), runs the per-slot teardown with main
 // interrupts ENABLED — see teardown_output_slot() for the safety argument.
 static void drain_and_disable_outputs(void) {
+#if DSPI_ALINK_SPDIF
+    alink_spdif_fw_outputs_stopping();  // -- WP FWSP2 -- a source's new epoch
+#endif
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         teardown_output_slot(i);
     }
@@ -1611,6 +1635,9 @@ static void enable_outputs_in_sync(void) {
     start_output_slots_in_sync(spdif_sync, spdif_count, i2s_sync, i2s_count);
 
     restore_interrupts(flags);
+#if DSPI_ALINK_SPDIF
+    alink_spdif_fw_outputs_started();   // -- WP FWSP2 -- a source's epoch runs
+#endif
 
     // Re-phase a slave-role I2S input after the TX master restart (see
     // complete_pipeline_reset Phase 5 for the rationale)
@@ -1866,6 +1893,9 @@ void core0_init() {
 #if DSPI_ALINK_USB
     alink_usb_fw_init();         // WP USB1; EXT_ALINK_USB is loaded with the alink block below
 #endif
+#if DSPI_ALINK_SPDIF
+    alink_spdif_fw_init();       // -- WP FWSP2 -- EXT_ALINK_SPDIF is loaded with the alink block below
+#endif
 #if DSPI_SIGGEN_SYNC
     // WP FWTB1: the time bases behind EXT_TIME_BASE, 0xE4 and ops 9/10.
 #if DSPI_ALINK
@@ -1873,6 +1903,9 @@ void core0_init() {
 #endif
 #if DSPI_ALINK_USB
     alink_usb_fw_tb_register();
+#endif
+#if DSPI_ALINK_SPDIF
+    alink_spdif_fw_tb_register();   // -- WP FWSP2 -- time base 3
 #endif
 #endif
 
@@ -2107,6 +2140,44 @@ static void input_service_handshakes(void) {
     if (input_source_is_spdif(active_input_source)) {
         SpdifInputState rx_state = spdif_input_get_state();
 
+#if DSPI_ALINK_SPDIF
+        // -- WP FWSP2 -- S/PDIF time-base follower (EXT_ALINK_SPDIF mode 1):
+        // the line's handshake.  Once a superframe gives the timeline and the
+        // VCXO has pulled in: mute, drain, prefill the timeline from live
+        // input, start in sync when the arrival reaches D (the last ms in
+        // place), verify muted.  A loss is a holdover (the follower writes the
+        // timeline's silence), not a pipeline reset.  Unaligned (lock error,
+        // on_lock_error 1) runs the stock flow below.
+        if (alink_spdif_fw_engaged()) {
+            if (rx_state == SPDIF_INPUT_LOCKED) (void)spdif_input_check_rate_change();
+            if (alink_spdif_outputs_orphaned(&alink_spdif)) {
+                // The anchor drained the outputs and will not start them now.
+                enable_outputs_in_sync();
+                alink_spdif_on_restarted(&alink_spdif);
+                spdif_prefilling = false;
+                dac_hw_mute_release();
+            }
+            if (alink_spdif_anchor_wanted(&alink_spdif)) {
+                if (!preset_loading) {
+                    prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+                } else if (dac_hw_mute_hold_elapsed()) {
+                    drain_and_disable_outputs();
+                    preset_loading = false;
+                    preset_mute_counter = 0;
+                    spdif_prefilling = false;
+                    spdif_input_discard_queued();   // the prefill starts from live input
+                    alink_spdif_on_drain(&alink_spdif);
+                }
+            }
+            if (alink_spdif.prefilling && rx_state == SPDIF_INPUT_LOCKED && slot_fill_at_target(0) &&
+                    alink_spdif_fw_anchor_ready()) {
+                enable_outputs_in_sync();
+                alink_spdif_on_enabled(&alink_spdif);
+                dac_hw_mute_release();
+            }
+        } else
+#endif
+        {
         // Lock acquired: drain outputs, prefill, then start. The DAC mute hold
         // armed by prepare_pipeline_reset() must complete BEFORE the drain
         // stops the output clocks; on an instant re-lock this waits a few polls.
@@ -2139,6 +2210,7 @@ static void input_service_handshakes(void) {
             prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
             spdif_prefilling = false;
             pipeline_reset_cpu_metering();
+        }
         }
     }
 
@@ -2346,6 +2418,10 @@ static void input_service_handshakes(void) {
 // on time (INPUT_SERVO_TICK_US).
 static void input_service_servos(void) {
     if (input_source_is_spdif(active_input_source)) {
+#if DSPI_ALINK_SPDIF
+        if (alink_spdif_fw_following()) spdif_input_update_clock_servo_follower();   // -- WP FWSP2 --
+        else
+#endif
         spdif_input_update_clock_servo();
     }
 #if PICO_RP2350
@@ -2429,6 +2505,11 @@ int main(void) {
         notify_clip_service(to_ms_since_boot(get_absolute_time()));
 #if DSPI_ALINK
         alink_input_event_service(to_ms_since_boot(get_absolute_time()));
+#endif
+#if DSPI_ALINK_SPDIF
+        // -- WP FWSP2 -- the S/PDIF roles: the source's superframes staged
+        // ahead, the follower's timers, holdover silence and mute, op 9 arming.
+        alink_spdif_fw_service();
 #endif
 #if DSPI_SIGGEN_SYNC
         // Time-base contract (WP FWTB1): states into the trackers, losses and

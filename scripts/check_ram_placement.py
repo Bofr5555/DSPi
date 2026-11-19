@@ -196,6 +196,10 @@ RP2350_EXTRA = [
     ("lf_bank8_dma_m33", True),
     ("sf_complete", True),
     ("lf_sf_check", True),
+    # -- WP FWSP2 -- the S/PDIF source's transmit filler, an indirect call from
+    # the stampers (main loop and the flash-blackout stall alarm): RAM, and it
+    # copies a staged entry only (DSPI_ALINK_SPDIF builds; absence is a WARN).
+    ("alink_spdif_tx_filler", True),
 ]
 
 # Flash callees of the alink decoder's hot functions that run only off the
@@ -217,6 +221,10 @@ ALINK_COLD = {
     # packets to the timeline placement (flash) only while a phase timeline
     # runs (alink_usb_engaged()); off by default.
     "alink_usb_fw_deliver",
+    # -- WP FWSP2 -- an S/PDIF source's split hook: process_input_block()
+    # hands the block to it only while a source op of time base 3 is pending
+    # (alink_spdif_split_armed); mode 2 only, off by default.
+    "alink_spdif_fw_src_block",
 }
 
 # RP2040 float / integer-divider shims. Their linker names vary by build; the

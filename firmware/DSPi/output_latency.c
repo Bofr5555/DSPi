@@ -18,6 +18,9 @@
 #if defined(DSPI_ALINK) && DSPI_ALINK
 #include "alink_input.h"    // -- WP LK6 -- phase-locked prefill target
 #endif
+#if defined(DSPI_ALINK_SPDIF) && DSPI_ALINK_SPDIF
+#include "alink_spdif_port.h"   // -- WP FWSP2 -- the S/PDIF follower's prefill target
+#endif
 
 #define LOW_BATCH_US    333u    // 16 frames at 48 kHz
 #define STD_BATCH_US   1000u    // one USB packet
@@ -124,5 +127,10 @@ void output_latency_apply(uint32_t fs, uint8_t source) {
     // -- WP USB1 -- USB phase mode prefills to its delay (stock value otherwise).
     if (source == INPUT_SOURCE_USB)
         output_ring_target_frames = alink_usb_fw_ring_target(fs, output_ring_target_frames, output_ring_block_cap);
+#endif
+#if defined(DSPI_ALINK_SPDIF) && DSPI_ALINK_SPDIF
+    // -- WP FWSP2 -- an S/PDIF follower (mode 1) prefills to its delay.
+    if (input_source_is_spdif(source))
+        output_ring_target_frames = alink_spdif_fw_ring_target(fs, output_ring_target_frames, output_ring_block_cap);
 #endif
 }

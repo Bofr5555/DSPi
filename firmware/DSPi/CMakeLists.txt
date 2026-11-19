@@ -267,9 +267,12 @@ endif()
 option(DSPI_ALINK_SPDIF "Build the alink time base on S/PDIF (user-bit superframes, RP2350)" ON)
 if (DSPI_ALINK_SPDIF AND NOT PICO_PLATFORM STREQUAL "rp2040")
     target_sources(DSPi PRIVATE alink/alink_spdif_codec.c)
+    # -- WP FWSP2 -- ALINK_SPDIF_HOT is left empty (the codec in flash): the
+    # roles stage every block's superframe from the main loop and the RAM
+    # filler only copies it (alink_spdif_port.c), so nothing in RAM calls the
+    # codec, and its 400 bytes stay out of .data.
     target_compile_definitions(DSPi PRIVATE DSPI_ALINK_SPDIF=1
-        PICO_AUDIO_SPDIF_UBITS=1 PICO_SPDIF_RX_UBITS=1
-        "ALINK_SPDIF_HOT=__attribute__((section(\".time_critical.alink_spdif\")))")
+        PICO_AUDIO_SPDIF_UBITS=1 PICO_SPDIF_RX_UBITS=1)
 endif()
 # -- end WP FWSP1 --
 
@@ -299,13 +302,26 @@ endif()
 # EXT_SIGGEN_TIMELINE, event 0xE4) and apply ops 9 SIGGEN_START / 10
 # SIGGEN_STOP: RP2350 builds with a time base (the alink or USB-direct).  Never
 # RP2040 (PLAN-AT OD-ATm: its RAM is spent); DSPI_SIGGEN_SYNC is 0 there.
-if (NOT PICO_PLATFORM STREQUAL "rp2040" AND (DSPI_ALINK OR DSPI_ALINK_USB))
+if (NOT PICO_PLATFORM STREQUAL "rp2040" AND (DSPI_ALINK OR DSPI_ALINK_USB OR DSPI_ALINK_SPDIF))
     target_sources(DSPi PRIVATE timebase.c timebase_port.c)
     target_compile_definitions(DSPi PRIVATE DSPI_SIGGEN_SYNC=1)
 else()
     target_compile_definitions(DSPi PRIVATE DSPI_SIGGEN_SYNC=0)
 endif()
 # -- end WP FWTB1 --
+
+# -- WP FWSP2 -- the S/PDIF time-base roles (EXT_ALINK_SPDIF 0x8020-0x8022,
+# time base 3; alink_protocol_spec.md 12, extension_channel_spec.md 2.10):
+# the source's counter, epochs and broadcast, the follower's phase lock.
+# RP2350 with DSPI_ALINK_SPDIF (the K340 default); never RP2040.  The roles
+# reuse alink/alink_phase.c (built above on alink or USB-direct builds).
+if (DSPI_ALINK_SPDIF AND NOT PICO_PLATFORM STREQUAL "rp2040")
+    target_sources(DSPi PRIVATE alink_spdif.c alink_spdif_port.c)
+    if (NOT DSPI_ALINK AND NOT DSPI_ALINK_USB)
+        target_sources(DSPi PRIVATE alink/alink_phase.c)
+    endif()
+endif()
+# -- end WP FWSP2 --
 
 # -- WP SCOPE1 -- scope marker, TEST BUILDS ONLY (off by default).
 # -DALINK_SCOPE_MARKER=ON: the marker on GPIO 22 (Pico pin 29), the bench pin;

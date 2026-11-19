@@ -750,7 +750,7 @@ differ.
 
 *Specified 2026-11-19 (WP FWTB0, PLAN-AT section 1.3, OD-ATe, review R3-R5); implemented by WP FWTB1 (line,
 USB-direct; implemented 2026-11-19, host-tested, HW-untested: `siggen.c`, `timebase.c`, RP2350 builds only) and WP
-FWSP2 (S/PDIF, not yet). The wire side is `extension_channel_spec.md` 2.8.7.1 (the
+FWSP2 (S/PDIF, time base 3; implemented 2026-11-19, host-tested, HW-untested: `alink_spdif.c`). The wire side is `extension_channel_spec.md` 2.8.7.1 (the
 ops), 2.11.2 (`EXT_SIGGEN_TIMELINE`); the time bases are `alink_protocol_spec.md` section 11.*
 
 On a unit with a time base (the line, USB-direct mode 2, S/PDIF), the generator can be started and stopped on an

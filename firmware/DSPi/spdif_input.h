@@ -71,6 +71,17 @@ void spdif_input_get_channel_status(uint8_t *out_24_bytes);
 bool spdif_input_check_rate_change(void);
 
 #include "config.h"
+#if DSPI_ALINK_SPDIF
+// -- WP FWSP2 -- the S/PDIF time-base follower (EXT_ALINK_SPDIF mode 1,
+// alink_spdif_port.c).  main.c calls these instead of spdif_input_poll() and
+// spdif_input_update_clock_servo() while alink_spdif_fw_following().
+uint32_t spdif_input_poll_follower(void);
+void spdif_input_update_clock_servo_follower(void);
+// k raw subframe word pairs (or silence: NULL) into the pipeline, k <= 192.
+void spdif_input_deliver_words(const uint32_t *w, uint32_t k);
+// The VCXO has pulled in to the stream (long rate window, within 1 ppm).
+bool spdif_input_rate_ready(void);
+#endif
 #if DSPI_CLOCK_DIAG
 // Rate-estimator internals for the CLKDIAG dump (no getter existed for the
 // servo statics).  which_long is true when the long-window count-based rate

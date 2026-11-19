@@ -57,6 +57,9 @@
 #if DSPI_ALINK_USB
 #include "alink_usb.h"       // V27 alink USB-direct block (WP USB1)
 #endif
+#if DSPI_ALINK_SPDIF
+#include "alink_spdif_port.h"   // V28 S/PDIF time-base block (WP FWSP2)
+#endif
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -717,6 +720,17 @@ typedef struct __attribute__((packed)) {
     uint8_t cfg[4];                          // mode, flags, d (u16 LE)
     uint8_t seed[3];                         // the stored host rate (V27 reserved before WP USB3)
 } FlashAlinkUsbConfig;                       // 8 bytes
+
+// -- WP FWSP2 -- V28 S/PDIF time-base block: EXT_ALINK_SPDIF mode, flags, D,
+// on_lock_error, tx_mask (extension_channel_spec.md 2.10.1).  Stored on every
+// platform so a directory round-trips; DSPI_ALINK_SPDIF builds use it.
+// version 0 (an older directory, migrated) = never saved: mode 0.
+#define FLASH_ALINK_SPDIF_VERSION 1
+typedef struct __attribute__((packed)) {
+    uint8_t version;                         // FLASH_ALINK_SPDIF_VERSION; 0 = never saved
+    uint8_t cfg[6];                          // mode, flags, d (u16 LE), on_lock_error, tx_mask
+    uint8_t reserved;                        // 0
+} FlashAlinkSpdifConfig;                     // 8 bytes
 #define FLASH_OUTPUT_LATENCY_CONFIG_VERSION 1
 
 typedef struct __attribute__((packed)) {
@@ -805,6 +819,11 @@ typedef struct __attribute__((packed)) {
     // extension_channel_spec.md 2.9; saved by REQ_SAVE_OUTPUT_CONFIG).
     // version 0 = never saved: mode 0 (off).
     FlashAlinkUsbConfig alink_usb;           // 8 bytes
+
+    // V28 addition (WP FWSP2): the S/PDIF time-base configuration
+    // (EXT_ALINK_SPDIF, extension_channel_spec.md 2.10; saved by
+    // REQ_SAVE_OUTPUT_CONFIG).  version 0 = never saved: mode 0 (off).
+    FlashAlinkSpdifConfig alink_spdif;       // 8 bytes
 } PresetDirectory;
 
 // Historical directory layout at V4, where output_config was the 20-byte
@@ -1341,7 +1360,16 @@ _Static_assert(offsetof(PresetDirectory, alink_usb) == PRESET_DIRECTORY_V26_SIZE
                "V27 alink USB block must directly follow the V26 layout");
 _Static_assert(sizeof(FlashAlinkUsbConfig) == 8, "V27 alink USB block geometry is frozen");
 
-#define DIR_VERSION_CURRENT  27
+// V28 only appends, so a V27 directory migrates by copying its whole data block.
+#define PRESET_DIRECTORY_V27_SIZE (PRESET_DIRECTORY_V26_SIZE + 8)
+_Static_assert(offsetof(PresetDirectory, alink_spdif) == PRESET_DIRECTORY_V27_SIZE,
+               "V28 S/PDIF block must directly follow the V27 layout");
+_Static_assert(sizeof(FlashAlinkSpdifConfig) == 8, "V28 S/PDIF block geometry is frozen");
+#if DSPI_ALINK_SPDIF
+_Static_assert(ALINK_SPDIF_STORE_LEN == sizeof(((FlashAlinkSpdifConfig *)0)->cfg), "EXT_ALINK_SPDIF's stored bytes");
+#endif
+
+#define DIR_VERSION_CURRENT  28
 
 // The directory occupies exactly one flash sector; growth past it would
 // silently overrun into preset slot 0.
@@ -1966,6 +1994,31 @@ static bool dir_load_cache(void) {
         dir_sanitize_output_latency();
         dir_sanitize_input_source_names();
         dir_cache_valid = true;
+        return true;
+    }
+
+    if (flash_dir->version == 27) {
+        // V27 -> V28 migration (WP FWSP2).  V28 only appends the S/PDIF block,
+        // so the whole V27 data block copies across and it reads as never saved.
+        const uint8_t *v27_data_start = (const uint8_t *)&flash_dir->startup_mode;
+        size_t v27_data_len = PRESET_DIRECTORY_V27_SIZE - offsetof(PresetDirectory, startup_mode);
+        if (crc32(v27_data_start, v27_data_len) != flash_dir->crc32) {
+            dir_cache_valid = false;
+            return false;
+        }
+        memset(&dir_cache, 0, sizeof(dir_cache));
+        memcpy(&dir_cache.startup_mode, v27_data_start, v27_data_len);
+        dir_sanitize_ctrl_iface();
+        dir_sanitize_cs_config();
+        dir_sanitize_cs_ir();
+        dir_sanitize_cs_groups();
+        dir_sanitize_cs_macros();
+        dir_sanitize_cs_display();
+        dir_sanitize_limiter();
+        dir_sanitize_output_latency();
+        dir_sanitize_input_source_names();
+        dir_cache_valid = true;
+        (void)dir_flush();   // persist at the current version
         return true;
     }
 
@@ -5060,6 +5113,11 @@ uint8_t preset_save_output_config(void) {
     alink_usb_fw_store(dir_cache.alink_usb.cfg);
     alink_usb_fw_seed_bytes(dir_cache.alink_usb.seed);
 #endif
+    memset(&dir_cache.alink_spdif, 0, sizeof(dir_cache.alink_spdif));
+#if DSPI_ALINK_SPDIF
+    dir_cache.alink_spdif.version = FLASH_ALINK_SPDIF_VERSION;   // -- WP FWSP2 --
+    alink_spdif_fw_store(dir_cache.alink_spdif.cfg);
+#endif
     dir_cache.spdif_rx_pin = dir_cache.output_config.spdif_rx_pin;
     limiter_to_dir();
     if (dir_flush() != 0) return PRESET_ERR_FLASH_WRITE;
@@ -5403,6 +5461,11 @@ void preset_load_alink_config(void) {
         alink_usb_fw_load(dir_cache.alink_usb.cfg);
         alink_usb_fw_seed_load(dir_cache.alink_usb.seed);    // WP USB3; invalid bytes: none
     }
+#endif
+#if DSPI_ALINK_SPDIF
+    // V28 S/PDIF block (WP FWSP2): implausible values keep the defaults (mode 0).
+    if (dir_cache_valid && dir_cache.alink_spdif.version == FLASH_ALINK_SPDIF_VERSION)
+        alink_spdif_fw_load(dir_cache.alink_spdif.cfg);
 #endif
     if (!dir_cache_valid || c->version != FLASH_ALINK_CONFIG_VERSION) return;
     // EXT_ALINK_PHASE (WP LK6): ranges here, the d_local limits when it is used.

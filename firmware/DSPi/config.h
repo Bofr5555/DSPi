@@ -170,6 +170,11 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define EXT_ALINK_USB                0x8010  // IN/OUT: 8 B
 #define EXT_ALINK_USB_STATUS         0x8011  // IN: 64 B
 #define EXT_ALINK_USB_DIAG           0x8012  // IN: 64 B; OUT: 1 B (1 = clear) (WP USB2)
+// -- WP FWSP2 -- S/PDIF time-base block (extension_channel_spec.md 2.10):
+// RP2350 builds with DSPI_ALINK_SPDIF; never RP2040.
+#define EXT_ALINK_SPDIF              0x8020  // IN/OUT: 8 B
+#define EXT_ALINK_SPDIF_STATUS       0x8021  // IN: 48 B
+#define EXT_ALINK_SPDIF_CTRL         0x8022  // IN/OUT: 16 B (a source's broadcast)
 // Time-base and measurement block (extension_channel_spec.md 2.11, WP FWTB1):
 // RP2350 builds with a time base (DSPI_SIGGEN_SYNC); never RP2040.
 #define EXT_TIME_BASE                0x8030  // IN: 64 B (timebase.h)

@@ -8,6 +8,9 @@
  * accesses them via extern declarations in usb_audio.h.
  */
 
+#if DSPI_ALINK_SPDIF
+#include "alink_spdif_port.h"   // -- WP FWSP2 -- the source's split hook
+#endif
 #include "audio_pipeline.h"
 #include "usb_audio.h"
 #include "audio_input.h"
@@ -290,6 +293,12 @@ uint8_t __not_in_flash_func(active_input_channel_count)(void) {
 // Never inline: a copy inlined into a flash caller (siggen_pump) would run the
 // whole pipeline from XIP, invisible to check_ram_placement.py.
 void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
+#if DSPI_ALINK_SPDIF
+    // -- WP FWSP2 -- an S/PDIF source's op of time base 3 due inside this
+    // block: it runs in pieces split at the op's F (flash, cold: only while
+    // an op is pending; check_ram_placement.py ALINK_COLD).
+    if (alink_spdif_split_armed && alink_spdif_fw_src_block(sample_count)) return;
+#endif
     uint32_t packet_start = time_us_32();
     // Must precede the Core 1 dispatch below: eq_worker_loop reads rta_view
     // after work_ready, and rta_packet_end() reads it back after work_done.

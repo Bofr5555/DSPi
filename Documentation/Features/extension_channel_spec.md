@@ -546,7 +546,7 @@ Example: MASTER_VOLUME -20 dB at frame 1 002 400: `a0 4b 0f 00 00 00 00 00 04 00
 
 ##### 2.8.7.1 Ops 9 `SIGGEN_START` and 10 `SIGGEN_STOP`
 
-*Specified by WP FWTB0 (PLAN-AT section 1.3, OD-ATe, review R3-R5); implemented by WP FWTB1 (line, USB-direct; RP2350 builds, never RP2040) and WP FWSP2 (S/PDIF, not yet). The generator side is `test_signals_spec.md` section 15.*
+*Specified by WP FWTB0 (PLAN-AT section 1.3, OD-ATe, review R3-R5); implemented by WP FWTB1 (line, USB-direct; RP2350 builds, never RP2040) and WP FWSP2 (S/PDIF, time base 3; 2026-11-19, host-tested, HW-untested). The generator side is `test_signals_spec.md` section 15.*
 
 The two ops start and stop the unit's own test signal generator on a sample of its time base, so several units' generators start on samples of one shared counter (`alink_protocol_spec.md` section 11). They exist on every time base a build has: the line (`time_base` 0), USB-direct (1; never 2 for op 9, below), S/PDIF (3, 2.10), and in the line's and the S/PDIF superframe. Where they differ from ops 1-8:
 
@@ -860,15 +860,17 @@ Reading it after an event tells the causes apart: a host suspend or reset shows 
 
 ### 2.10 S/PDIF time-base block (`0x8020`-`0x802F`)
 
-*Specified 2026-11-19 (WP FWTB0, PLAN-AT section 1.2, OD-ATc, OD-ATd, OD-ATp, OD-ATs, review R2); implemented by WP FWSP1 (the carriage) and WP FWSP2 (the roles). Not implemented yet. The carriage (where the bits are, the 48-byte S/PDIF superframe, the transmit rules, the follower's coast rule) is normative in `alink_protocol_spec.md` section 12; this section is its control plane.*
+*Specified 2026-11-19 (WP FWTB0, PLAN-AT section 1.2, OD-ATc, OD-ATd, OD-ATp, OD-ATs, review R2); implemented by WP FWSP1 (the carriage) and WP FWSP2 (the roles; 2026-11-19, host-tested and simulated, HW-untested: `firmware/DSPi/alink_spdif.{c,h}`, `alink_spdif_port.c`). The carriage (where the bits are, the 48-byte S/PDIF superframe, the transmit rules, the follower's coast rule) is normative in `alink_protocol_spec.md` section 12; this section is its control plane.*
 
 S/PDIF between DSPi units is an alink time-base transport (`alink_protocol_spec.md` section 11, time base 3). A **source** stamps its own frame counter F into the user bits of its S/PDIF outputs, one superframe per 192-frame block; a **follower** whose active input is S/PDIF phase-locks to it and plays the sample carried as F exactly D samples after it arrived. Foreign S/PDIF (any other source, or a path that re-clocks or rewrites the user bits) has no time base: the follower reports `LOCK_ERROR` and the stream is rate-locked only, as today.
 
 - **Opt-in.** `EXT_ALINK_SPDIF.mode` is 0 by default. In mode 0 nothing a host can see changes: the S/PDIF input is today's (rate lock, `SPDIF_input_spec.md`), every S/PDIF output emits all-zero user bits, no time-base entry, no events.
 - **Discovery.** A host uses this block when `EXT_LIST` names `0x8020`: RP2350 builds with `DSPI_ALINK_SPDIF` (the K340 default). Such builds also list `0x8030` and `0x8031` (2.11). RP2040 builds and stock firmware refuse every ID here.
 - **Rules of 2.8 apply.** Little-endian, packed, normative offsets; IN replies truncated to `wLength` and only ever extended at the end; reserved fields read 0 and must be 0 on OUT; IN-only fields ignored on OUT; a refused write changes nothing; no `PARAM_CHANGED`; admin-only on the hub. Both envelopes (1.3): `REQ_EXTENSION` 0x00 on the 1.1.6 generation, the tunnel `0xE010` with the same `wValue` and bytes on the 1.1.7 generation; refusals STALL / `ERROR` on page 0 and the `VC_ERR_*` code named below on the tunnel.
-- **Persistence.** `EXT_ALINK_SPDIF` takes effect at once and is saved by `REQ_SAVE_OUTPUT_CONFIG` (`0x52`) next to the other alink blocks (WP FWSP2 assigns the directory block); not in presets or bulk parameters; preset loads and factory resets of the DSP settings do not touch it. A directory saved by older firmware reads as mode 0.
+- **Persistence.** `EXT_ALINK_SPDIF` takes effect at once and is saved by `REQ_SAVE_OUTPUT_CONFIG` (`0x52`) next to the other alink blocks (WP FWSP2: directory V28, an 8-byte block after the V27 USB-direct block; a V27 directory migrates with it never saved); not in presets or bulk parameters; preset loads and factory resets of the DSP settings do not touch it. A directory saved by older firmware reads as mode 0.
 - **One role per unit** in this version: mode 1 or mode 2. Mode 3 (relay: a follower or a USB-direct unit re-emitting its upstream T on S/PDIF) is reserved (PLAN-AT "Later") and refused.
+
+- **Implementation notes (WP FWSP2).** The source builds every block's superframe from the main loop into a staging table eight blocks ahead of its reader; the transmit library's RAM filler copies a block's staged entry into the user-bit table in the same pass as the block's first stamp, so the codec runs from flash. A flash blackout therefore stamps the staged blocks it reaches (at most eight, about 32 ms at 48 kHz) and zero user bits beyond (`alink_protocol_spec.md` 12.4 c). The follower reads the receiver's raw words itself while mode 1 is set (the receive FIFO is block aligned: word index mod 384 is the subframe's place in its block), collects the U bits, and takes `F_arr` from the busy receive DMA channel's write address (half a frame resolution). `d_min` is the block cap + the input batch + 32 frames (129 at 48 kHz with the default 4 ms option, 225 at 96 kHz), `d_max` the rings' writable span less the block cap (399, 351). The servo's integrator is kept across a re-anchor and an epoch (it holds the crystals' ratio). A follower in mode 1 waits for its VCXO to pull in (the S/PDIF long rate window and 1 ppm of the feed-forward) before it anchors. `EXT_ALINK_SPDIF_CTRL` with op 9 is also the source's own op 9 write: refused (`VC_ERR_STATE`) when the source's generator would refuse it (`arm_lead`, one pending).
 
 #### 2.10.1 `EXT_ALINK_SPDIF` (0x8020)
 
@@ -953,7 +955,7 @@ Example: a broadcast `SIGGEN_STOP` now at F = 1 000 000: `40 42 0f 00 00 00 00 0
 
 ### 2.11 Time-base and measurement block (`0x8030`-`0x803F`)
 
-*Specified 2026-11-19 (WP FWTB0, PLAN-AT sections 1.1 and 1.3, OD-ATa, OD-ATi, review R7c); implemented by WP FWTB1 (line, USB-direct; 2026-11-19, host-tested, HW-untested) and WP FWSP2 (S/PDIF, not yet). RP2350 builds with the alink or USB-direct block list both IDs and set `EXT_NOTIFY_FEATURES` bit 5.*
+*Specified 2026-11-19 (WP FWTB0, PLAN-AT sections 1.1 and 1.3, OD-ATa, OD-ATi, review R7c); implemented by WP FWTB1 (line, USB-direct; 2026-11-19, host-tested, HW-untested) and WP FWSP2 (S/PDIF; 2026-11-19, host-tested, HW-untested). RP2350 builds with the alink, USB-direct or S/PDIF block list both IDs and set `EXT_NOTIFY_FEATURES` bit 5.*
 
 The transport-independent control plane of the time-base contract (`alink_protocol_spec.md` section 11): one read for every time base a unit has, one read for where its generator sits on it, and one event for every contract transition. A host that uses these never needs to know the transport.
 

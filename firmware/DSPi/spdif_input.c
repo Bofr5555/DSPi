@@ -28,6 +28,10 @@
 #include "pico/audio_i2s_multi.h"
 #include "adat_output.h"
 #include "input_servo.h"
+#include "soft_vcxo.h"
+#if DSPI_ALINK_SPDIF
+#include "alink_spdif_port.h"    // -- WP FWSP2 -- the S/PDIF time-base follower
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -274,10 +278,12 @@ void spdif_input_discard_queued(void) {
     }
 }
 
-DSP_TIME_CRITICAL
-uint32_t spdif_input_poll(void) {
+// Lock and loss events, and the debounce after a lock: true when the FIFO
+// may be read now.  Inlined into both delivery paths (the stock RAM poll and,
+// WP FWSP2, the follower's flash poll), so the RAM poll's code is unchanged.
+static inline __attribute__((always_inline)) bool poll_ready(void) {
     if (spdif_state == SPDIF_INPUT_INACTIVE)
-        return 0;
+        return false;
 
     // --- Handle lock loss event ---
     if (spdif_rx_lost_flag) {
@@ -288,7 +294,7 @@ uint32_t spdif_input_poll(void) {
         servo_tick_last_us = time_us_32();
         lock_debounced = false;
         // Muting is handled by the main loop (sets preset_loading flag)
-        return 0;
+        return false;
     }
 
     // --- Handle lock acquisition event ---
@@ -299,7 +305,7 @@ uint32_t spdif_input_poll(void) {
         // branch above runs first; do not re-enter LOCKED on a dead receiver.
         if (spdif_rx_get_state() != SPDIF_RX_STATE_STABLE) {
             spdif_state = SPDIF_INPUT_RELOCKING;
-            return 0;
+            return false;
         }
         if (spdif_lock_count < 255) spdif_lock_count++;
 
@@ -311,7 +317,7 @@ uint32_t spdif_input_poll(void) {
         if (rate == 0 || !is_supported_rate(rate)) {
             // Unsupported rate — stay in relocking, output muted
             spdif_state = SPDIF_INPUT_RELOCKING;
-            return 0;
+            return false;
         }
 
         // Prepare for locked state
@@ -322,17 +328,24 @@ uint32_t spdif_input_poll(void) {
         lock_debounced = false;
 
         // Rate change will be handled by main loop via spdif_input_check_rate_change()
-        return 0;
+        return false;
     }
 
     // --- Only process audio when locked ---
     if (spdif_state != SPDIF_INPUT_LOCKED)
-        return 0;
+        return false;
 
     if (!lock_debounced) {
-        if (time_us_32() - lock_time_us < LOCK_DEBOUNCE_US) return 0;
+        if (time_us_32() - lock_time_us < LOCK_DEBOUNCE_US) return false;
         lock_debounced = true;
     }
+    return true;
+}
+
+DSP_TIME_CRITICAL
+uint32_t spdif_input_poll(void) {
+    if (!poll_ready())
+        return 0;
 
     // --- Read FIFO and feed pipeline ---
     // Live-tail read (ADAT-ring style): count and consume the words the
@@ -408,26 +421,71 @@ uint32_t spdif_input_poll(void) {
 // CLOCK SERVO
 // ============================================================================
 
-DSP_TIME_CRITICAL
-void spdif_input_update_clock_servo(void) {
+#if DSPI_ALINK_SPDIF
+// ============================================================================
+// WP FWSP2: THE S/PDIF TIME-BASE FOLLOWER (mode 1; alink_spdif_port.c)
+// ============================================================================
+
+// The follower's delivery pass (flash, mode 1 only: main.c calls it instead
+// of spdif_input_poll()): the same lock handling, then the role reads the
+// FIFO itself (U bits, F, placement on the timeline).
+uint32_t spdif_input_poll_follower(void) {
+    if (!poll_ready()) return 0;
+    return alink_spdif_fw_poll();
+}
+
+// k frames of raw subframe words (or silence: w NULL) into the pipeline, as
+// spdif_input_poll() converts them.  k <= 192.
+void spdif_input_deliver_words(const uint32_t *w, uint32_t k) {
+    if (k > 192u) k = 192u;
+    if (!w) {
+        memset(buf_l, 0, k * sizeof(buf_l[0]));
+        memset(buf_r, 0, k * sizeof(buf_r[0]));
+    } else {
+        float preamp_l = global_preamp_linear[0];
+        float preamp_r = global_preamp_linear[1];
+        const float inv_2147483648 = 1.0f / 2147483648.0f;
+        for (uint32_t i = 0; i < k; i++) {
+            int32_t raw_l = (int32_t)((w[2 * i]     & 0x0FFFFFF0u) << 4);
+            int32_t raw_r = (int32_t)((w[2 * i + 1] & 0x0FFFFFF0u) << 4);
+            buf_l[i] = (float)raw_l * inv_2147483648 * preamp_l;
+            buf_r[i] = (float)raw_r * inv_2147483648 * preamp_r;
+        }
+    }
+    if (k) process_input_block(k);
+    pipeline_click_output = -1;
+}
+
+// The VCXO has pulled in: the long rate window is valid and the VCXO is
+// within 1 ppm of its feed-forward (the follower's anchor waits for it).
+bool spdif_input_rate_ready(void) {
+    if (spdif_state != SPDIF_INPUT_LOCKED || !servo_long_valid) return false;
+    float d = soft_vcxo_current_ppm() - input_servo_feedforward_ppm();
+    return input_servo_feedforward_ppm() != 0.0f && d < 1.0f && d > -1.0f;
+}
+#endif
+
+// The servo's rate estimate, once per tick: false when no tick runs now.
+// Inlined into the stock RAM servo and (WP FWSP2) the follower's.
+static inline __attribute__((always_inline)) bool servo_estimate(float *hz) {
     if (spdif_state != SPDIF_INPUT_LOCKED)
-        return;
+        return false;
 
     // Hold off until the deferred rate change has landed: the servo's ppm
     // feed-forward is computed against the nominal divider for the CURRENT
     // pipeline rate, which is wrong until it matches the detected rate.
     if (spdif_rx_detected_rate == 0 || spdif_rx_detected_rate != audio_state.freq)
-        return;
+        return false;
 
     // Signal-loss pending but not yet processed by the poll (the flag is set
     // from IRQ, so it can land between this iteration's poll and servo
     // calls). The newest decoded blocks may then be partial or corrupt and
     // the FIFO is draining; skip rather than servo on either. The poll drops
     // lock on the next iteration.
-    if (spdif_rx_lost_flag) return;
+    if (spdif_rx_lost_flag) return false;
 
     // Rate-limit: crystal drift is slow (ppm), no need to run every iteration.
-    if (!input_servo_tick_due(&servo_tick_last_us)) return;
+    if (!input_servo_tick_due(&servo_tick_last_us)) return false;
 
     // Bridge estimate: IIR-smoothed library measurement, only used until the
     // long window is valid (see the SERVO_LONG_* comment for why the raw
@@ -459,9 +517,28 @@ void spdif_input_update_clock_servo(void) {
         servo_long_valid = true;
     }
 
-    // Servo terms and VCXO actuation are shared (input_servo.c).
-    input_servo_apply(servo_long_valid ? servo_hz_long : servo_hz_smooth, 0);
+    *hz = servo_long_valid ? servo_hz_long : servo_hz_smooth;
+    return true;
 }
+
+DSP_TIME_CRITICAL
+void spdif_input_update_clock_servo(void) {
+    float hz;
+    if (!servo_estimate(&hz)) return;
+    // Servo terms and VCXO actuation are shared (input_servo.c).
+    input_servo_apply(hz, 0);
+}
+
+#if DSPI_ALINK_SPDIF
+// WP FWSP2, mode 1 (flash; main.c calls it instead): the rate feed-forward
+// plus the follower's phase trim while it runs the phase lock, the stock
+// fill servo otherwise (unaligned).
+void spdif_input_update_clock_servo_follower(void) {
+    float hz;
+    if (!servo_estimate(&hz)) return;
+    if (!alink_spdif_fw_servo(hz, servo_long_valid)) input_servo_apply(hz, 0);
+}
+#endif
 
 // ============================================================================
 // STATUS QUERIES

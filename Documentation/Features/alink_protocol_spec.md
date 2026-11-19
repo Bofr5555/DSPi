@@ -652,7 +652,8 @@ SYS2 section 2 is the design; these points make it precise or change it:
 *Normative (WP FWTB0, PLAN-AT section 1.1, owner decisions AT1 and AT4 of 2026-11-19). The control plane is in
 `extension_channel_spec.md`: 2.8.6, 2.8.7, 2.9.4, 2.10 (the S/PDIF block) and 2.11 (`EXT_TIME_BASE`,
 `EXT_SIGGEN_TIMELINE`, event `0xE4`). Implemented by WP FWTB1 (line and USB-direct, 2026-11-19: `firmware/DSPi/
-timebase.{c,h}`, host test `firmware/tests/test_timebase.c`) and WP FWSP2 (S/PDIF, not yet).*
+timebase.{c,h}`, host test `firmware/tests/test_timebase.c`) and WP FWSP2 (S/PDIF, 2026-11-19: `firmware/DSPi/alink_spdif.{c,h}`, host test
+`firmware/tests/test_alink_spdif.c`, simulation `tools/alink_spdif_sim`; host-tested, HW-untested).*
 
 A **time base** is a sample counter T shared by a set of units, the **domain**: every unit of one domain numbers the
 same audio sample with the same T (or with a T a single read maps, C1). A **follower** receives a time base, a
