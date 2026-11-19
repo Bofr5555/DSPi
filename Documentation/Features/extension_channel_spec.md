@@ -50,7 +50,7 @@ IN replies are truncated to `wLength` like every other DSPi GET. On UART / I2C /
 
 ### 1.3 Envelopes
 
-*Specified 2026-11-18 (WP FWPG0, PLAN-PG decision OD-PGc). The 1.1.7-generation envelope is not implemented yet: the tunnel is WP FWPG2, the legacy stack WP FWPG3, USB MIDI and the sender WP FWPG4, all on the port of this fork onto upstream 1.1.7. Upstream reference: `release/v1.1.7` at `103ba37` (`firmware/DSPi/vendor/`, `Documentation/Features/vendor_protocol_migration_guide.md`, cited below as "the guide").*
+*Specified 2026-11-18 (WP FWPG0, PLAN-PG decision OD-PGc). The 1.1.7-generation envelope is not implemented yet: the tunnel is WP FWPG2, the legacy stack WP FWPG3, USB MIDI and the sender WP FWPG4, all on the port of this fork onto upstream 1.1.7. Exception: the alink sender's dual stack (WP FWPG4, 2026-11-19, host-tested, HW-untested) is implemented on the 1.1.6 line already, see 1.3.5. Upstream reference: `release/v1.1.7` at `103ba37` (`firmware/DSPi/vendor/`, `Documentation/Features/vendor_protocol_migration_guide.md`, cited below as "the guide").*
 
 An envelope is how a request reaches an extension sub-command: which `bRequest`, which `wIndex` and what a refusal looks like. The sub-commands themselves do not depend on it. **In every envelope the sub-command ID is `wValue`, the payloads and replies are byte-identical, `EXT_LIST` returns the same bytes, and the rules of section 2 apply unchanged.** That covers every assigned ID, `0x0000`-`0x0006`, `0x8000`-`0x8012`, `0x8020`-`0x8022` and `0x8030`-`0x8031`, and every ID assigned later. Ext notifications (`0xE0`-`0xE4`) and `EXT_NOTIFY_FEATURES` are not requests and are the same on every generation.
 
@@ -59,7 +59,7 @@ The firmware generations and the envelopes each one has:
 | Generation | Firmware | 1.1.6 envelope (`REQ_EXTENSION` 0x00, page 0) | 1.1.7 envelope (page `0xE0`, tunnel `0xE010`) |
 |---|---|---|---|
 | G1s | stock upstream 1.1.6 and older | none: STALL / `ERROR` | none |
-| G1b | this fork, 1.1.6 generation (`bofr-main` up to the tag `bofr-116-final`), and the alink sender of that line | **yes** (1.1, 1.2) | none: refused by the page guard (1.3.6) |
+| G1b | this fork, 1.1.6 generation (`bofr-main` up to the tag `bofr-116-final`), and the alink sender of that line before WP FWPG4 | **yes** (1.1, 1.2) | none: refused by the page guard (1.3.6) |
 | G2s | stock upstream 1.1.7 | none: page 0 refuses everything (`VC_ERR_UNKNOWN`) | none: page `0xE0` is absent (`VC_ERR_UNKNOWN`) |
 | G2b | this fork ported onto 1.1.7 (dual-stack) | **yes, on the legacy stack** (1.3.3), while the legacy stack is switched on | **yes** (1.3.2) |
 
@@ -139,7 +139,13 @@ The check order is the dispatcher's (unknown, direction, blocked, length, addres
 | UART, I2C | yes, `ERROR` | yes, status = `VC_ERR_*` | `CTRL_SOURCE_UART`, `CTRL_SOURCE_I2C` |
 | Control Surfaces (internal) | n/a | n/a (calls the handlers through `vc_set` / `vc_get` if it ever needs them, as source `CTRL_SOURCE_GPIO`, which counts as off-USB) | `CTRL_SOURCE_GPIO` |
 
-**The alink sender** (`firmware/DSPi-Sender`, same VID:PID) on the port answers `SYS.PROTOCOL_INFO`, `SYS.PLATFORM`, its vendor subset on the paged stack, the tunnel with its own `EXT_LIST` (the IDs of 2.8 a sender serves), and keeps page 0 with `REQ_EXTENSION` (WP FWPG4). Every rule of this section applies to it.
+**The alink sender** (`firmware/DSPi-Sender`, same VID:PID) answers `SYS.PROTOCOL_INFO`, `SYS.PLATFORM`, its vendor subset on the paged stack, the tunnel with its own `EXT_LIST` (the IDs of 2.8 a sender serves), and keeps page 0 with `REQ_EXTENSION` (WP FWPG4). Every rule of this section applies to it. It has no DSP, so it needs nothing of the port and is dual-stack from `bofr-main` on (WP FWPG4, 2026-11-19; G2b for the probe, its page 0 is always on, there is no switch):
+
+- **Pages** (`SYS.PAGE_LIST` `01 01 02 01 E0 01`; `SYS.PROTOCOL_INFO` = `DSPi`, 1, 0, 3 pages, 0, then 64 and 64: the sender's buffers bound both the SET payload and the reply). SYS `0x01`: `PROTOCOL_INFO`, `PAGE_LIST`, `PAGE_COMMANDS`, `COMMAND_INFO`, `LAST_RESULT`, `PLATFORM` (7 bytes, 0 outputs, as `REQ_GET_PLATFORM`), `SERIAL`, `BUILD_INFO` (GET) and `ENTER_BOOTLOADER` (SET, rows as upstream's, `ENTER_BOOTLOADER` with `VC_F_SET_USB_ONLY` as 1.3.7). STORE `0x02`: only `OUTPUT_CONFIG_SAVE` (SET `0x0221`, stores what `REQ_SAVE_OUTPUT_CONFIG` stores); no `ALL_PARAMS`, no presets. Page `0xE0`: the tunnel. Every other page and command, upstream's DSP pages included, is `VC_ERR_UNKNOWN`.
+- **USB only.** The sender has no UART, I2C or MIDI control, so `VC_F_SET_USB_ONLY` never refuses and `VC_ERR_BUSY` never occurs. `SYS.LAST_RESULT` records every paged request (not page 0), as 1.3.2.
+- **Stages** as upstream's EP0 front end: the row checks STALL at SETUP, a GET's handler runs at SETUP, a zero-length SET (`OUTPUT_CONFIG_SAVE`, `ENTER_BOOTLOADER`) runs at SETUP, and the bootloader is entered after the status stage. Tunnel SETs run their checks and the handler after the data stage. Page 0 keeps its 1.1.6 behaviour byte for byte (refusals STALL at SETUP or, for a refused payload, at the status stage; `0xF0` replies `[1]` and reboots).
+- **Refusal codes on the tunnel** (1.3.4): `EXT_ALINK_CONFIG` pins outside the header or two equal pins `VC_ERR_PIN_INVALID`, a pin already in use `VC_ERR_PIN_IN_USE`, `tx_pin` other than `0xFF` `VC_ERR_UNSUPPORTED`; `EXT_ALINK_TX` a bad `sync_pin` `VC_ERR_PIN_INVALID`, one in use `VC_ERR_PIN_IN_USE`, a layout change while an apply is pending `VC_ERR_STATE`; `EXT_ALINK_CTRL_MSG` a payload outside the rules `VC_ERR_VALUE`, a schedule `alink_tx_schedule()` refuses (lead, one at a time, RATE fit) `VC_ERR_STATE`; anything else `VC_ERR_VALUE`.
+- The host tests are `firmware/DSPi-Sender/tests/test_vc.c`.
 
 #### 1.3.6 Discovery: how a host finds the extensions, and which envelope it uses
 
