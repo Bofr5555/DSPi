@@ -797,7 +797,10 @@ plays its own, bounded, firmware-exact signal; the host schedules the starts). T
   drives the pin again.
 - **Other cancels.** A `SET_CONFIG` while a START is pending cancels it (`CANCELLED_CONFIG`): what starts at T is what
   was staged when the op was written. `STOP`, `STOP_NOW` and `CANCEL_ALL` cancel it (`CANCELLED_HOST`). At most one
-  START is pending per unit; a second one is refused at the write. Note that `SET_CONFIG` while *running* restarts the
+  START is pending per unit; a second one is refused at the write. A START may be written while the generator runs
+  (the unit's next segment), but it starts only from idle: with the generator still running or fading at T it
+  completes `refused` (`REFUSED_NOT_READY`) and the running generator is not touched. A run that ends by itself
+  keeps the "fresh config" flag. Note that `SET_CONFIG` while *running* restarts the
   generator (4.1): a host stages one config per run and starts every pass of that unit with another op 9 on it.
 - **The timeline.** `EXT_SIGGEN_TIMELINE` (0x8031) records the time base, the state (idle, pending, armed,
   running), the last result, the T of sample 0 (`start`), the pending T, the samples rendered, the frames held

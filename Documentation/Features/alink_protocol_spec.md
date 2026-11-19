@@ -677,7 +677,8 @@ hub and the console talk to "a unit with a time base". Nothing in this section i
   (`extension_channel_spec.md` 2.8.7.1).
 - **C4. Lock states and events.** The contract's states (11.2), an event for every transition (`0xE4`), and a
   **disturbance counter** that every transition out of `LOCKED`, every holdover, resume, re-anchor, whole-sample
-  correction and epoch change increments. The counter is readable together with T and `output_frames` in one atomic
+  correction and epoch change increments (one occurrence that is several of these at once, such as a holdover that
+  leaves `LOCKED`, counts once). The counter is readable together with T and `output_frames` in one atomic
   read (`EXT_TIME_BASE`), so a host can prove that nothing happened in an interval from two reads, without relying on
   events (which are rate-limited and collapse). While an entry stays `LOCKED` and its counter does not change,
   `t - output_frames` is constant.
@@ -788,7 +789,7 @@ Bytes 0-31 are the line's superframe layout (6.1) with S/PDIF values; bytes 32-4
 |---|---|---|
 | 0 | magic | `0xA5` |
 | 1 | version | 1 |
-| 2 | flags | b0 system mute; b2 apply pending (derived as on the line, 6.2); b3 the source has a live USB stream; b1, b4, b5, b6, b7 sent 0 (no RATE, no test pattern, no slaving on S/PDIF) and ignored by followers |
+| 2 | flags | b0 system mute: sent 0 in this version (nothing sets it on an S/PDIF source); a follower that receives it set plays silence and refuses CLICK and op 9 as on the line (`extension_channel_spec.md` 2.8.3, 2.8.7); b2 apply pending (derived as on the line, 6.2); b3 the source has a live USB stream; b1, b4, b5, b6, b7 sent 0 (no RATE, no test pattern, no slaving on S/PDIF) and ignored by followers |
 | 3 | rate | rate code of the block: 0 = 44.1 kHz, 1 = 48 kHz, 2 = 96 kHz |
 | 4 | channels | 2 |
 | 5 | class | **`0x10`** (`SPDIF_CARRIER_CLASS`): S/PDIF carriage. Never a line class (1..3), so a line receiver can never accept an S/PDIF superframe, nor a follower a line one |
@@ -809,9 +810,11 @@ bytes 0-1).
 
 **Validity**, in this order (the codec returns the first failing check with the line's codes, 6.3): the CRC matches
 (1); magic is `0xA5` (2); version is 1 (3); `frame mod 192 = 0` (4); class is `0x10`, rate is 0..2 and channels is 2
-(5); `apply_op` is 0 or in the S/PDIF set {1, 2, 4, 7, 9, 10}, its `arg` and `value` within 6.4's table for that op,
-and `apply_op = 0` exactly when `apply_frame = 0` (6). The S/PDIF codec has its own allowed-op set; it does not take
-`ALINK_OP_MAX` from the line's codec. A follower adds the checks of 12.5 (rate, continuity, source and epoch).
+(5); `apply_op` is 0 or in the S/PDIF set {1, 2, 4, 7, 9, 10}, and `apply_op = 0` exactly when `apply_frame = 0`
+(6). As on the line, the codec does not judge `arg` and `value`: a superframe with a bad argument still carries a
+valid F, and the unit refuses the op when it takes it (`extension_channel_spec.md` 2.8.7). The S/PDIF codec has its
+own allowed-op set; it does not take `ALINK_OP_MAX` from the line's codec. A follower adds the checks of 12.5 (rate,
+continuity, source and epoch).
 
 **Apply carriage:** a superframe carries the pending apply exactly when its block completes before the target,
 `frame + 192 <= N`. The source carries one broadcast apply at a time (`extension_channel_spec.md` 2.10.3).
@@ -826,7 +829,8 @@ a5 01 04 01 02 10 00 42  00 a6 0e 00 00 00 00 00  40 42 0f 00 00 00 00 00  09 00
 00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00
 ```
 
-The next block (F = 960 192) with no apply: `a5 01 00 01 02 10 00 42 c0 a6 0e 00 00 00 00 00`, 12 zero bytes,
+A block with no apply pending (F = 960 192, same source; were the op above still pending, this block would carry it
+too): `a5 01 00 01 02 10 00 42 c0 a6 0e 00 00 00 00 00`, 12 zero bytes,
 `03 37 90 dd`, then 16 zero bytes. The block's first 16 user bits, in subframe order (A0, B0, A1, B1, ...), are
 `1 0 1 0 0 1 0 1 1 0 0 0 0 0 0 0` (bytes `a5 01`, LSB first): frame 0 carries A = 1, B = 0.
 
@@ -842,7 +846,10 @@ The next block (F = 960 192) with no apply: `a5 01 00 01 02 10 00 42 c0 a6 0e 00
   restarts the outputs, a USB mode-0 stream start, `usb_audio.c`) breaks the frame sequence. The source then starts a
   new **epoch**: a new origin, byte 28 incremented (mod 256), a disturbance counted, `0xE4` reason 11 `EPOCH`; every
   follower re-anchors (12.5). A source SHOULD therefore run USB-direct mode 2 or a non-USB input, whose timeline
-  survives stream restarts; on USB mode 0 every "play" is a new epoch.
+  survives stream restarts; on USB mode 0 every "play" is a new epoch. The transmit library's frame index is 32 bits
+  and today its block phase steps by 64 frames at the wrap (24.8 h of uninterrupted output at 48 kHz, 12.4 h at
+  96 kHz; `audio_spdif.c`, "known limit"): WP FWSP1 either keeps the block phase continuous across the wrap or the
+  source starts a new epoch there. F itself is 64 bits and never wraps.
 - **The source is a member of its own domain.** Its `EXT_TIME_BASE` lists a source entry (role 1, D = 0), and its
   apply queue (`EXT_APPLY_AT_FRAME` time base 3) acts on the sample written at output position F.
 - **Which slots carry it.** Every S/PDIF-type output slot, or the slots in `EXT_ALINK_SPDIF.tx_mask`. A slot that does
@@ -859,8 +866,13 @@ ahead by the silence pump (from the main loop, and from the 1 ms timer interrupt
 audio writer later overwrites the same frames. So:
 
 - **(a) A block's superframe is a function of its block index** `F / 192`. The source keeps a table of
-  `SPDIF_TX_TABLE_BLOCKS` = **4** entries keyed by block index (the blocks the ring can touch plus the block after),
-  read by both stampers, the silence stamp and the audio write, by the block index of the frame they stamp. There is
+  `SPDIF_TX_TABLE_BLOCKS` = **4** entries keyed by block index (entry `index mod 4`, holding its index): the stamped
+  span reaches at most 512 frames from the reader, so it touches at most four blocks. Both stampers, the silence
+  stamp and the audio write, read it by the block index of the frame they stamp; an entry whose stored index is not
+  that block's stamps zero user bits. The entry of block b + 4 replaces block b's, so it can be filled only once the
+  reader has left block b, and it must be filled before the first frame of b + 4 is stamped: with the idle pump
+  stamping a full ring ahead that window is 64 frames (1.3 ms at 48 kHz). The fill therefore runs in the same pass as
+  the stamp, immediately before it (the main-loop pump and the audio give path), not as a separate periodic task. There is
   no current/next pair swapped at a boundary: a double buffer mixes two blocks' bits in one block and fails every
   follower's CRC.
 - **(b) A block is frozen once any of its frames is stamped.** Its content, the apply field included, never changes
@@ -871,10 +883,13 @@ audio writer later overwrites the same frames. So:
   frames ahead and completes at most 895 frames ahead, and a target 896 frames ahead is carried by at least one
   complete superframe. `EXT_ALINK_SPDIF_CTRL` refuses a shorter lead (`extension_channel_spec.md` 2.10.3). A host
   SHOULD give more (a lost block costs the followers that op): every 192 frames beyond 896 adds one carrying block.
-- **(c) Flash blackouts.** While flash is unavailable the RAM-resident stamper only reads the table; the flash-resident
-  source code keeps it filled four blocks ahead (about 16 ms at 48 kHz). A blackout that outruns the table emits
-  all-zero user bits for the blocks beyond it (an entry not yet filled stamps zeros), which the followers coast over
-  (d) and, past 8 blocks, hold over. A measurement never overlaps a flash write (the holdover is a disturbance).
+- **(c) Flash blackouts.** While flash is unavailable the RAM-resident stamper only reads the table, which the
+  flash-resident source code has filled as far as it reaches: the reader's block and the three after it. The blackout
+  pump stamps a full ring ahead, so it passes the end of the table after 64 to 256 frames (1.3 to 5.3 ms at 48 kHz)
+  and from there emits all-zero user bits (an entry not filled for that block stamps zeros, and the block stays zero:
+  it is frozen, b), which the followers coast over (d) and, past 8 blocks, hold over. Every real flash write (tens of
+  milliseconds, and an output restart after it, which is a new epoch anyway, 12.3) therefore costs the followers a
+  holdover or a re-anchor. A measurement never overlaps a flash write (the holdover is a disturbance).
 - **(d) The follower's coast rule.** A block whose superframe is missing or invalid (zero user bits, a failed check)
   is ridden through on counter continuity: the follower takes F of that block as the previous F + 192, counts it in
   `sf_errors`, and changes nothing else (no disturbance, no event, the timeline unmoved). After
@@ -899,8 +914,11 @@ audio writer later overwrites the same frames. So:
   `EXT_ALINK_SPDIF_STATUS`; the hub chooses one D for the domain.
 - **Holdover** lasts at most 10 s (as USB-direct's); a return within it that confirms F resumes on the same timeline
   (reason 4 `RESUMED`), anything else re-anchors. Beyond 10 s the time base ends (reason 2 `LOST`, state `ACQUIRING`).
+  The 10 s are for a carrier that is gone (a pulled cable, a source restarting). While the receiver stays locked to a
+  stream, the lock-error rule below ends the holdover first: 0.5 s without a valid superframe ends the time base
+  (`LOST`) and the follower is in `LOCK_ERROR`.
 - **Lock error** (PLAN-AT OD-ATp): a follower in mode 1 whose receiver is locked to a stream but has seen no valid
-  superframe for 0.5 s (a foreign source; a DSP, AVR or switch in between that rewrites or re-clocks the user bits;
+  superframe for 0.5 s, in any state (a foreign source; a DSP, AVR or switch in between that rewrites or re-clocks the user bits;
   persistent CRC failures), or whose D is outside `d_min..d_max`, or that runs at a rate it cannot lock at, is
   `LOCK_ERROR`. Its action is `EXT_ALINK_SPDIF.on_lock_error`, as on USB-direct: **0 mute** (the default) or **1 play
   unaligned** (today's rate lock). Mode 0 stays the default, so a TV on S/PDIF is never muted by a forgotten setting.
