@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Host tests for the alink sender core (WP LK4). No Pico SDK needed.
+# Host tests for the alink sender core (WP LK4) and its vendor front end
+# (WP FWPG4). No Pico SDK needed.
 #
 #   firmware/DSPi-Sender/tests/run.sh            (from the repository root)
 #
@@ -24,3 +25,7 @@ for t in test_sender test_fanout; do
         $( [ "$t" = test_fanout ] && echo "$root/firmware/DSPi-Sender/sender_fanout.c" ) $CODEC -lm
     "$out/$t"
 done
+# WP FWPG4: the vendor front end, both envelopes (pure, no codec).
+# shellcheck disable=SC2086
+$CC $CFLAGS -o "$out/test_vc" "$here/test_vc.c" $root/firmware/DSPi-Sender/sender_vc.c
+"$out/test_vc"

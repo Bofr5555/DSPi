@@ -95,8 +95,7 @@ Weeb Labs firmware 1.1.7 addresses a command as page (high byte of `wIndex`,
 `bRequest` number (some are factory reset and preset save / load / delete). Any
 request with a non-zero `wIndex` high byte is now refused before any opcode is
 looked at and with no side effect (no handler, no bulk lock, no chunk-session
-change): **STALL** at SETUP on the USB vendor path (also on the alink sender,
-which shares the VID:PID), status **`ERROR` (`0x02`)** on UART, I2C and USB MIDI,
+change): **STALL** at SETUP on the USB vendor path, status **`ERROR` (`0x02`)** on UART, I2C and USB MIDI,
 the payload being consumed and discarded. This includes 1.1.7's mandatory probe
 `SYS.PROTOCOL_INFO` (page `0x01`, command `0x10`, USB SETUP
 `C1 10 00 00 02 01 10 00`): a STALL there, or `0x02` on UART / I2C, is exactly
@@ -106,6 +105,11 @@ requests. Page-0 requests are unchanged with any low byte (hosts send `0x0000`
 or `0x0002`). The rule is `vendor_page_refused()` in
 `firmware/DSPi/vendor_page_guard.h`, host-tested by
 `firmware/tests/test_page_guard.c` and `test_midi_control.c`.
+
+The alink sender (same VID:PID) had the same guard; from WP FWPG4 it is
+dual-stack instead and answers the paged envelope itself (SYS, STORE's
+`OUTPUT_CONFIG_SAVE` and the tunnel; every other page `VC_ERR_UNKNOWN`), see
+`extension_channel_spec.md` 1.3.5.
 
 ### 1.3 Ship state
 

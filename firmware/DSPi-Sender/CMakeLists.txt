@@ -13,7 +13,7 @@
 # two more alts), feedback controller, soft VCXO, flash clock helpers and
 # the alink codec (firmware/DSPi/alink) and LK2's PIO programs; its own
 # sources are the encoder core, the engine, the UAC1 driver and the vendor
-# requests.  RP2350 only.
+# requests (sender_vc.c: both envelopes, page 0 and the paged 1.1.7 stack).  RP2350 only.
 
 if (NOT PICO_PLATFORM MATCHES "^rp2350")
     message(FATAL_ERROR "DSPI_ROLE_SENDER needs PICO_PLATFORM=rp2350-arm-s: the alink is RP2350-only")
@@ -33,6 +33,7 @@ add_executable(DSPi-Sender
     sender_tx.c
     sender_usb.c
     sender_vendor.c
+    sender_vc.c
     sender_store.c
     sender_alink.c
     sender_fanout.c
