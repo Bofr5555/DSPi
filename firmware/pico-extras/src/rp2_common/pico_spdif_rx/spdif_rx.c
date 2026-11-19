@@ -136,6 +136,9 @@ static spdif_rx_state_t state;
 
 static void (*on_stable_func)(spdif_rx_samp_freq_t samp_freq) = NULL;
 static void (*on_lost_stable_func)() = NULL;
+#if PICO_SPDIF_RX_UBITS
+static volatile spdif_rx_ubits_func_t ubits_func = NULL;  // WP FWSP1
+#endif
 
 // DSPi patch: the FIFO lives in the shared input-capture arena, overlaid with
 // the I2S/ADAT capture rings (only one input receiver runs at a time).  The
@@ -310,6 +313,16 @@ static int __time_critical_func(_check_block)(uint32_t buff[SPDIF_BLOCK_SIZE])
             if (gcfg.flags & SPDIF_RX_FLAG_CALLBACKS) {
                 spdif_rx_callback_func(buff, trans_count, c_bits, block_parity_err_count > 0);
             }
+#if PICO_SPDIF_RX_UBITS
+            // WP FWSP1: U alongside C, from the same 384 verified words; a
+            // separate pass only while a callback is set.
+            spdif_rx_ubits_func_t uf = ubits_func;
+            if (uf) {
+                uint8_t ubits[SPDIF_RX_UBITS_LEN];
+                spdif_rx_collect_ubits(buff, ubits);
+                uf(ubits, block_ref_time_us);
+            }
+#endif
         }
     } else {
         if (pos_syncB != 0 && block_align_count == 0) {
@@ -891,6 +904,13 @@ float spdif_rx_get_samp_freq_actual()
 
 // DSPi patch: seqlock read of the {block count, IRQ time} pair; safe
 // against the IRQ writer from thread context on either core.
+#if PICO_SPDIF_RX_UBITS
+void spdif_rx_set_ubits_callback(spdif_rx_ubits_func_t func)
+{
+    ubits_func = func;
+}
+#endif
+
 void spdif_rx_get_block_ref(uint32_t* block_cnt, uint64_t* time_us)
 {
     uint32_t s1, s2;

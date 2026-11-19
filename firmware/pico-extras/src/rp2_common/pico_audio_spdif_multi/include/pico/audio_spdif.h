@@ -42,6 +42,16 @@ extern "C" {
 
 #define PICO_AUDIO_SPDIF_MAX_INSTANCES 4
 
+// -- WP FWSP1 -- user bits: the alink S/PDIF superframe (alink_protocol_spec.md
+// 12), one 48-byte superframe per 192-frame block from a 4-entry table keyed
+// by block index.  The DSPi build turns it on with DSPI_ALINK_SPDIF (RP2350);
+// off, the stampers are the code before FWSP1 (RP2040: .data unchanged).
+#ifndef PICO_AUDIO_SPDIF_UBITS
+#define PICO_AUDIO_SPDIF_UBITS 0
+#endif
+#define PICO_AUDIO_SPDIF_UBITS_LEN          48u     // 384 user bits per block
+#define PICO_AUDIO_SPDIF_UBITS_TABLE_BLOCKS 4u      // SPDIF_TX_TABLE_BLOCKS
+
 #include "hardware/pio.h"
 
 /** \brief Per-instance state for an S/PDIF output
@@ -96,6 +106,16 @@ typedef struct audio_spdif_instance {
     // Fill immediately before the most recent successful block write.
     // UINT32_MAX means no successful write has occurred since ring reset.
     volatile uint32_t recovery_prewrite_fill_frames;
+#if PICO_AUDIO_SPDIF_UBITS
+    // User bits (WP FWSP1).  ub_carry: this slot stamps the table's
+    // superframes (EXT_ALINK_SPDIF.tx_mask); off, it stamps zero user bits.
+    // ub_ref_frame/ub_ref_block: a block start in the 32-bit frame counter
+    // and its block index since the ring reset, moved by the stampers; they
+    // unwrap the counter so the block phase is continuous at 2^32.
+    bool ub_carry;
+    uint32_t ub_ref_frame;
+    uint32_t ub_ref_block;
+#endif
 } audio_spdif_instance_t;
 
 /** \brief Configuration for an S/PDIF output instance
@@ -218,6 +238,57 @@ void audio_spdif_ring_skip(audio_spdif_instance_t *inst, uint32_t frames);
 // reader, bounded by max_frames per call. Keeps a stalled producer from
 // ever looping stale ring content; cheap no-op while streaming.
 void audio_spdif_ring_silence_pump(audio_spdif_instance_t *inst, uint32_t max_frames);
+
+#if PICO_AUDIO_SPDIF_UBITS
+// ---------------------------------------------------------------------------
+// User bits (WP FWSP1, alink_protocol_spec.md 12.1 and 12.4)
+//
+// Block index b = frames since the slot's ring reset / 192 (continuous at the
+// 32-bit frame counter wrap); block b's first frame carries the Z preamble.
+// Every carrying slot must share one frame index (started in sync), so one
+// table serves them all.  An entry is frozen once any frame of its block is
+// stamped by any stamper; a block whose entry was not filled for it by then
+// stamps zero user bits, and stays zero.
+// ---------------------------------------------------------------------------
+
+// audio_spdif_ubits_fill() results.
+#define AUDIO_SPDIF_UBITS_OK      0
+#define AUDIO_SPDIF_UBITS_FROZEN  1   // the block is (partly) stamped or older: too late
+#define AUDIO_SPDIF_UBITS_EARLY   2   // its entry still serves a block not yet played: too early
+
+/** \brief Called by a stamper immediately before the first stamp of block
+ * `block` whose entry is not filled for it, so the entry can be filled in the
+ * same pass (audio_spdif_ubits_fill()).  It runs inside the stampers, from
+ * the main loop and from the flash-blackout timer interrupt: it must be
+ * RAM-resident and must not fill while its own state is unavailable (a flash
+ * blackout), which leaves those blocks zero (spec 12.4 c). */
+typedef void (*audio_spdif_ubits_filler_t)(uint32_t block);
+
+/** \brief Fill block `block`'s entry with its 48-byte superframe.  Refused
+ * (FROZEN) for a block any frame of which is already stamped (inside the
+ * erase-ahead) or that is older than the entry's; refused (EARLY) while the
+ * entry still serves block - 4 or later, i.e. until the reader has left it.
+ * IRQ-safe and RAM-resident. */
+int audio_spdif_ubits_fill(uint32_t block, const uint8_t sf[PICO_AUDIO_SPDIF_UBITS_LEN]);
+
+/** \brief Blocks fillable now, over the enabled carrying slots: the first
+ * block not yet stamped to the reader's block + 3.  False when no carrying
+ * slot is enabled or the window is empty (the stamped frontier is past
+ * the table's end). */
+bool audio_spdif_ubits_window(uint32_t *first, uint32_t *last);
+
+/** \brief Block index of an instance's frame (the stampers' numbering). */
+uint32_t audio_spdif_ubits_block_of(const audio_spdif_instance_t *inst, uint32_t frame);
+
+/** \brief Empty the table (an emptied table stamps zero user bits). */
+void audio_spdif_ubits_clear(void);
+
+/** \brief Set or clear the filler (NULL: the table holds only what is filled). */
+void audio_spdif_ubits_set_filler(audio_spdif_ubits_filler_t fn);
+
+/** \brief Whether this slot stamps the table's bits (default off: zero user bits). */
+void audio_spdif_ubits_set_carry(audio_spdif_instance_t *inst, bool carry);
+#endif
 
 /** \brief Select a block's encoder: true = 16-instruction PIO biphase encoder,
  * false = 4-instruction NRZI program with software words. Applied at the next

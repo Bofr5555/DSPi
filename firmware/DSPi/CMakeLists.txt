@@ -258,6 +258,21 @@ if (DSPI_ALINK AND NOT PICO_PLATFORM STREQUAL "rp2040")
     endif()
 endif()
 
+# -- WP FWSP1 -- DSPI_ALINK_SPDIF: the alink time base carried on S/PDIF
+# (alink_protocol_spec.md 12).  RP2350 only (PLAN-AT OD-ATm: RP2040 is
+# "Later", its .data unchanged).  The S/PDIF carriage codec (portable C, its
+# block builder RAM-resident for the transmit filler), the transmit library's
+# user-bit table (PICO_AUDIO_SPDIF_UBITS) and the receiver's user-bit
+# collector (PICO_SPDIF_RX_UBITS).  The roles are WP FWSP2.
+option(DSPI_ALINK_SPDIF "Build the alink time base on S/PDIF (user-bit superframes, RP2350)" ON)
+if (DSPI_ALINK_SPDIF AND NOT PICO_PLATFORM STREQUAL "rp2040")
+    target_sources(DSPi PRIVATE alink/alink_spdif_codec.c)
+    target_compile_definitions(DSPi PRIVATE DSPI_ALINK_SPDIF=1
+        PICO_AUDIO_SPDIF_UBITS=1 PICO_SPDIF_RX_UBITS=1
+        "ALINK_SPDIF_HOT=__attribute__((section(\".time_critical.alink_spdif\")))")
+endif()
+# -- end WP FWSP1 --
+
 # DSPI_ALINK_USB (WP USB1): alink USB-direct units.  SOF-locked clock, USB-frame
 # time base, phase lock and apply-at-frame over USB (EXT_ALINK_USB, spec 2.9).
 # RP2040 and RP2350.  Opt-in at run time (mode 0 by default: stock behaviour).

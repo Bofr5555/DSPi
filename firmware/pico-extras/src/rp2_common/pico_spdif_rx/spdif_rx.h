@@ -157,6 +157,20 @@ uint32_t spdif_rx_get_fifo_count_live();
 */
 uint32_t spdif_rx_read_fifo_live(uint32_t** buff, uint32_t req_count);
 
+#if PICO_SPDIF_RX_UBITS
+#include "spdif_rx_ubits.h"
+/**
+* DSPi patch (WP FWSP1): user-bit callback.  For every block the block
+* interrupt has verified (sync of all 384 words, rate known), it collects the
+* 384 U bits (spdif_rx_ubits.h order) and calls func with the 48 bytes and the
+* block's IRQ timestamp (the time spdif_rx_get_block_ref() pairs with it).  It
+* runs in the DMA interrupt: func must be RAM-resident and short.  NULL (the
+* default) turns the collection off; it then costs one pointer test per block.
+*/
+typedef void (*spdif_rx_ubits_func_t)(const uint8_t ubits[SPDIF_RX_UBITS_LEN], uint64_t block_time_us);
+void spdif_rx_set_ubits_callback(spdif_rx_ubits_func_t func);
+#endif
+
 /**
 * get sampling frequency
 *
