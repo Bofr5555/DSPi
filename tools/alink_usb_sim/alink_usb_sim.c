@@ -19,21 +19,46 @@
 // instant the sample each unit plays tells both the inter-unit skew and each
 // unit's latency (arrival to output) in samples.
 //
-// Build: cc -std=c11 -O2 -I firmware/DSPi tools/alink_usb_sim/alink_usb_sim.c -lm
+// WP FWTB3: the generator on the time base.  In the scenarios "G..." every
+// unit runs its own copy of the real firmware/DSPi/siggen.c and timebase.c
+// (sg_unit.h) behind the same port as alink_usb.c (ops 9/10 in
+// alink_usb_port_apply(), the op 9 write check, the USB provider, the
+// FWSIGGEN exemption), the rings carry the rendered generator samples tagged
+// with each unit's S, and the checks show two and four units' generators
+// started at one S (the hub's per-unit translation of the S origins) playing
+// sample for sample at the same instants, staggered starts on their samples,
+// a SOF loss that cancels a pending start and stops a run (the discontinuity
+// counted), late and bus-frame-form starts refused.  Up to four units (NU);
+// each generator scenario runs in its own process (fork), so its generators
+// start fresh; the other scenarios run with two units and no generator, as
+// before.
+//
+// Build: tools/alink_usb_sim/run.sh (the generator copies need nm and objcopy).
+#define _DEFAULT_SOURCE         // fork()
+#define PICO_RP2350 1
+#define DSPI_SIGGEN_SYNC 1      // an RP2350 build with the ops: the core's time-base tracker
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "alink/alink_phase.c"
 #include "alink_usb/alink_usb_core.c"
+#include "sg_unit.h"
+#include "siggen.h"
 
-#define NU      2
+#define NU      4               // units at most (WP FWTB3); a scenario runs nu of them
 #define RING    (1u << 16)
 #define FS      48000u
+#define GEN_OUT 2u              // the generator's output channel
+#define ARM_LEAD_MS 150u        // max(hold_ms, release_ms) + 50: the K340's
+#define GEN_DAC_OPEN 0.100      // the K340's DAC un-mute after the generator wants the outputs (s)
 
 alink_usb_tb_t alink_usb_tb;
-const alink_apply_limits_t alink_usb_apply_limits = { 10, 9, 2048, false };   // no generator here (WP FWTB1)
+const alink_apply_limits_t alink_usb_apply_limits = { 10, 9, 2048, true };    // ops 9/10 (WP FWTB1)
+static int nu = 2;              // units in this scenario
 
 static int checks, failures;
 #define CHECK(c, ...)                                                                                                \
@@ -128,10 +153,34 @@ typedef struct {
     bool dac_on;                // the DAC's hardware mute pin asserted
     double dac_t;               // since
     uint32_t presets;
+    // WP FWTB3: the generator (NULL: a scenario without one)
+    const sg_unit_t *g;
+    tb_provider_t prov;
+    int64_t stag[RING];         // S of each written sample on the timeline (-1 off it)
+    float gen[RING];            // the generator's sample (GEN_OUT)
+    bool gdac_want;             // the DAC model: open GEN_DAC_OPEN after the generator wants it
+    double gdac_since;
+    uint64_t t_write;           // T of the op 9 written (0 none)
+    uint8_t wr_code, wr_past, wr_short, wr_bus;
+    unsigned op9_res[4];        // 0xE2 results of op 9: applied, late, cancelled, refused
+    unsigned tb_events;
+    uint64_t cap_lo;            // the capture: S in [cap_lo, cap_lo + cap_len)
+    uint32_t cap_len;
+    double *cap_t, *cap_c;      // play instant, programme content (host S) of that sample
+    float *cap_v;
+    uint8_t *cap_n;
+    sg_timeline_t tl_run, tl_end;
+    bool tl_run_seen, want_end;
+    double tb_inv0;
+    bool tb_inv_set;
+    unsigned tb_inv_reads, tb_inv_bad;
+    uint16_t tb_dist0;
 } unit_t;
 
 typedef struct scen scen_t;
 static const scen_t *S;
+static const sg_unit_t *const SGU[SG_UNITS] = { &sgu0_sg_unit, &sgu1_sg_unit, &sgu2_sg_unit, &sgu3_sg_unit,
+                                                &sgu4_sg_unit };    // [4]: the reference
 static double g_stall_at, g_stall_len, g_dac_hold = 0.2;
 static bool g_no_long_pass;
 static double g_bad_period;     // unit 0 (RP2350): a SOF reading with RAW 22.7 us behind LAST every this many s
@@ -185,10 +234,32 @@ static bool out_of_step_now(void) {
                       (u->started && u->ph.state == ALINK_PHASE_PENDING);
     return !(lock_error && u->on_lock_error == ALINK_USB_LOCKERR_PLAY);
 }
+// WP FWTB3: one pipeline block of k samples (a packet write or silence on
+// the timeline): the generator renders into it (process_input_block()), its
+// samples tagged with the S they enter at.
+static float g_blk[1024];
+static uint32_t g_blk_n, g_blk_i;
+static int64_t g_blk_s;
+static void gen_block(uint32_t k) {
+    g_blk_i = 0;
+    g_blk_n = cur->g ? (k < 1024u ? k : 1024u) : 0;
+    g_blk_s = cur->us.started ? (int64_t)cur->us.ph.next_w : -1;
+    for (uint32_t i = 0; i < g_blk_n; i += 192) cur->g->render(g_blk + i, GEN_OUT, g_blk_n - i < 192 ? g_blk_n - i : 192, fs);
+}
+static void gen_block_end(void) { g_blk_n = 0; }
 static void write_one(double c) {
     if (!isnan(c) && cur->W >= cur->mute_end_w && out_of_step_now()) cur->audible_unlocked++;
     if (!isnan(c) && cur->W >= cur->mute_end_w && alink_usb_lock_error(&cur->us)) cur->heard_lockerr++;
     cur->content[cur->W % RING] = c;
+    float gv = 0.0f;
+    int64_t st = -1;
+    if (g_blk_i < g_blk_n) {
+        gv = g_blk[g_blk_i];
+        st = g_blk_s >= 0 ? g_blk_s + g_blk_i : -1;
+        g_blk_i++;
+    }
+    cur->gen[cur->W % RING] = gv;
+    cur->stag[cur->W % RING] = st;
     cur->W++;
     if (cur->running && ring_fill() > 448.0) cur->overruns++;
 }
@@ -205,7 +276,9 @@ void alink_usb_port_write_packet(const alink_usb_pkt_t *p, uint32_t off, uint32_
         cur->holes++;
         cur->hole_samples++;
     }
+    gen_block(k);
     for (uint32_t i = 0; i < k; i++) write_one(sp->c0 + off + i);
+    gen_block_end();
     if (k) cur->last_gain = g1;
 }
 void alink_usb_port_write_silence(uint32_t k) {
@@ -215,7 +288,9 @@ void alink_usb_port_write_silence(uint32_t k) {
     } else if (k && playing()) {
         cur->muted_silence += k;
     }
+    gen_block(k);
     for (uint32_t i = 0; i < k; i++) write_one(NAN);
+    gen_block_end();
     if (k) cur->last_gain = 0.0;
 }
 const void *alink_usb_port_keep(const alink_usb_pkt_t *p) {
@@ -260,9 +335,19 @@ void alink_usb_port_park(void) {
     cur->vcxo = cur->last_cmd = 0;
 }
 float alink_usb_port_vcxo_ppm(void) { return (float)cur->vcxo; }
-uint8_t alink_usb_port_op9_accept(uint64_t t, uint64_t t_now) { (void)t; (void)t_now; return TB_ERR_VALUE; }
+// As alink_usb.c (WP FWTB1): op 9 by S goes to the generator; at its sample
+// the generator starts (ready: LOCKED; the sim has no user or UAC mute).
+uint8_t alink_usb_port_op9_accept(uint64_t t, uint64_t t_now) {
+    return cur->g ? cur->g->tb_accept(TB_ID_USB, t, t_now, fs) : TB_ERR_VALUE;
+}
 uint8_t alink_usb_port_apply(const alink_apply_op_t *op, bool late) {
-    (void)late;
+    if (op->op == ALINK_OP_SIGGEN_START)
+        return cur->g ? cur->g->tb_fire(TB_ID_USB, op->frame, late, cur->us.tbk.state == TB_ST_LOCKED)
+                      : ALINK_APPLY_REFUSED;
+    if (op->op == ALINK_OP_SIGGEN_STOP) {
+        if (cur->g) cur->g->tb_stop_op(op->arg);
+        return ALINK_APPLY_APPLIED;
+    }
     if (op->op == ALINK_OP_CLICK) {
         cur->click_w = cur->W;          // the next sample written
         cur->click_armed = true;
@@ -270,7 +355,14 @@ uint8_t alink_usb_port_apply(const alink_apply_op_t *op, bool late) {
     }
     return op->op == ALINK_OP_SYNC_PULSE ? ALINK_APPLY_REFUSED : ALINK_APPLY_APPLIED;
 }
-void alink_usb_port_apply_result(uint8_t op, uint8_t r, uint32_t f) { (void)op; (void)r; (void)f; }
+void alink_usb_port_apply_result(uint8_t op, uint8_t r, uint32_t f) {
+    (void)f;
+    if (op != ALINK_OP_SIGGEN_START || !cur->g) return;
+    // As alink_usb.c: the core cancelled a pending op 9 itself (the timeline
+    // ended): CANCELLED_LOSS.
+    if (r == ALINK_APPLY_CANCELLED) cur->g->tb_dropped(TB_RES_CANCELLED_LOSS);
+    if (r < 4) cur->op9_res[r]++;
+}
 void alink_usb_port_event(uint8_t st, uint8_t rs, uint32_t f) {
     (void)f;
     if (getenv("SIM_TRACE"))
@@ -291,6 +383,47 @@ void alink_usb_port_ring_target(void) { cur->target = alink_usb_ring_target(&cur
 // Unit and host model
 // --------------------------------------------------------------------------
 
+// ---- WP FWTB3: the USB provider (alink_usb.c) and the generator's port ----
+
+static uint8_t prov_now(void) { return cur->us.mode != ALINK_USB_MODE_OFF ? alink_usb_tb_state(&cur->us) : TB_ST_NONE; }
+static bool prov_present(void) { return cur->us.mode != ALINK_USB_MODE_OFF; }
+static void prov_read(tb_entry_t *e, bool ring, uint32_t wr, uint32_t played) {
+    alink_usb_t *us = &cur->us;
+    e->d = us->d;
+    e->phase_error = us->ph.e;
+    uint8_t st = us->tbk.state;
+    if (st == TB_ST_NONE || st == TB_ST_ACQUIRING) {
+        e->t = 0;
+    } else if (us->started && us->ph.timeline && ring) {
+        e->t = tb_t_at_output(us->ph.next_w, wr, played, (int32_t)us->d);
+    } else {
+        uint64_t s = 0;
+        e->t = alink_usb_sample_now(us, &s, NULL) ? s : 0;
+    }
+}
+static bool prov_next(uint64_t *t) {
+    if (!cur->us.started || !cur->us.ph.timeline) return false;
+    *t = cur->us.ph.next_w;
+    return true;
+}
+static void prov_drop(uint8_t r) { alink_usb_drop_op9(&cur->us, r); }
+
+static bool gport_ready(void) { return true; }
+static uint16_t gport_lead(void) { return ARM_LEAD_MS; }
+static uint32_t gport_slips(void) { return cur->underruns; }
+static uint32_t gport_now_us(void) { return alink_usb_port_now_us(); }
+static bool gport_ring(uint32_t *wr, uint32_t *played) {
+    *wr = (uint32_t)cur->W;
+    *played = (uint32_t)(uint64_t)cur->C;
+    return cur->running;
+}
+static void gport_event(uint8_t tb, uint8_t st, uint8_t rs, uint32_t t) {
+    (void)tb; (void)st; (void)rs; (void)t;
+    cur->tb_events++;
+}
+static sg_port_t gport = { gport_ready, gport_lead, gport_slips, gport_now_us, gport_ring, gport_event };
+
+static void gen_invariant(unit_t *u);
 static void unit_sel(unit_t *u) {
     cur = u;
     alink_usb_tb = u->tb;
@@ -477,7 +610,28 @@ static void unit_pass(unit_t *u) {
         }
     }
     drain(u);
+    if (u->g) u->us.siggen_exempt = u->g->wants_output();     // alink_usb_fw_service(): WP FWSIGGEN
     alink_usb_service(&u->us, (uint32_t)(local_us(T) / 1000.0));
+    if (u->g) {
+        // alink_usb_fw_service(): an op 9 pending on S arms at T - arm_lead;
+        // main.c: the aggregator (losses and disturbances to the generator,
+        // 0xE4), the generator's service, the DAC gate.
+        if (u->us.started) u->g->tb_poll(TB_ID_USB, u->us.ph.next_w, fs);
+        u->g->tb_service((uint32_t)(local_us(T) / 1000.0));
+        u->g->service();
+        bool want = u->g->wants_output();
+        if (want && !u->gdac_want) u->gdac_since = T;
+        u->gdac_want = want;
+        u->g->output_gate(want && T - u->gdac_since >= GEN_DAC_OPEN);
+        if (u->cap_len) {
+            gen_invariant(u);
+            sg_timeline_t tl = sg_timeline(u->g);
+            if (tl.state == TB_TL_RUNNING) {
+                u->tl_run = tl;
+                u->tl_run_seen = true;
+            }
+        }
+    }
     if (alink_usb_outputs_orphaned(&u->us)) {      // main.c, review usb3 N2
         u->running = true;
         u->start_at = -1;
@@ -519,7 +673,7 @@ typedef struct {
 } meas_t;
 
 static void meas_reset(meas_t *m) {
-    for (int i = 0; i < NU; i++) {
+    for (int i = 0; i < nu; i++) {
         m->lat_min[i] = 1e9;
         m->lat_max[i] = -1e9;
         m->lat_sum[i] = 0;
@@ -535,7 +689,7 @@ static void measure(meas_t *m) {
     double farr = (double)host_n * (fs / 1000.0) + (T - sof_time) * fs * (1 + host_ppm * 1e-6);
     double pos[NU];
     bool ok[NU];
-    for (int i = 0; i < NU; i++) {
+    for (int i = 0; i < nu; i++) {
         unit_t *u = &U[i];
         ok[i] = false;
         if (!u->booted || !u->running || u->C < 1) continue;
@@ -562,8 +716,24 @@ static void measure(meas_t *m) {
 // Scenario driver
 // --------------------------------------------------------------------------
 
+// WP FWTB3: a generator plan.  At write_s the hub stages the config on every
+// unit and writes op 9 for T_i = T_0 + stagger[i] in each unit's own S: T_0
+// is unit 0's S about t0_s - write_s ahead, and a unit whose S counts from
+// another origin (a multiple of 2048 * spf apart, C1) gets T_0 moved by that
+// difference, read from both units' S now (EXT_FRAME_COUNTER).
+enum { G_COINCIDE = 1, G_LOSS, G_LATE };
+typedef struct {
+    int kind;
+    uint8_t type;               // SIGGEN_IMPULSE or SIGGEN_SWEEP_LOG
+    uint16_t repeat;
+    double t0_s, write_s;
+    int32_t stagger[NU];
+} ugen_t;
+
 struct scen {
     const char *name;
+    int nu;                     // WP FWTB3: units (0: 2)
+    const ugen_t *gen;          // the generator plan (NULL none)
     double host_ppm;
     // review usb1 probes
     double burst_at; int burst_n;               // unit 1: burst_n consecutive packets skipped from burst_at
@@ -622,6 +792,120 @@ typedef struct {
     uint8_t status[NU][ALINK_USB_STATUS_LEN];
 } res_t;
 
+// ---- WP FWTB3: the hub's side of the generator plan, the capture ----------
+
+static SiggenConfig gen_cfg(const ugen_t *gp) {
+    SiggenConfig c;
+    memset(&c, 0, sizeof c);
+    c.version = SIGGEN_CFG_VERSION;
+    c.signal_type = gp->type;
+    c.channel_mask = (uint16_t)(1u << GEN_OUT);
+    c.level_db = -20.0f;
+    c.repeat = gp->repeat;
+    if (gp->type == SIGGEN_IMPULSE) {
+        c.p1 = 20.0f;
+    } else {
+        c.duration_ms = 300;
+        c.gap_ms = 20;
+        c.p1 = 20.0f;
+        c.p2 = 20000.0f;
+    }
+    return c;
+}
+static uint32_t gen_len(const ugen_t *gp) {
+    double ms = gp->type == SIGGEN_IMPULSE ? 20.0 * gp->repeat : 320.0 * gp->repeat;
+    return (uint32_t)(ms * fs / 1000.0) + 1u;
+}
+static uint8_t write_op9(unit_t *u, uint64_t t, uint8_t tb) {
+    uint8_t p[ALINK_APPLY_LEN] = { 0 };
+    for (int i = 0; i < 8; i++) p[i] = (uint8_t)(t >> (8 * i));
+    p[8] = ALINK_OP_SIGGEN_START;
+    p[12] = tb;
+    return alink_usb_apply_code(&u->us, p);
+}
+
+// At write_s, at one instant for all units (the hub's requests): SET_CONFIG,
+// EXT_FRAME_COUNTER, then op 9 by S in each unit's own numbering.
+static void gen_host(const scen_t *s) {
+    const ugen_t *gp = s->gen;
+    uint64_t now[NU] = { 0 };
+    for (int i = 0; i < nu; i++) {
+        unit_sel(&U[i]);
+        if (!alink_usb_sample_now(&U[i].us, &now[i], NULL) || U[i].us.tbk.state != TB_ST_LOCKED)
+            printf("    unit %d: not LOCKED at the write (tb state %u)\n", i, U[i].us.tbk.state);
+        unit_unsel();
+    }
+    const uint64_t wrap = 2048ull * (fs / 1000u);
+    uint64_t t0 = now[0] + (uint64_t)llround((gp->t0_s - gp->write_s) * fs);
+    for (int i = 0; i < nu; i++) {
+        unit_t *u = &U[i];
+        unit_sel(u);
+        SiggenConfig c = gen_cfg(gp);
+        if (!u->g->stage_config(&c, sizeof c)) printf("    unit %d: SET_CONFIG refused\n", i);
+        int64_t k = llround((double)(int64_t)(now[i] - now[0]) / (double)wrap);
+        u->t_write = t0 + (uint64_t)(k * (int64_t)wrap) + (uint64_t)(int64_t)gp->stagger[i];
+        if (gp->kind == G_LATE) {
+            // A START whose sample has passed, one inside the arm lead (both
+            // VC_ERR_STATE) and one in the bus-frame form (R5, VC_ERR_VALUE).
+            u->wr_past = write_op9(u, u->us.ph.next_w - 480u, 1);
+            u->wr_short = write_op9(u, u->us.ph.next_w + (uint64_t)ARM_LEAD_MS * fs / 1000u - 1u, 1);
+            u->wr_bus = write_op9(u, alink_usb_bus_form(&u->us, u->t_write), 2);
+        }
+        u->wr_code = write_op9(u, u->t_write, 1);
+        uint32_t margin = fs / 10u;
+        int32_t lo = 0, hi = 0;
+        for (int j = 0; j < nu; j++) {
+            if (gp->stagger[j] < lo) lo = gp->stagger[j];
+            if (gp->stagger[j] > hi) hi = gp->stagger[j];
+        }
+        u->cap_lo = u->t_write - (uint64_t)(int64_t)gp->stagger[i] + (uint64_t)(int64_t)lo - margin;
+        u->cap_len = (uint32_t)(hi - lo) + gen_len(gp) + 2u * margin;
+        u->cap_t = malloc(u->cap_len * sizeof(double));
+        u->cap_c = malloc(u->cap_len * sizeof(double));
+        u->cap_v = calloc(u->cap_len, sizeof(float));
+        u->cap_n = calloc(u->cap_len, 1);
+        for (uint32_t j = 0; j < u->cap_len; j++) u->cap_t[j] = u->cap_c[j] = NAN;
+        unit_unsel();
+    }
+}
+
+// The samples the output played in this step (sample w plays when C reaches w).
+static void capture(unit_t *u, double c0, double rate, double dt) {
+    for (uint64_t w = (uint64_t)floor(c0) + 1u; (double)w <= u->C && w < u->W; w++) {
+        int64_t st = u->stag[w % RING];
+        if (st < (int64_t)u->cap_lo || st >= (int64_t)(u->cap_lo + u->cap_len)) continue;
+        uint32_t i = (uint32_t)(st - (int64_t)u->cap_lo);
+        if (u->cap_n[i] < 255) u->cap_n[i]++;
+        if (u->cap_n[i] == 1) {
+            u->cap_t[i] = T - dt + ((double)w - c0) / rate;
+            u->cap_v[i] = u->gen[w % RING];
+            u->cap_c[i] = u->content[w % RING] - u->stream_offset;
+        }
+    }
+}
+
+// EXT_TIME_BASE while LOCKED: t - output_frames constant while the
+// disturbance counter stays (R7c).
+static void gen_invariant(unit_t *u) {
+    if (u->us.tbk.state != TB_ST_LOCKED || !u->running) return;
+    uint8_t o[TB_READ_LEN];
+    u->g->tb_read(o);
+    if (o[1] < 1) return;
+    const uint8_t *x = o + TB_ENTRY_OFF;
+    uint32_t played = (uint32_t)o[8] | (uint32_t)o[9] << 8 | (uint32_t)o[10] << 16 | (uint32_t)o[11] << 24;
+    uint32_t tl = (uint32_t)x[8] | (uint32_t)x[9] << 8 | (uint32_t)x[10] << 16 | (uint32_t)x[11] << 24;
+    uint16_t dist = (uint16_t)(x[16] | x[17] << 8);
+    double inv = (double)(int32_t)(tl - played);
+    if (!u->tb_inv_set || dist != u->tb_dist0) {
+        u->tb_inv_set = true;
+        u->tb_inv0 = inv;
+        u->tb_dist0 = dist;
+        return;
+    }
+    u->tb_inv_reads++;
+    if (fabs(inv - u->tb_inv0) > 1.0) u->tb_inv_bad++;
+}
+
 static void run(const scen_t *s, res_t *r) {
     memset(U, 0, sizeof(U));
     memset(r, 0, sizeof(*r));
@@ -639,7 +923,10 @@ static void run(const scen_t *s, res_t *r) {
     next_sof = 0;
     sof_on = true;
     fs = s->fs ? s->fs : FS;
-    for (int i = 0; i < NU; i++) {
+    nu = s->nu ? s->nu : 2;
+    bool gen_written = false;
+    for (int i = 0; i < nu; i++) {
+        U[i].g = s->gen ? SGU[i] : NULL;      // WP FWTB3: this unit's generator copy
         U[i].xtal_ppm = s->xtal[i];
         U[i].boot_s = s->boot[i];
         U[i].hub_ns = s->hub_ns[i];
@@ -648,6 +935,14 @@ static void run(const scen_t *s, res_t *r) {
         U[i].d = s->d;
         U[i].stream_offset = s->stream_offset[i];
         unit_init(&U[i]);
+        if (U[i].g) {
+            *U[i].g->port = &gport;
+            U[i].prov = (tb_provider_t){ TB_ID_USB, TB_ROLE_FOLLOWER, &U[i].us.tbk, prov_now, prov_present, prov_read,
+                                         prov_next, prov_drop };
+            unit_sel(&U[i]);
+            U[i].g->tb_register(TB_SLOT_USB, &U[i].prov);
+            unit_unsel();
+        }
         U[i].us.on_lock_error = s->lock_play ? ALINK_USB_LOCKERR_PLAY : ALINK_USB_LOCKERR_MUTE;
         if (s->no_auto) U[i].us.flags = 0;
         if (s->seeded) {
@@ -675,7 +970,7 @@ static void run(const scen_t *s, res_t *r) {
                 host_n++;
                 host_f11 = (host_f11 + 1) & 0x7FF;
                 sof_time = T;
-                for (int i = 0; i < NU; i++) {
+                for (int i = 0; i < nu; i++) {
                     unit_t *u = &U[i];
                     if (!u->booted && T >= u->boot_s) u->booted = true;
                     if (!u->booted) continue;
@@ -708,7 +1003,7 @@ static void run(const scen_t *s, res_t *r) {
                 if (s->click_at > 0 && !clicked && T >= s->click_at) {
                     clicked = true;
                     click_frame = (host_f11 + 100) & 0x7FF;
-                    for (int i = 0; i < NU; i++) {
+                    for (int i = 0; i < nu; i++) {
                         unit_sel(&U[i]);
                         uint8_t p[16] = { 0 };
                         uint32_t f = (uint32_t)click_frame;
@@ -728,7 +1023,7 @@ static void run(const scen_t *s, res_t *r) {
                 host_n += 777;
             }
         }
-        for (int i = 0; i < NU; i++) {
+        for (int i = 0; i < nu; i++) {
             unit_t *u = &U[i];
             if (!u->booted) continue;
             bool masked = i == 0 && s->mask_len > 0 && fmod(T, s->mask_period) < s->mask_len;
@@ -752,6 +1047,10 @@ static void run(const scen_t *s, res_t *r) {
                 for (uint32_t k = 0; k < u->target; k++) write_one(NAN);
                 unit_unsel();
             }
+            if (s->gen && !gen_written && T >= s->gen->write_s) {
+                gen_written = true;
+                gen_host(s);
+            }
             if (u->comp_t > 0 && T >= u->comp_t && !masked) unit_complete(u);
             if (u->start_at >= 0 && T >= u->start_at) unit_start(u);
             if (T >= u->next_pass) unit_pass(u);
@@ -759,6 +1058,7 @@ static void run(const scen_t *s, res_t *r) {
                 double rate = fs * (1 + u->xtal_ppm * 1e-6) * (1 + u->vcxo * 1e-6);
                 double c0 = u->C;
                 u->C += rate * dt;
+                if (u->cap_len) capture(u, c0, rate, dt);
                 if (u->click_armed && u->C >= (double)u->click_w) {
                     u->click_t = T - dt + ((double)u->click_w - c0) / rate;
                     u->click_armed = false;
@@ -768,7 +1068,11 @@ static void run(const scen_t *s, res_t *r) {
                     // stock path's idle pump (not modelled) covers an empty ring.
                     if (u->us.started) u->underruns++;
                     uint64_t w = (uint64_t)ceil(u->C);  // the writer re-anchors to the reader
-                    while (u->W < w) u->content[u->W++ % RING] = NAN;
+                    while (u->W < w) {
+                        u->gen[u->W % RING] = 0.0f;
+                        u->stag[u->W % RING] = -1;
+                        u->content[u->W++ % RING] = NAN;
+                    }
                 }
             }
         }
@@ -786,7 +1090,7 @@ static void run(const scen_t *s, res_t *r) {
         }
         T += dt;
     }
-    for (int i = 0; i < NU; i++) {
+    for (int i = 0; i < nu; i++) {
         unit_t *u = &U[i];
         r->anchors[i] = u->us.anchors;
         r->reanchors[i] = u->us.reanchors;
@@ -822,6 +1126,10 @@ static void run(const scen_t *s, res_t *r) {
                    u->us.rate_locked, u->us.ph.e, u->us.ph.pi.integ, u->us.ph.pi.trim);
         unit_sel(u);
         alink_usb_get_status(&u->us, r->status[i]);
+        if (u->g) {
+            u->tl_end = sg_timeline(u->g);
+            u->want_end = u->g->wants_output();
+        }
         unit_unsel();
     }
     if (clicked && U[0].click_t > 0 && U[1].click_t > 0) {
@@ -832,14 +1140,14 @@ static void run(const scen_t *s, res_t *r) {
 
 static void report(const scen_t *s, const res_t *r) {
     printf("%s\n", s->name);
-    for (int i = 0; i < NU; i++) {
+    for (int i = 0; i < nu; i++) {
         double mean = r->m.lat_n[i] ? r->m.lat_sum[i] / r->m.lat_n[i] : NAN;
         printf("    unit %d: state %u anchors %u reanchors %u  latency %.3f..%.3f (mean %.3f) samples  vcxo %.2f ff %.2f "
                "missed %u late %u underruns %u overruns %u lost %u\n",
                i, r->state[i], r->anchors[i], r->reanchors[i], r->m.lat_min[i], r->m.lat_max[i], mean, r->vcxo[i],
                r->ff[i], r->missed[i], r->late[i], r->underruns[i], r->overruns[i], r->lost[i]);
     }
-    for (int i = 0; i < NU; i++)
+    for (int i = 0; i < nu; i++)
         printf("    unit %d: holes %u (%u hard edges on the playing stream), muted/faded silence %u samples, "
                "GAP events %u, events %u, mis-stamped packets %u of %u\n", i, r->holes[i], r->hole_samples[i],
                r->muted_silence[i], r->gap_events[i], r->events[i], r->misstamps[i], r->stamped[i]);
@@ -877,7 +1185,7 @@ static double lat_tol = 0.3;
 static bool allow_underrun;
 
 static void expect_locked(const scen_t *s, const res_t *r, double skew_max) {
-    for (int i = 0; i < NU; i++) {
+    for (int i = 0; i < nu; i++) {
         // Owner decision 2026-11-14 (WP USB3): nothing of a stream is heard
         // while a mode-2 unit is out of step.
         if (s->mode == ALINK_USB_MODE_PHASE)
@@ -1080,7 +1388,7 @@ static void usb3b_scenarios(const char *only) {
         if (WANT(s.name)) {
             run(&s, &r);
             report(&s, &r);
-            for (int i = 0; i < NU; i++) {
+            for (int i = 0; i < nu; i++) {
                 CHECK(r.state[i] == ALINK_USB_ST_REJECTED && r.lock_err[i] && r.lock_errors[i] == 1,
                       "%s: unit %d rejected, in lock error, counted once", s.name, i);
                 if (play)
@@ -1103,7 +1411,7 @@ static void usb3b_scenarios(const char *only) {
         if (WANT(s.name)) {
             run(&s, &r);
             report(&s, &r);
-            for (int i = 0; i < NU; i++) {
+            for (int i = 0; i < nu; i++) {
                 CHECK(r.lock_err[i] && r.anchors[i] == 0, "%s: unit %d in lock error, no anchor", s.name, i);
                 if (play)
                     CHECK(r.heard_lockerr[i] > 100000, "%s: unit %d plays rate-locked (%u samples heard)", s.name, i,
@@ -1127,7 +1435,7 @@ static void usb3b_scenarios(const char *only) {
             // The PI that pulled 3 samples in (7 s in this run) is still unwinding
             // its integrator 30 s later (alink_phase's servo, unchanged here), so
             // not expect_locked()'s 0.05-sample bounds: within 0.5 sample of D.
-            for (int i = 0; i < NU; i++) {
+            for (int i = 0; i < nu; i++) {
                 double mean = r.m.lat_n[i] ? r.m.lat_sum[i] / r.m.lat_n[i] : 1e9;
                 CHECK(r.state[i] == ALINK_USB_ST_PHASE_LOCK && r.holes[i] == 0 && r.audible_unlocked[i] == 0 &&
                       fabs(mean - s.d) < 0.5, "E3: unit %d phase-locked at the end, no hard edge, silent out of step "
@@ -1136,6 +1444,263 @@ static void usb3b_scenarios(const char *only) {
             CHECK(r.lock_errors[0] == 1 && !r.lock_err[0] && r.reanchors[0] == 0 && r.heard_lockerr[0] == 0,
                   "E3: lock error entered and left, no re-anchor, nothing heard meanwhile (%u)", r.heard_lockerr[0]);
         }
+    }
+}
+
+// ==========================================================================
+// WP FWTB3: the generator on the USB time base
+// ==========================================================================
+
+static const char *const TL_RES[] = { "none", "started", "refused late", "refused not ready", "cancelled loss",
+                                      "cancelled config", "cancelled host", "stopped loss" };
+
+static double cap_t_of(const unit_t *u, uint64_t f) {
+    return f >= u->cap_lo && f < u->cap_lo + u->cap_len ? u->cap_t[f - u->cap_lo] : NAN;
+}
+static double cap_c_of(const unit_t *u, uint64_t f) {
+    return f >= u->cap_lo && f < u->cap_lo + u->cap_len ? u->cap_c[f - u->cap_lo] : NAN;
+}
+static float cap_v_of(const unit_t *u, uint64_t f) {
+    return f >= u->cap_lo && f < u->cap_lo + u->cap_len ? u->cap_v[f - u->cap_lo] : 0.0f;
+}
+static unsigned gen_nonzero(const unit_t *u, uint64_t *first, uint64_t *last) {
+    unsigned n = 0;
+    *first = *last = 0;
+    for (uint32_t i = 0; i < u->cap_len; i++) {
+        if (u->cap_v[i] == 0.0f) continue;
+        if (!n) *first = u->cap_lo + i;
+        *last = u->cap_lo + i;
+        n++;
+    }
+    return n;
+}
+
+// The reference: copy 4, a plain START at once, blocks of 16.
+static bool ref_ready(void) { return true; }
+static uint16_t ref_lead(void) { return ARM_LEAD_MS; }
+static uint32_t ref_zero(void) { return 0; }
+static bool ref_ring(uint32_t *wr, uint32_t *played) { *wr = *played = 0; return false; }
+static void ref_event(uint8_t tb, uint8_t st, uint8_t rs, uint32_t t) { (void)tb; (void)st; (void)rs; (void)t; }
+static sg_port_t ref_port = { ref_ready, ref_lead, ref_zero, ref_zero, ref_ring, ref_event };
+static float *gen_reference(const ugen_t *gp, uint32_t len) {
+    const sg_unit_t *g = SGU[4];
+    *g->port = &ref_port;
+    SiggenConfig c = gen_cfg(gp);
+    float *ref = calloc(len + 16u, sizeof(float));
+    if (!g->stage_config(&c, sizeof c) || !g->control(SIGGEN_CTL_START)) return ref;
+    for (uint32_t i = 0; i < len; i += 16) g->render(ref + i, GEN_OUT, 16, fs);
+    return ref;
+}
+
+static void gen_checks(const scen_t *s) {
+    const ugen_t *gp = s->gen;
+    const uint32_t len = gen_len(gp);
+    const float amp = powf(10.0f, -20.0f / 20.0f);
+    // PLAN-AT FWTB3: under 0.1 sample on USB between two units; each unit
+    // within half of it of the domain's timeline (the mean of the units).
+    const double tol = 0.1;
+    const double fsh = fs * (1.0 + host_ppm * 1e-6);    // the domain's rate: the host's
+    float *ref = gen_reference(gp, len);
+    uint32_t k0 = 0;
+    while (k0 < len && ref[k0] == 0.0f) k0++;
+    printf("    reference: the first nonzero sample is sample %u\n", k0);
+    for (int i = 0; i < nu; i++) {
+        unit_t *u = &U[i];
+        const sg_timeline_t *tl = &u->tl_end;
+        uint64_t f1, f2;
+        unsigned nz = gen_nonzero(u, &f1, &f2);
+        printf("    unit %d generator: T %llu (S origin %+lld wraps of 2048 frames from unit 0), result %s start %llu "
+               "samples %u disc %u run_id %u; 0xE2 op 9 applied %u late %u cancelled %u refused %u; %u nonzero samples "
+               "played; EXT_TIME_BASE t - output_frames %u reads, %u off; 0xE4 events %u\n",
+               i, (unsigned long long)u->t_write,
+               (long long)llround((double)(int64_t)(u->t_write - U[0].t_write - (uint64_t)(int64_t)gp->stagger[i] +
+                                                    (uint64_t)(int64_t)gp->stagger[0]) / (2048.0 * (fs / 1000u))),
+               tl->result < 8 ? TL_RES[tl->result] : "?", (unsigned long long)tl->start, tl->samples, tl->disc,
+               tl->run_id, u->op9_res[0], u->op9_res[1], u->op9_res[2], u->op9_res[3], nz, u->tb_inv_reads,
+               u->tb_inv_bad, u->tb_events);
+        CHECK(u->tb_inv_reads > 1000 && u->tb_inv_bad == 0, "%s: unit %d t - output_frames constant while LOCKED (%u of %u)",
+              s->name, i, u->tb_inv_bad, u->tb_inv_reads);
+        CHECK(!u->want_end, "%s: unit %d the DAC is handed back at the end", s->name, i);
+        if (gp->kind == G_LATE)
+            CHECK(u->wr_past == TB_ERR_STATE && u->wr_short == TB_ERR_STATE && u->wr_bus == TB_ERR_VALUE,
+                  "%s: unit %d refused at the write: T passed (0x%02x), inside the arm lead (0x%02x), bus-frame form "
+                  "(0x%02x, R5)", s->name, i, u->wr_past, u->wr_short, u->wr_bus);
+    }
+    if (gp->kind == G_LOSS) {
+        // SOF lost mid-run on the bus: unit 1's run stops (STOPPED_LOSS, the
+        // discontinuity counted, silent from then), unit 0's later START is
+        // cancelled (CANCELLED_LOSS, nothing played).
+        unit_t *a = &U[0], *b = &U[1];
+        uint64_t f1, f2;
+        CHECK(a->wr_code == TB_OK && a->tl_end.result == TB_RES_CANCELLED_LOSS && a->op9_res[ALINK_APPLY_CANCELLED] == 1 &&
+                  !a->tl_run_seen && gen_nonzero(a, &f1, &f2) == 0,
+              "%s: unit 0 the pending START cancelled by the loss (%s), nothing played", s->name,
+              TL_RES[a->tl_end.result & 7]);
+        unsigned nz = gen_nonzero(b, &f1, &f2);
+        double t_last = cap_t_of(b, f2);
+        printf("    unit 1: last nonzero generator sample S %llu played at %.4f s (SOF lost from %.4f s)\n",
+               (unsigned long long)f2, t_last, s->sof_gap_at);
+        CHECK(b->wr_code == TB_OK && b->tl_run_seen && b->tl_run.start == b->t_write &&
+                  b->tl_end.result == TB_RES_STOPPED_LOSS && b->tl_end.disc >= 1 && nz > 0 && f1 == b->t_write + k0 &&
+                  f2 < b->t_write + len - 1,
+              "%s: unit 1 started on T, stopped by the loss, the timeline counts it (%s, disc %u)", s->name,
+              TL_RES[b->tl_end.result & 7], b->tl_end.disc);
+        CHECK(t_last < s->sof_gap_at + 0.2, "%s: unit 1 silent soon after the SOF stopped (%.4f s)", s->name, t_last);
+        free(ref);
+        return;
+    }
+    double em_of[NU] = { 0 }, ex_of[NU] = { 0 };
+    for (int i = 0; i < nu; i++) {
+        unit_t *u = &U[i];
+        uint64_t f1, f2;
+        unsigned nz = gen_nonzero(u, &f1, &f2);
+        CHECK(u->wr_code == TB_OK && u->tl_end.result == TB_RES_STARTED && u->tl_end.start == u->t_write &&
+                  u->tl_end.tb == TB_ID_USB && u->tl_end.disc == 0 && u->op9_res[ALINK_APPLY_APPLIED] == 1 &&
+                  u->tl_end.run_id == 1,
+              "%s: unit %d op 9 by S accepted, started on T (start %llu, %s, disc %u)", s->name, i,
+              (unsigned long long)u->tl_end.start, TL_RES[u->tl_end.result & 7], u->tl_end.disc);
+        unsigned miss = 0, twice = 0;
+        double vd = 0;
+        for (uint32_t j = 0; j < len; j++) {
+            uint64_t f = u->t_write + j;
+            uint8_t c = f >= u->cap_lo && f < u->cap_lo + u->cap_len ? u->cap_n[f - u->cap_lo] : 0;
+            miss += c == 0;
+            twice += c > 1;
+            vd = fmax(vd, fabs((double)cap_v_of(u, f) - ref[j]));
+        }
+        CHECK(miss == 0 && twice == 0, "%s: unit %d every sample of the run played once (%u missing, %u twice)", s->name,
+              i, miss, twice);
+        CHECK(nz > 0 && f1 == u->t_write + k0, "%s: unit %d no generator sample before T, the first on T + %u", s->name,
+              i, k0);
+        CHECK(vd <= (gp->type == SIGGEN_IMPULSE ? 0.0 : 1e-3), "%s: unit %d the reference's samples on T.. (%.3g)",
+              s->name, i, vd);
+        if (gp->type == SIGGEN_IMPULSE)
+            CHECK(fabsf(cap_v_of(u, u->t_write) - amp) < 1e-6f && nz == gp->repeat,
+                  "%s: unit %d the impulse train: sample 0 on T, %u impulses (%u)", s->name, i, gp->repeat, nz);
+        if (i == 0) continue;
+        // Against unit 0: the same programme sample (host S) under generator
+        // sample 0 (plus the stagger), and the same instants.
+        double c_i = cap_c_of(u, u->t_write), c_0 = cap_c_of(&U[0], U[0].t_write);
+        double dc = c_i - c_0 - (double)(gp->stagger[i] - gp->stagger[0]);
+        double sum = 0, mx = 0;
+        unsigned k = 0;
+        for (uint32_t j = 0; j < len; j++) {
+            double t1 = cap_t_of(&U[0], U[0].t_write + j), t2 = cap_t_of(u, u->t_write + j);
+            if (isnan(t1) || isnan(t2)) continue;
+            double e = (t2 - t1) * fsh - (double)(gp->stagger[i] - gp->stagger[0]);
+            sum += e;
+            if (fabs(e) > mx) mx = fabs(e);
+            k++;
+        }
+        em_of[i] = k ? sum / k : NAN;
+        ex_of[i] = mx;
+        printf("    unit %d against unit 0: generator sample 0 on host sample %+.0f of unit 0's (stagger %+d); play "
+               "instants %+.4f sample mean, %.4f max\n", i, c_i - c_0, gp->stagger[i] - gp->stagger[0], em_of[i], mx);
+        CHECK(!isnan(dc) && dc == 0.0, "%s: unit %d the generator's sample 0 sits on unit 0's programme sample (%+.0f)",
+              s->name, i, dc);
+    }
+    double mean = 0;
+    for (int i = 0; i < nu; i++) mean += em_of[i];
+    mean /= nu;
+    for (int i = 0; i < nu; i++) {
+        double dev = em_of[i] - mean;
+        printf("    unit %d: the run's instants %+.4f sample off the domain's (the mean of %d units)\n", i, dev, nu);
+        CHECK(fabs(dev) < tol / 2 && ex_of[i] < tol,
+              "%s: unit %d plays the run within the lock error (%+.4f off the timeline, under %.2f; any sample against "
+              "unit 0 %.4f, under %.2f)", s->name, i, dev, tol / 2, ex_of[i], tol);
+    }
+    free(ref);
+}
+
+// A generator scenario in its own process (fresh generator copies).
+static void gen_run(const scen_t *s) {
+    fflush(NULL);
+    int fd[2];
+    if (pipe(fd) != 0) { perror("pipe"); exit(2); }
+    pid_t pid = fork();
+    if (pid < 0) { perror("fork"); exit(2); }
+    if (pid == 0) {
+        close(fd[0]);
+        checks = failures = 0;
+        static res_t r;
+        run(s, &r);
+        report(s, &r);
+        gen_checks(s);
+        fflush(NULL);
+        int v[2] = { checks, failures };
+        ssize_t w = write(fd[1], v, sizeof v);
+        _exit(w == (ssize_t)sizeof v ? 0 : 3);
+    }
+    close(fd[1]);
+    int v[2] = { 0, 0 }, st = 0;
+    ssize_t got = read(fd[0], v, sizeof v);
+    close(fd[0]);
+    waitpid(pid, &st, 0);
+    if (got != (ssize_t)sizeof v || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        printf("  FAIL: %s: the scenario's process died (status 0x%x)\n", s->name, st);
+        v[0]++;
+        v[1]++;
+    }
+    checks += v[0];
+    failures += v[1];
+}
+
+static scen_t gen_base(const char *name, int n, const ugen_t *g) {
+    scen_t s = base(name);
+    s.nu = n;
+    s.gen = g;
+    // Units 2 and 3 (RP2350; RP2040 builds have no ops, OD-ATm).
+    s.xtal[2] = 31.0;
+    s.xtal[3] = -44.0;
+    s.boot[2] = 1.6;
+    s.boot[3] = 5.2;
+    s.hub_ns[2] = 140;
+    s.hub_ns[3] = 175;
+    s.stream_start[2] = s.stream_start[3] = 1.0;
+    s.duration = 32.0;
+    return s;
+}
+
+static void gen_scenarios(const char *only) {
+    // Ops 9 written about 0.5 s ahead at 30 s (units locked for 20 s or more).
+    static const ugen_t g_imp = { G_COINCIDE, SIGGEN_IMPULSE, 5, 30.5, 30.0, { 0 } };
+    static const ugen_t g_swp = { G_COINCIDE, SIGGEN_SWEEP_LOG, 3, 30.5, 30.0, { 0 } };
+    static const ugen_t g_stag = { G_COINCIDE, SIGGEN_IMPULSE, 5, 30.5, 30.0, { 0, 4807, 9613, -3 } };
+    static const ugen_t g_late = { G_LATE, SIGGEN_IMPULSE, 5, 30.5, 30.0, { 0 } };
+    static const ugen_t g_loss = { G_LOSS, SIGGEN_SWEEP_LOG, 3, 30.5, 30.0, { 72000, 0 } };
+    {
+        scen_t s = gen_base("G1 two units, impulses at one S", 2, &g_imp);
+        if (WANT(s.name)) gen_run(&s);
+    }
+    {
+        scen_t s = gen_base("G2 two units, log sweeps at one S, host -60 ppm", 2, &g_swp);
+        s.host_ppm = -60.0;
+        if (WANT(s.name)) gen_run(&s);
+    }
+    {
+        scen_t s = gen_base("G3 four units, impulses at one S (boots 0 / 3.7 / 1.6 / 5.2 s)", 4, &g_imp);
+        if (WANT(s.name)) gen_run(&s);
+    }
+    {
+        scen_t s = gen_base("G4 four units, log sweeps at one S, 96 kHz", 4, &g_swp);
+        s.fs = 96000u;
+        s.d = 336;          // d_min 324 at 96 kHz (S12)
+        if (WANT(s.name)) gen_run(&s);
+    }
+    {
+        scen_t s = gen_base("G5 four units, staggered starts (+4807, +9613, -3 samples)", 4, &g_stag);
+        if (WANT(s.name)) gen_run(&s);
+    }
+    {
+        scen_t s = gen_base("G6 SOF lost 0.3 s mid-run: unit 1's run stopped, unit 0's pending START cancelled", 2, &g_loss);
+        s.sof_gap_at = 30.8;
+        s.sof_gap_len = 0.3;
+        s.no_jump = true;
+        if (WANT(s.name)) gen_run(&s);
+    }
+    {
+        scen_t s = gen_base("G7 late and bus-frame-form STARTs refused at the write, then on T", 2, &g_late);
+        if (WANT(s.name)) gen_run(&s);
     }
 }
 
@@ -1195,7 +1760,7 @@ int main(int argc, char **argv) {
         if (WANT(s.name)) {
             run(&s, &r);
             report(&s, &r);
-            for (int i = 0; i < NU; i++)
+            for (int i = 0; i < nu; i++)
                 CHECK(r.state[i] == ALINK_USB_ST_REJECTED && r.vcxo[i] == 0.0 && r.anchors[i] == 0,
                       "%s: unit %d rejected, VCXO parked, stock (state %u)", s.name, i, r.state[i]);
         }
@@ -1265,7 +1830,7 @@ int main(int argc, char **argv) {
         if (WANT(s.name)) {
             run(&s, &r);
             report(&s, &r);
-            for (int i = 0; i < NU; i++)
+            for (int i = 0; i < nu; i++)
                 CHECK(r.state[i] == ALINK_USB_ST_RATE_LOCK, "S11: unit %d rate-locked", i);
             // Rate-locked only, nothing holds the phase: the output follows each
             // packet's arrival and the fill servo (tens of samples of spread),
@@ -1333,7 +1898,7 @@ int main(int argc, char **argv) {
             run(&s, &r);
             report(&s, &r);
             bool rej = fabs(edge[k]) > 295.0;
-            for (int i = 0; i < NU; i++) {
+            for (int i = 0; i < nu; i++) {
                 if (rej)
                     CHECK(r.state[i] == ALINK_USB_ST_REJECTED && r.anchors[i] == 0, "%s: unit %d rejected (state %u)",
                           s.name, i, r.state[i]);
@@ -1533,7 +2098,7 @@ int main(int argc, char **argv) {
         if (WANT(s.name)) {
             run(&s, &r);
             report(&s, &r);
-            for (int i = 0; i < NU; i++)
+            for (int i = 0; i < nu; i++)
                 CHECK(r.state[i] == ALINK_USB_ST_RATE_LOCK && fabs(r.vcxo[i] - r.ff[i]) < 1.0,
                       "H1: unit %d rate-locked, VCXO %.2f at the feed-forward %.2f (not pulled by an empty ring)", i,
                       r.vcxo[i], r.ff[i]);
@@ -1565,7 +2130,7 @@ int main(int argc, char **argv) {
         if (WANT(s.name)) {
             run(&s, &r);
             report(&s, &r);
-            for (int i = 0; i < NU; i++)
+            for (int i = 0; i < nu; i++)
                 CHECK(r.state[i] == ALINK_USB_ST_PHASE_LOCK && r.anchors[i] == 1 && r.underruns[i] == 0 &&
                       fabs(r.vcxo[i] - r.ff[i]) < 1.0,
                       "H2: unit %d phase-locked without a stream (state %u, anchors %u)", i, r.state[i], r.anchors[i]);
@@ -1639,6 +2204,7 @@ int main(int argc, char **argv) {
     // ----------------------------------------------------------------------
     lock_scenarios(only);
     usb3b_scenarios(only);
+    gen_scenarios(only);                // WP FWTB3
     printf("alink_usb_sim: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
