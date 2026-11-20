@@ -7,7 +7,9 @@
 //    UART, I2C need the Pico SDK; the MIDI path is tested end to end in
 //    test_midi_control.c): in each entry, the guard comes before the first
 //    opcode test or bulk-lock / session operation.  The sources are found
-//    next to this file (run.sh compiles it by absolute path).
+//    next to this file (run.sh compiles it by absolute path).  The alink
+//    sender is dual-stack (WP FWPG4): there the check is that its EP0 path
+//    routes by the page byte before any opcode test (INT-R1).
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -103,10 +105,22 @@ static void test_call_sites(void) {
     order("../DSPi/midi_control.c", "case MF_EV_SET_HEADER:", "vendor_page_refused(dec.wIndex)", mh, 2);
     static const char *const mr[] = { "pending.dispatch    = true" };
     order("../DSPi/midi_control.c", "case MF_EV_REQUEST: {", "vendor_page_refused(dec.wIndex)", mr, 1);
-    // alink sender (same VID:PID): before MS OS 2.0 and the GET / SET paths.
-    static const char *const snd[] = { "MS_VENDOR_CODE)", "handle_get(rhport, req)", "REQ_EXTENSION)" };
+    // alink sender (same VID:PID): dual-stack from WP FWPG4 (sender_vc.c), so
+    // it no longer calls vendor_page_refused (INT-R1). What holds instead: the
+    // EP0 callback keeps MS OS 2.0 to page 0 and hands every other request to
+    // snd_vc_setup before any opcode test; snd_vc_setup and snd_vc_data route
+    // by the page byte, page 0 to the 1.1.6 handlers and every other page to
+    // the paged front end, which answers VC_ERR_UNKNOWN for a page or command
+    // it does not have (DSPi-Sender/tests/test_vc.c).
+    static const char *const snd[] = { "MS_VENDOR_CODE)", "snd_vc_setup(&r" };
     order("../DSPi-Sender/sender_vendor.c", "if (stage == CONTROL_STAGE_SETUP) {",
-          "vendor_page_refused(req->wIndex)", snd, 3);
+          "(req->wIndex >> 8) == 0 && req->bRequest == MS_VENDOR_CODE", snd, 2);
+    static const char *const vcs[] = { "legacy_setup(r, out, n)" };
+    order("../DSPi-Sender/sender_vc.c", "snd_vc_action_t snd_vc_setup(",
+          "(r->wIndex >> 8) == 0 ? legacy_setup", vcs, 1);
+    static const char *const vcd[] = { "snd_hook_ext_set(r->wValue, data)" };
+    order("../DSPi-Sender/sender_vc.c", "bool snd_vc_data(",
+          "(r->wIndex >> 8) != 0) return paged_data", vcd, 1);
 }
 
 int main(void) {

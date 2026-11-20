@@ -744,7 +744,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // convert to S24 in place first, so ADAT always sees converted
         // samples; otherwise fuse convert+interleave and skip the in-place
         // pass.  Then S/PDIF pair 0.
-#if DSPI_ALINK || DSPI_ALINK_USB
+#if DSPI_ALINK || DSPI_ALINK_USB || DSPI_ALINK_SPDIF   // review fwbc N9: S/PDIF-only builds too
         pipeline_click_inject(buf_out, 0, CORE1_EQ_FIRST_OUTPUT - 1);
 #endif
         if (finalize_s24) {
@@ -885,7 +885,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // Finalize outputs 0-7 (see output_s24.h).  ADAT active: convert to
         // S24 in place first, so ADAT always sees converted samples; otherwise
         // fuse convert+interleave per pair and skip the in-place pass.
-#if DSPI_ALINK || DSPI_ALINK_USB
+#if DSPI_ALINK || DSPI_ALINK_USB || DSPI_ALINK_SPDIF   // review fwbc N9: S/PDIF-only builds too
         pipeline_click_inject(buf_out, 0, NUM_SPDIF_INSTANCES * 2 - 1);
 #endif
         if (finalize_s24) {
@@ -1830,7 +1830,7 @@ bool get_slot_consumer_fill_frames(uint slot, uint32_t *frames) {
     return slot_ring_fill(slot, frames);
 }
 
-#if DSPI_ALINK || DSPI_ALINK_USB
+#if DSPI_ALINK || DSPI_ALINK_USB || DSPI_ALINK_SPDIF   // review fwbc N9: S/PDIF-only builds too
 volatile int8_t pipeline_click_output = -1;
 
 // Flash: the alink servo reads it once per tick, the anchor a few times.

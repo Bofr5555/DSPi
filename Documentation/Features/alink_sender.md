@@ -1,6 +1,6 @@
 # Alink sender: a Pico 2 as a USB sound card driving alink outputs
 
-*Last updated: 2026-11-13 (WP LK4)*
+*Last updated: 2026-11-19 (WP FWPG4: dual-stack vendor interface, section 7)*
 *Status: implemented, host-tested; not yet run on hardware*
 *Platforms: RP2350 only*
 
@@ -152,6 +152,12 @@ sender layout of 7.1). Also `REQ_GET_PLATFORM` (0x7F; 0 output channels), `REQ_G
 `REQ_GET_BUILD_INFO` (0x80), `REQ_SAVE_OUTPUT_CONFIG` (0x52: stores `EXT_ALINK_TX` and `EXT_ALINK_CONFIG` in their own
 flash sector, below DSPi's preset area), `REQ_ENTER_BOOTLOADER` (0xF0). Every other request STALLs. Defaults are those
 of 2.8.8: no alink enabled, L1, 8 channels, 48 kHz, audio, no SYNC, TX_DISABLE all high.
+
+All of the above is page 0 (`wIndex` high byte 0). The same requests are also reached through upstream 1.1.7's paged
+envelope (WP FWPG4): SYS `0x01` (discovery, identity, `ENTER_BOOTLOADER`), STORE `0x02` `OUTPUT_CONFIG_SAVE` and the
+tunnel `0xE010` on page `0xE0`; every other page is `VC_ERR_UNKNOWN`. `sender_vc.c` is the front end of both envelopes
+(pure, host-tested by `tests/test_vc.c`), `sender_vendor.c` the TinyUSB glue and the handlers. The rules are
+`extension_channel_spec.md` 1.3.5.
 
 ### 7.1 `EXT_ALINK_DIAG` on a sender (layout `0x81`)
 

@@ -615,6 +615,9 @@ static const uint16_t ext_ids[] = {
 #endif
 #if DSPI_ALINK || DSPI_ALINK_USB
     EXT_FRAME_COUNTER,
+#endif
+// review fwbc N9: time base 3 needs EXT_APPLY_AT_FRAME on an S/PDIF-only build too.
+#if DSPI_ALINK || DSPI_ALINK_USB || DSPI_ALINK_SPDIF
     EXT_APPLY_AT_FRAME,
 #endif
 #if DSPI_ALINK
@@ -650,7 +653,7 @@ static uint16_t ext_set_len(uint16_t id) {
         case EXT_ALINK_PHASE:         return ALINK_PHASE_LEN;
         case EXT_ALINK_STATS_RESET:  return 1;
 #endif
-#if DSPI_ALINK || DSPI_ALINK_USB
+#if DSPI_ALINK || DSPI_ALINK_USB || DSPI_ALINK_SPDIF
         case EXT_APPLY_AT_FRAME:     return ALINK_APPLY_LEN;
 #endif
 #if DSPI_ALINK_USB
@@ -739,7 +742,7 @@ static bool ext_handle_set(uint16_t id, const uint8_t *p, uint16_t len) {
         case EXT_ALINK_STATS_RESET:
             return alink_input_stats_reset(p[0]);
 #endif
-#if DSPI_ALINK || DSPI_ALINK_USB
+#if DSPI_ALINK || DSPI_ALINK_USB || DSPI_ALINK_SPDIF
         case EXT_APPLY_AT_FRAME: {
             // Byte 12 (reserved on the alink) selects the time base: 0 the
             // alink frame F, 1 the USB sample index S, 2 a USB bus frame (2.9.6).
@@ -859,6 +862,8 @@ static bool ext_handle_get(uint16_t id, uint16_t wLength, uint8_t *resp) {
             }
             n = 20;
             break;
+#endif
+#if DSPI_ALINK || DSPI_ALINK_USB || DSPI_ALINK_SPDIF
         case EXT_APPLY_AT_FRAME:
 #if DSPI_ALINK_SPDIF
             // -- WP FWSP2 -- the queue of the first EXT_TIME_BASE entry (2.10.4).

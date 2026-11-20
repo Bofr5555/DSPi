@@ -83,7 +83,8 @@ extern int32_t buf_l[192], buf_r[192];
 extern int32_t buf_out[NUM_OUTPUT_CHANNELS][192];
 #endif
 
-#if (defined(DSPI_ALINK) && DSPI_ALINK) || (defined(DSPI_ALINK_USB) && DSPI_ALINK_USB)
+#if (defined(DSPI_ALINK) && DSPI_ALINK) || (defined(DSPI_ALINK_USB) && DSPI_ALINK_USB) || \
+    (defined(DSPI_ALINK_SPDIF) && DSPI_ALINK_SPDIF)   // review fwbc N9
 // -- WP LK6 --
 // Alink apply op CLICK: the output that gets a one-sample impulse of
 // PIPELINE_CLICK_LEVEL (-20 dBFS) at sample 0 of the next processed block,
